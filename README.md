@@ -12,10 +12,11 @@ such crate's directory). See `TRADEMARK.md` for the trademark policy
 and `CONTRIBUTING.md` for the contribution flow (DCO sign-off
 required).
 
-**Where the project stands.** Concept. Nothing builds yet. The
-hardware layers it will stand on are being brought up in
-[volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion);
-code lands here once that project has lit a panel. The
+**Where the project stands.** Concept. Nothing builds yet. The fabric is
+written and tested on the host first, as an ordinary Rust workspace, and
+meets the board through the hardware layers of
+[volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion)
+as those light up. The
 [wiki](https://github.com/foonerd/evo-esp32/wiki) has the
 [hardware](https://github.com/foonerd/evo-esp32/wiki/Hardware) the
 first device will need.
@@ -62,7 +63,7 @@ make a panel a player.
 | `firmware/` | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board crate it stands on. |
 
 None of it exists yet. The layout is the intent; it changes when the
-first lit panel shows what the MCU allows.
+host build and then the first lit panel show what holds.
 
 ## Related
 
