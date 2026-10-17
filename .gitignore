@@ -1,0 +1,32 @@
+# Rust build output
+target/
+
+# embuild: ESP-IDF checkout and toolchains, fetched per firmware crate on first build
+.embuild/
+
+# Images; distributed through releases, not the tree
+dist/
+*.bin
+*.elf
+
+# Signing keys - never commit; public halves under keys/ are committed
+*.key
+*.pem
+!keys/*-public.pem
+
+# Editor and OS junk
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# AI tooling - never committed
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.cursor/
+.github/copilot-instructions.md
+
+# Local build logs
+*.log

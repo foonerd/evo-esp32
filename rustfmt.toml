@@ -1,0 +1,8 @@
+# rustfmt configuration for evo-device-audio.
+#
+# Mirrors evo-core. 80-column width is the project-wide aesthetic
+# choice; Unix line endings normalise contributors on Windows. Every
+# editor and every CI run produces identical output.
+
+max_width = 80
+newline_style = "Unix"
