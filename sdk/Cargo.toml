@@ -1,0 +1,19 @@
+[package]
+name = "evo-esp32-sdk"
+description = "The surface a plugin implements against on the evo-esp32 fabric: the catalogue types, the plugin contract, subjects, happenings and projections."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# The surface others implement against — overrides the workspace default
+# (BUSL-1.1) so plugin authors building against the SDK have no
+# licensing restrictions. See LICENSE in this directory.
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

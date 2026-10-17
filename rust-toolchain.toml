@@ -1,0 +1,6 @@
+# The host workspace: sdk, catalogue, steward, the host distribution. Each
+# firmware crate pins its own channel (ESP-IDF std targets need nightly
+# and build-std).
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "sdk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "BUSL-1.1"
+repository = "https://github.com/foonerd/evo-esp32"
+publish = false
+
+# One set of lints for every crate; check.sh denies warnings.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+type_complexity = "allow"
+
+[workspace.dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
