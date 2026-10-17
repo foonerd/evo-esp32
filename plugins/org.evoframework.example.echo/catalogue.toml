@@ -1,0 +1,13 @@
+# The catalogue the example echo plugin stocks: evo-core's minimal example,
+# spelled the same, so the two fabrics read the same declaration.
+
+[[racks]]
+name = "example"
+family = "domain"
+kinds = ["registrar"]
+charter = "Minimal example rack."
+
+[[racks.shelves]]
+name = "echo"
+shape = 1
+description = "Echoes inputs back."

@@ -1,0 +1,22 @@
+[package]
+name = "org-evoframework-example-echo"
+description = "Example singleton respondent plugin for evo-esp32: echoes its input back and keeps the last echo as a subject."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# Pedagogical reference plugin — Apache 2.0 so plugin authors can copy
+# and adapt the patterns into their own plugins without restriction.
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }
+evo-esp32-catalogue = { path = "../../catalogue" }
+serde_json = { workspace = true }

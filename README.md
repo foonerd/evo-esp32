@@ -12,11 +12,15 @@ such crate's directory). See `TRADEMARK.md` for the trademark policy
 and `CONTRIBUTING.md` for the contribution flow (DCO sign-off
 required).
 
-**Where the project stands.** Concept. Nothing builds yet. The fabric is
-written and tested on the host first, as an ordinary Rust workspace, and
-meets the board through the hardware layers of
+**Where the project stands.** The fabric exists and runs on the host:
+the SDK a plugin implements against, the steward that admits plugins,
+owns subjects, composes, emits happenings and serves projections, the
+catalogue tool that validates a `catalogue.toml` and checks a plugin set
+stocks it, and one example plugin driven through all of it in a test.
+Every crate but the catalogue tool builds for bare-metal RISC-V. No
+board runs it yet; the hardware layers come from
 [volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion)
-as those light up. The
+as they light up. The
 [wiki](https://github.com/foonerd/evo-esp32/wiki) has the
 [hardware](https://github.com/foonerd/evo-esp32/wiki/Hardware) the
 first device will need.
@@ -52,18 +56,33 @@ and the HTTP client are the companion project's `hal`, `drivers`,
 writes the application: the catalogue, the steward, the plugins that
 make a panel a player.
 
-## What this repository will contain
+## What this repository contains
 
-| Part | Holds |
-| --- | --- |
-| `catalogue/` | The declared device: racks, shelves, slots. Resolved at build time; a firmware image is one catalogue. |
-| `steward/` | The in-process steward: admits the plugin crates the catalogue names, owns the subjects, emits happenings, serves projections to the panel and to one network client protocol. |
-| `sdk/` | The slot contracts and the types a plugin implements. Apache-2.0. |
-| `plugins/` | Brand-neutral plugins for the audio domain on an MCU: sources (TF card, HTTP radio), decode, delivery over I2S, metadata, artwork, presentation on the panel. |
-| `firmware/` | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board crate it stands on. |
+| Part | Crate | Holds | Licence |
+| --- | --- | --- | --- |
+| `sdk/` | `evo-esp32-sdk` | The surface a plugin implements against: the catalogue types, the plugin contract, respondents and wardens, subjects, happenings, projections, the context. `no_std`. | Apache-2.0 |
+| `steward/` | `evo-esp32-steward` | The sole authority: admission against the catalogue, the subject tables with per-plugin contributions, composition, a bounded happenings ring with gap-aware replay, projections by rack or subject, custody and ticking of wardens. `no_std`. | BSL 1.1 |
+| `catalogue/` | `evo-esp32-catalogue` | The host tool: parse and validate `catalogue.toml`, check a plugin set stocks it, emit the catalogue as Rust for a firmware's build. | BSL 1.1 |
+| `plugins/` | `org-evoframework-example-echo` | The pedagogical plugin: one shelf, one verb, one subject. | Apache-2.0 |
+| `firmware/` | | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board crate it stands on. None yet. | BSL 1.1 |
 
-None of it exists yet. The layout is the intent; it changes when the
-host build and then the first lit panel show what holds.
+The audio plugins (sources, decode, delivery over I2S, metadata,
+artwork, presentation on the panel) and a host distribution that runs
+them against a desktop audio output and a simulated panel are next.
+
+## Build
+
+The host workspace builds on stable Rust, pinned by `rust-toolchain.toml`.
+
+```sh
+scripts/check.sh   # format, clippy, tests, docs, no_std on bare metal, scripts, then every firmware built
+cargo run -p evo-esp32-catalogue -- check plugins/org.evoframework.example.echo/catalogue.toml
+```
+
+The `no_std` claim is proved, not asserted: the check builds the SDK, the
+steward and the example plugin for `riscv32imac-unknown-none-elf`, a
+target with no std at all. With a firmware crate present and no ESP
+toolchain on the machine, the check fails and says so.
 
 ## Related
 

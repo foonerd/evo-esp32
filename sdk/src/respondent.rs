@@ -11,6 +11,7 @@
 use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
+use crate::catalogue::ShelfRef;
 use crate::context::Context;
 use crate::plugin::Plugin;
 use crate::subject::SubjectId;
@@ -28,6 +29,8 @@ pub struct CorrelationId(pub u32);
 pub struct Request {
     /// Pairs the response.
     pub cid: CorrelationId,
+    /// The shelf it is addressed to. The steward routes by this.
+    pub shelf: ShelfRef,
     /// What is asked: `play`, `pause`, `seek`, `list`, in the shelf's
     /// vocabulary.
     pub verb: String,
@@ -98,6 +101,7 @@ mod tests {
     fn responses_carry_the_request_id() {
         let req = Request {
             cid: CorrelationId(7),
+            shelf: ShelfRef::new("example", "echo"),
             verb: "play".into(),
             subject: None,
             args: Value::Null,

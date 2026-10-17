@@ -16,7 +16,11 @@ use crate::{Ticks, Value};
 pub enum ContextError {
     /// The subject is not in the registry.
     UnknownSubject(SubjectId),
-    /// The caller does not have write authority over this subject's kind.
+    /// The caller does not have write authority over this subject.
+    ///
+    /// Reserved: this version has no custody table, and every admitted
+    /// plugin may write any subject. The variant exists so the contract
+    /// does not change when the table arrives.
     NotPermitted,
     /// The steward's tables are full.
     Full,

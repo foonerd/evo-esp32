@@ -26,7 +26,7 @@ if ! rustup target list --installed | grep -qx "$bare"; then
   echo "target $bare is not installed: rustup target add $bare" >&2
   exit 1
 fi
-cargo build -p evo-esp32-sdk --target "$bare" --locked
+cargo build -p evo-esp32-sdk -p evo-esp32-steward -p org-evoframework-example-echo --target "$bare" --locked
 
 echo "== scripts"
 for f in scripts/*.sh; do bash -n "$f"; done

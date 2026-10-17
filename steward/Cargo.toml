@@ -1,0 +1,16 @@
+[package]
+name = "evo-esp32-steward"
+description = "The evo-esp32 steward: admits the plugins a catalogue names, owns the subjects, composes contributions, emits happenings, serves projections. In-process, no_std."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../sdk" }
+serde_json = { workspace = true }

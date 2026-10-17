@@ -54,6 +54,32 @@ pub struct Shelf {
     pub description: String,
 }
 
+/// Names one shelf: the rack and the shelf within it. What a request or
+/// an assignment is addressed to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ShelfRef {
+    /// The rack.
+    pub rack: String,
+    /// The shelf within it.
+    pub shelf: String,
+}
+
+impl ShelfRef {
+    /// A reference from rack and shelf names.
+    pub fn new(rack: impl Into<String>, shelf: impl Into<String>) -> Self {
+        Self {
+            rack: rack.into(),
+            shelf: shelf.into(),
+        }
+    }
+}
+
+impl core::fmt::Display for ShelfRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}/{}", self.rack, self.shelf)
+    }
+}
+
 /// A concern the device has.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rack {

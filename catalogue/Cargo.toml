@@ -1,0 +1,21 @@
+[package]
+name = "evo-esp32-catalogue"
+description = "The catalogue tool: reads a distribution's catalogue.toml, validates it, checks the plugins it names stock it, and emits the catalogue as Rust for a firmware's build."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "evo-esp32-catalogue"
+path = "src/main.rs"
+
+[dependencies]
+evo-esp32-sdk = { path = "../sdk" }
+evo-esp32-steward = { path = "../steward" }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
