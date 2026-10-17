@@ -18,6 +18,16 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
+echo "== no_std, on bare metal"
+# The sdk claims no_std; proving it means building it for a target that
+# has no std at all.
+bare=riscv32imac-unknown-none-elf
+if ! rustup target list --installed | grep -qx "$bare"; then
+  echo "target $bare is not installed: rustup target add $bare" >&2
+  exit 1
+fi
+cargo build -p evo-esp32-sdk --target "$bare" --locked
+
 echo "== scripts"
 for f in scripts/*.sh; do bash -n "$f"; done
 if command -v shellcheck >/dev/null; then
