@@ -13,11 +13,14 @@ and `CONTRIBUTING.md` for the contribution flow (DCO sign-off
 required).
 
 **Where the project stands.** The fabric exists and runs on the host:
-the SDK a plugin implements against, the steward that admits plugins,
-owns subjects, composes, emits happenings and serves projections, the
-catalogue tool that validates a `catalogue.toml` and checks a plugin set
-stocks it, and one example plugin driven through all of it in a test.
-Every crate but the catalogue tool builds for bare-metal RISC-V. No
+the SDK a plugin implements against, with the audio slot contracts typed
+in; the steward that admits plugins, owns subjects, composes, emits
+happenings and serves projections; the catalogue tool that validates a
+`catalogue.toml` and checks a plugin set stocks it; three audio plugins
+(a file source, a simulated decoder, a null output) and the example; and
+a host distribution that compiles its catalogue in, plays a track through
+the steward end to end and draws the companion's face from the
+projections. Every device-shaped crate builds for bare-metal RISC-V. No
 board runs it yet; the hardware layers come from
 [volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion)
 as they light up. The
