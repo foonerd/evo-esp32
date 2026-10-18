@@ -1,9 +1,13 @@
-# The check on every push and pull request. Host workspace only until a
-# firmware crate exists; check.sh is the one source of what is checked.
+# The check on every push and pull request, the firmware built for its
+# device, and the flashable image as a build artefact.
 #
-# When a firmware crate lands, this grows the steps volumio-esp-companion's
-# ci.yml has: the firmware's nightly, ldproxy, the .embuild cache, the
-# image as an artefact.
+# The toolchain steps are volumio-esp-companion's ci.yml (itself
+# esp-rs/esp-idf-template's recipe, green for the esp32c5), with the
+# versions this repository pins: rust-toolchain.toml in each crate names its channel
+# and components; ldproxy is built at the version the firmware was first
+# built with. ESP-IDF and the chip's GCC are fetched by embuild into the
+# firmware crate's .embuild/ and cached between runs. check.sh is the one
+# source of what is checked.
 name: ci
 
 on:
@@ -16,19 +20,45 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Toolchain
+      - name: System packages
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shellcheck
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            cmake ninja-build ccache libudev-dev libffi-dev libssl-dev \
+            flex bison gperf python3 python3-pip python3-venv dfu-util libusb-1.0-0 shellcheck
+          pip install --break-system-packages esptool==5.6.0
+      - name: Rust toolchains
+        run: |
           rustup toolchain install && rustup target add riscv32imac-unknown-none-elf
-          rustup show active-toolchain
+          (cd firmware/waveshare-esp32-c5-touch-lcd-28 && rustup toolchain install)
+          rustup show
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
+          workspaces: |
+            .
+            firmware/waveshare-esp32-c5-touch-lcd-28
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: ESP-IDF cache
+        uses: actions/cache@v6
+        with:
+          path: firmware/waveshare-esp32-c5-touch-lcd-28/.embuild
+          key: embuild-${{ runner.os }}-${{ hashFiles('firmware/waveshare-esp32-c5-touch-lcd-28/.cargo/config.toml', 'firmware/waveshare-esp32-c5-touch-lcd-28/Cargo.lock') }}
+      - name: ldproxy
+        # The runner has no default toolchain; name the host's so cargo does
+        # not warn about the repository's toolchain file overriding one.
+        run: cargo +1.98.1 install --locked --version 0.3.5 ldproxy
       - name: Check
         run: scripts/check.sh
+      - name: Image
+        run: scripts/image.sh firmware/waveshare-esp32-c5-touch-lcd-28
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware
+          path: |
+            dist/*.bin
+            dist/*.SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
           name: host-panel

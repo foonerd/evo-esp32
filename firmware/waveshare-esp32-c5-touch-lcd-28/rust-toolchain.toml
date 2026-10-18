@@ -1,0 +1,5 @@
+# Pinned to the nightly that produced the verified 2026-10-17 image
+# (rustc 1.101.0-nightly, commit-date 2026-10-16). build-std needs nightly.
+[toolchain]
+channel = "nightly-2026-10-17"
+components = ["rust-src", "rustfmt", "clippy"]

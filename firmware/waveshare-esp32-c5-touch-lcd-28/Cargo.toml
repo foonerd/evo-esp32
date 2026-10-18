@@ -1,0 +1,37 @@
+[package]
+name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+repository = "https://github.com/foonerd/evo-esp32"
+publish = false
+description = "evo-esp32 on the Waveshare ESP32-C5-Touch-LCD-2.8: the player's firmware for its first board"
+
+[[bin]]
+name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
+path = "src/main.rs"
+harness = false
+
+# A workspace of its own: ESP-IDF target, nightly channel, own sdkconfig.
+[workspace]
+
+[dependencies]
+# The companion's drivers, by its first tag (MIT; the dependency runs this
+# way only, never the reverse).
+ch32v003-expander = { git = "https://github.com/foonerd/volumio-esp-companion", tag = "v0.1.0" }
+es8311 = { git = "https://github.com/foonerd/volumio-esp-companion", tag = "v0.1.0" }
+embedded-hal-bus = "0.3"
+esp-idf-svc = { version = "0.53", features = ["std", "binstart"] }
+log = "0.4"
+anyhow = "1"
+
+[build-dependencies]
+embuild = "0.33.5"
+
+[profile.release]
+opt-level = "s"
+debug = false
+
+[profile.dev]
+opt-level = "z"
+debug = true

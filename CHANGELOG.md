@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the first firmware, and the
+  first sound. std Rust on ESP-IDF v5.5.5 (the companion's pin and build
+  files); the IO expander and the ES8311 through the companion's drivers
+  by its tag v0.1.0; I2S0 as master in Philips format, 16-bit stereo, on
+  the vendor BSP's pins (BCLK GPIO24, WS GPIO25, data GPIO26, no MCLK);
+  a 1 kHz tone for two seconds every ten through the board's speaker,
+  each logged with the time the write took. Bench: chip ID `83 11 01`,
+  352 800 bytes in 1 972 ms against 2 000 expected. Found on the way: the
+  C5 has no FPU, and 88 200 software sines took eight seconds and tripped
+  the idle task's watchdog; the tone is one exact cycle, tiled.
+- `scripts/image.sh` from the companion, naming the image by the crate;
+  `scripts/check.sh` builds every firmware crate with clippy and drops an
+  esp-idf-sys CMake cache made against another ESP-IDF version; CI gains
+  the companion's toolchain steps and uploads the image.
+
 - `evo-esp32-sdk`: `contract::audio::playback::FrameSink`, where decoded
   frames go: the distribution owns the sink and hands it to the decoder;
   `start`, non-blocking `write` that says how much it took, `flush`,

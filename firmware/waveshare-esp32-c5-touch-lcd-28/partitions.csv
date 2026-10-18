@@ -1,0 +1,6 @@
+# Name,     Type, SubType, Offset,   Size, Flags
+# 4 MB declared flash (sdkconfig.defaults); one 3 MB app. ESP-IDF's
+# "single app large" table stops at 1500 KB, which the app outgrew.
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xF000,   0x1000,
+factory,    app,  factory, 0x10000,  3M,

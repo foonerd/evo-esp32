@@ -1,0 +1,17 @@
+# Rust std needs more than the default main task stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
+
+# Board has 32 MB flash. Declaring 4 MB is deliberate for a bring-up image:
+# smaller than actual is safe, and avoids >16 MB addressing questions.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# Board has 8 MB PSRAM. Probe it, but keep booting if init fails so the
+# log reports the result instead of a boot loop.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# The card: long file names (the default is 8.3 only), buffers on the heap.
+CONFIG_FATFS_LFN_HEAP=y

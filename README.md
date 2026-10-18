@@ -21,13 +21,17 @@ happenings and serves projections; the catalogue tool that validates a
 example; and a host distribution that compiles its catalogue in, decodes
 FLAC, MP3 and WAV through the steward into a paced sink, bit-exact for
 the lossless two, and draws the companion's face from the projections.
-Every device-shaped crate builds for bare-metal RISC-V. No board runs it
-yet; the hardware layers come from
+Every device-shaped crate builds for bare-metal RISC-V. The first board
+makes a sound: `firmware/waveshare-esp32-c5-touch-lcd-28` brings up the
+Waveshare ESP32-C5-Touch-LCD-2.8's codec and amplifier through the
+companion's drivers and plays a tone through its speaker over I2S, paced
+by the I2S clock to within two percent. The fabric is not on the board
+yet; that is the next step, now that frames have somewhere to go. The
+hardware layers come from
 [volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion)
-as they light up. The
-[wiki](https://github.com/foonerd/evo-esp32/wiki) has the
+by tag. The [wiki](https://github.com/foonerd/evo-esp32/wiki) has the
 [hardware](https://github.com/foonerd/evo-esp32/wiki/Hardware) the
-first device will need.
+first device needs.
 
 ## How it fits together
 

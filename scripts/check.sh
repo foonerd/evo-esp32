@@ -67,7 +67,18 @@ elif ! command -v ldproxy >/dev/null; then
 else
   for crate in "${crates[@]}"; do
     echo "-- $crate"
-    (cd "$crate" && cargo fmt --check && cargo build --release)
+    # esp-idf-sys keeps its CMake build under target/ and reuses it; one
+    # configured against another ESP-IDF version than the crate pins fails
+    # on the old tree's missing toolchain file. Drop it first.
+    pin=$(sed -n 's/^ESP_IDF_VERSION *= *"\(.*\)"/\1/p' "$crate/.cargo/config.toml")
+    for cache in "$crate"target/*/release/build/esp-idf-sys/*/out/build/CMakeCache.txt; do
+      [ -f "$cache" ] || continue
+      if [ -n "$pin" ] && ! grep -q "esp-idf/$pin/" "$cache"; then
+        echo "   stale esp-idf-sys build (not $pin), removing"
+        rm -rf "${cache%/out/build/CMakeCache.txt}"
+      fi
+    done
+    (cd "$crate" && cargo fmt --check && cargo clippy --release -- -D warnings && cargo build --release)
   done
 fi
 
