@@ -1,0 +1,31 @@
+# The check on every push and pull request. Host workspace only until a
+# firmware crate exists; check.sh is the one source of what is checked.
+#
+# When a firmware crate lands, this grows the steps volumio-esp-companion's
+# ci.yml has: the firmware's nightly, ldproxy, the .embuild cache, the
+# image as an artefact.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shellcheck
+          rustup toolchain install && rustup target add riscv32imac-unknown-none-elf
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check
+        run: scripts/check.sh
