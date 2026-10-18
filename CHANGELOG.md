@@ -19,8 +19,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `evo-esp32-host` (`distributions/host/`): the catalogue compiled in by
   `build.rs` and checked against the admitted plugins at start; a track
   listed, played to its end and released, projections and happenings
-  printed. `check.sh` runs it once and builds the two `no_std` plugins
-  for bare-metal RISC-V.
+  printed; the panel as a consumer, drawing the companion's resting face
+  from the playback and delivery projections through `companion-core`
+  (by commit) and writing the last playing frame as a PNG. `check.sh`
+  runs it once, keeps the PNG under `target/` (CI uploads it) and builds
+  the two `no_std` plugins for bare-metal RISC-V.
 - `evo-esp32-sdk` (Apache-2.0): the surface a plugin implements against.
   The catalogue as data (racks, shelves, shapes; validated), the plugin
   contract (describe, load, unload, health), respondents and wardens,

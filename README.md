@@ -67,10 +67,10 @@ make a panel a player.
 | | `org-evoframework-source-files` | `source/files` over a directory on a host: lists folders and audio files, announces each track as a subject. std. | Apache-2.0 |
 | | `org-evoframework-playback-sim` | `playback/decode` against the clock: custody of a track, position, pause, resume, seek, release at the end; decodes nothing. `no_std`. | Apache-2.0 |
 | | `org-evoframework-delivery-null` | `delivery/output` with no sink: volume and mute on an `output` subject. `no_std`. | Apache-2.0 |
-| `distributions/host/` | `evo-esp32-host` | What a firmware distribution does, on a desktop: the catalogue compiled in by `build.rs`, checked against the plugins at start, the three admitted, a track listed and played through the steward, projections and happenings printed. | BSL 1.1 |
+| `distributions/host/` | `evo-esp32-host` | What a firmware distribution does, on a desktop: the catalogue compiled in by `build.rs`, checked against the plugins at start, the three admitted, a track listed and played through the steward, projections and happenings printed, and the panel as a consumer: the companion's pages drawn from the playback and delivery projections, written as a PNG. | BSL 1.1 |
 | `firmware/` | | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board crate it stands on. None yet. | BSL 1.1 |
 
-Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop. Next: that loop drawing the companion's pages from the playback projection; a decoder behind `playback/decode`; the ES8311 behind `delivery/output`; the first firmware distribution on the companion's board crate.
+Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop; `distributions/host/src/panel.rs` is that consumer, mapping the fabric's state to the companion's `PlayerState` and drawing with its `core`. The companion is a dependency by commit until its first tag, and the dependency runs that way only. Next: a decoder behind `playback/decode`; the ES8311 behind `delivery/output`; the first firmware distribution on the companion's board crate.
 
 ## Build
 
@@ -79,7 +79,7 @@ The host workspace builds on stable Rust, pinned by `rust-toolchain.toml`.
 ```sh
 scripts/check.sh   # format, clippy, tests, docs, no_std on bare metal, the host distribution end to end, scripts, then every firmware built
 cargo run -p evo-esp32-catalogue -- check distributions/host/catalogue.toml
-cargo run -p evo-esp32-host -- --dir ~/Music --seconds 5
+cargo run -p evo-esp32-host -- --dir ~/Music --seconds 5 --panel face.png
 ```
 
 The `no_std` claim is proved, not asserted: the check builds the SDK, the

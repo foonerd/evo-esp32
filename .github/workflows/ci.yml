@@ -29,3 +29,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check
         run: scripts/check.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: host-panel
+          path: target/host-panel.png

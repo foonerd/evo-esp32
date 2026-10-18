@@ -6,12 +6,15 @@
 //!
 //! What a firmware distribution does, done here without a board: the
 //! catalogue compiled in, the plugins admitted, a consumer loop that
-//! reads projections and the happenings stream. The consumer is where the
-//! panel's pages will draw from; here it prints.
+//! reads projections and the happenings stream. The consumer is the
+//! panel: it draws the companion's pages from the projections and, on
+//! the host, writes the last frame as a PNG.
 //!
 //! ```text
-//! evo-esp32-host --dir ~/Music --seconds 5
+//! evo-esp32-host --dir ~/Music --seconds 5 --panel face.png
 //! ```
+
+mod panel;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -45,17 +48,23 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
 
   --dir PATH        the music directory (default .)
   --seconds N       how long to run (default 5)
+  --panel PATH      write the panel's last frame as a PNG
+  --rotation DEG    the panel's rotation, 0, 90, 180 or 270 (default 0)
   --help";
 
 struct Cli {
     dir: PathBuf,
     seconds: u64,
+    panel: Option<PathBuf>,
+    rotation: u16,
 }
 
 fn parse_args() -> Result<Cli, String> {
     let mut cli = Cli {
         dir: PathBuf::from("."),
         seconds: 5,
+        panel: None,
+        rotation: 0,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -72,6 +81,17 @@ fn parse_args() -> Result<Cli, String> {
                 cli.seconds = value.parse().map_err(|_| {
                     format!("--seconds must be a number, got {value:?}")
                 })?;
+            }
+            "--panel" => cli.panel = Some(PathBuf::from(value)),
+            "--rotation" => {
+                cli.rotation = match value.parse() {
+                    Ok(r @ (0 | 90 | 180 | 270)) => r,
+                    _ => {
+                        return Err(format!(
+                        "--rotation must be 0, 90, 180 or 270, got {value:?}"
+                    ))
+                    }
+                };
             }
             other => return Err(format!("unknown option {other}\n{USAGE}")),
         }
@@ -225,6 +245,21 @@ fn main() {
 
     let mut seen = Seq(0);
     let mut last_line = String::new();
+    let mut panel = panel::Panel::new(cli.rotation);
+    // The frame worth keeping is the last one drawn while playing.
+    let mut was_playing = false;
+    let mut saved = false;
+    let save_panel = |panel: &panel::Panel| {
+        if let Some(path) = &cli.panel {
+            match panel.save(path) {
+                Ok(()) => println!("panel written to {}", path.display()),
+                Err(e) => {
+                    eprintln!("panel: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
     while start.elapsed() < Duration::from_secs(cli.seconds) {
         let t = now();
         steward.tick(t);
@@ -244,11 +279,25 @@ fn main() {
         let p = steward.projection(ProjectionKey::Rack {
             name: shelf::PLAYBACK.into(),
         });
+        let output = steward
+            .projection(ProjectionKey::Rack {
+                name: shelf::DELIVERY.into(),
+            })
+            .subjects
+            .first()
+            .and_then(|s| from_value::<delivery::State>(&s.state).ok());
         if let Some(st) = p
             .subjects
             .first()
             .and_then(|s| from_value::<playback::State>(&s.state).ok())
         {
+            let playing = st.status == playback::Status::Playing;
+            if was_playing && !playing && !saved {
+                save_panel(&panel);
+                saved = true;
+            }
+            was_playing = playing;
+            panel.draw(&panel::player_state(&st, output.as_ref()));
             let line = format!(
                 "playback: {:?} {} ms{}",
                 st.status,
@@ -274,6 +323,9 @@ fn main() {
         out.as_of.0,
         serde_json::to_string(&out.subjects[0].state).unwrap_or_default()
     );
+    if !saved {
+        save_panel(&panel);
+    }
     steward.shutdown(now());
     println!("shut down after {} ms", now().0);
 }

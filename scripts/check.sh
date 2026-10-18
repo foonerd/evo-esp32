@@ -32,11 +32,13 @@ cargo build -p evo-esp32-sdk -p evo-esp32-steward -p org-evoframework-example-ec
 
 echo "== host distribution"
 # The fabric end to end on this machine: catalogue checked, three plugins
-# admitted, one track listed, played to its end, custody released.
+# admitted, one track listed, played to its end, custody released, and
+# the companion's face drawn from the projection into target/.
 tmp=$(mktemp -d)
 touch "$tmp/song.flac"
-cargo run -q -p evo-esp32-host --locked -- --dir "$tmp" --seconds 1 | tee "$tmp/run.log"
+cargo run -q -p evo-esp32-host --locked -- --dir "$tmp" --seconds 1 --panel target/host-panel.png | tee "$tmp/run.log"
 grep -q 'custody_released' "$tmp/run.log"
+test -s target/host-panel.png
 rm -rf "$tmp"
 
 echo "== scripts"
