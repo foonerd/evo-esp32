@@ -1,0 +1,30 @@
+[package]
+name = "evo-esp32-platform-esp-idf"
+description = "evo-esp32 on ESP-IDF: what every Espressif firmware distribution shares. Today: Espressif's MP3 decoder (esp_audio_codec, fixed point) as a Symphonia codec, preferred over the floating-point one on chips without an FPU."
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+repository = "https://github.com/foonerd/evo-esp32"
+publish = false
+
+# Built only inside a firmware crate's workspace: esp-idf-svc compiles for
+# ESP-IDF targets alone, so the host workspace excludes this crate and the
+# firmware's build carries it.
+
+[lints.rust]
+missing_docs = "warn"
+unused_qualifications = "warn"
+
+[dependencies]
+esp-idf-svc = { version = "0.53", default-features = false, features = ["std", "alloc"] }
+log = "0.4"
+symphonia-core = "0.6"
+
+# Espressif's audio codecs, fetched by the ESP-IDF component manager at
+# build. Espressif Modified MIT: for use with Espressif products only,
+# which is what this crate is. Bindings land in
+# `esp_idf_svc::sys::esp_audio_codec`.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_audio_codec", version = "2.6.2" }
+bindings_header = "bindings.h"
+bindings_module = "esp_audio_codec"

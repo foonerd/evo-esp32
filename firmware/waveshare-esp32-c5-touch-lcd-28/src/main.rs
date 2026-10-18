@@ -69,7 +69,7 @@ use evo_esp32_sdk::Ticks;
 use evo_esp32_steward::{Config, Steward};
 use log::{info, warn};
 use org_evoframework_delivery_null::DeliveryNull;
-use org_evoframework_playback_symphonia::PlaybackSymphonia;
+use org_evoframework_playback_symphonia::{CodecRegistry, PlaybackSymphonia};
 use org_evoframework_source_files::SourceFiles;
 use sink::{I2sSink, RateFollower};
 
@@ -265,8 +265,7 @@ fn main() -> anyhow::Result<()> {
     shuffle(&mut tracks);
     info!("{} tracks, shuffled", tracks.len());
     let mut next = 0usize;
-    play(&mut steward, &tracks[next], now());
-    next += 1;
+    play_next(&mut steward, &tracks, &mut next, now());
     let mut track_started = Instant::now();
 
     // The panel: the shared face, lit after its first frame.
@@ -318,10 +317,9 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if kind.contains("custody_released") {
-                if let Some(track) = tracks.get(next) {
-                    play(&mut steward, track, now());
+                if next < tracks.len() {
+                    play_next(&mut steward, &tracks, &mut next, now());
                     track_started = Instant::now();
-                    next += 1;
                 } else if next == tracks.len() {
                     info!(
                         "all {} tracks played; the fabric idles",
@@ -368,6 +366,15 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Symphonia's codecs with Espressif's MP3 decoder preferred: the chip
+/// has no FPU, and Symphonia's floating-point MP3 reaches half of real
+/// time on it.
+fn codecs() -> CodecRegistry {
+    let mut registry = org_evoframework_playback_symphonia::default_codecs();
+    evo_esp32_platform_esp_idf::mp3::register(&mut registry);
+    registry
+}
+
 /// The catalogue this distribution was built with.
 fn catalogue() -> Catalogue {
     generated::catalogue()
@@ -409,7 +416,10 @@ fn bring_up(sink: I2sSink<Codec>, now: Ticks) -> Result<Steward, String> {
         .admit_respondent(Box::new(SourceFiles::new(MUSIC)), now)
         .map_err(|e| e.to_string())?;
     steward
-        .admit_warden(Box::new(PlaybackSymphonia::new(Box::new(sink))), now)
+        .admit_warden(
+            Box::new(PlaybackSymphonia::with_codecs(Box::new(sink), codecs())),
+            now,
+        )
         .map_err(|e| e.to_string())?;
     steward
         .admit_respondent(Box::new(DeliveryNull::new()), now)
@@ -537,9 +547,27 @@ fn report_playback(steward: &Steward, elapsed: Duration) {
     );
 }
 
-/// Give the decoder custody of `track` from its start, at the volume.
-fn play(steward: &mut Steward, track: &Track, now: Ticks) {
-    match steward.assign(
+/// Play the track at `*next`, or the first after it the decoder takes;
+/// a refused track (a codec nobody stocks, an unreadable file) is logged
+/// and passed over, so one bad file does not end the run.
+fn play_next(
+    steward: &mut Steward,
+    tracks: &[Track],
+    next: &mut usize,
+    now: Ticks,
+) {
+    while let Some(track) = tracks.get(*next) {
+        *next += 1;
+        if play(steward, track, now) {
+            return;
+        }
+    }
+}
+
+/// Give the decoder custody of `track` from its start, at the volume;
+/// whether it took it.
+fn play(steward: &mut Steward, track: &Track, now: Ticks) -> bool {
+    let taken = match steward.assign(
         &shelf::playback_decode(),
         Assignment {
             subject: SubjectId::new("playback/now"),
@@ -551,10 +579,14 @@ fn play(steward: &mut Steward, track: &Track, now: Ticks) {
         now,
     ) {
         Ok(handle) => {
-            info!("playing {:?} under custody {}", track.title, handle.0)
+            info!("playing {:?} under custody {}", track.title, handle.0);
+            true
         }
-        Err(e) => warn!("assign {:?}: {e:?}", track.title),
-    }
+        Err(e) => {
+            warn!("assign {:?}: {e:?}", track.title);
+            false
+        }
+    };
     let _ = steward.request(
         &Request {
             cid: CorrelationId(2),
@@ -567,6 +599,7 @@ fn play(steward: &mut Steward, track: &Track, now: Ticks) {
         },
         now,
     );
+    taken
 }
 
 /// Two seconds of the self-test tone as a 44.1 kHz 16-bit stereo WAV at

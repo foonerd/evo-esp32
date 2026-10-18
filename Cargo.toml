@@ -12,6 +12,9 @@ members = [
     "distributions/panel",
     "distributions/host",
 ]
+# Builds only inside a firmware crate's workspace: esp-idf-svc compiles for
+# ESP-IDF targets alone.
+exclude = ["platform/esp-idf"]
 
 [workspace.package]
 version = "0.1.0"

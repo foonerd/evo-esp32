@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `platform/esp-idf` (`evo-esp32-platform-esp-idf`): Espressif's fixed-point
+  MP3 decoder (`esp_audio_codec` 2.6.2, fetched by the ESP-IDF component
+  manager; Espressif Modified MIT, for Espressif chips only) as a Symphonia
+  `AudioDecoder`, registered at the preferred tier so the demuxer, seeking
+  and the position stay Symphonia's. The ESP32-C5 has no FPU: Symphonia's
+  floating-point MP3 reached 0.555 of real time with the core saturated;
+  Espressif's plays at 1.000 with the core 23-25% busy and the face on.
+  Ear: "perfect".
+- `org.evoframework.playback.symphonia`: `default_codecs()` and
+  `PlaybackSymphonia::with_codecs`, so a distribution can prefer a platform
+  decoder for a codec; `new` keeps Symphonia's own.
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the Espressif decoder in the
+  registry; a track the decoder refuses (a codec nobody stocks, an
+  unreadable file) is logged and passed over instead of ending the run;
+  the companion dependencies move to `ccc5d41`, whose board crate waits
+  for the touch controller to answer after its reset: the codec written
+  to in that window got an I2C timeout (20 ms on the bench, 10 ms was
+  waited). Measured: 192 kHz/24-bit FLAC decodes at 0.38 of real time;
+  above 96 kHz is beyond this chip.
 - `firmware/waveshare-esp32-c5-touch-lcd-28`: the fabric on the board.
   The card mounted through the companion's platform crate; the catalogue
   compiled in by `build.rs` and checked against the plugins at start; the

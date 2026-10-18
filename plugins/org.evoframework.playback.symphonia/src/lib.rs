@@ -115,18 +115,40 @@ impl InHand {
     }
 }
 
+pub use symphonia::core::codecs::registry::CodecRegistry;
+
+/// The codecs Symphonia ships, as this crate enables them: the registry a
+/// distribution starts from before preferring one of its own.
+pub fn default_codecs() -> CodecRegistry {
+    let mut registry = CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut registry);
+    registry
+}
+
 /// The Symphonia playback warden.
 pub struct PlaybackSymphonia {
     sink: Box<dyn FrameSink>,
+    codecs: CodecRegistry,
     subject: Option<SubjectId>,
     in_hand: Option<InHand>,
 }
 
 impl PlaybackSymphonia {
-    /// A plugin ready to be admitted, writing to `sink`.
+    /// A plugin ready to be admitted, writing to `sink`, decoding with
+    /// Symphonia's own codecs.
     pub fn new(sink: Box<dyn FrameSink>) -> Self {
+        Self::with_codecs(sink, default_codecs())
+    }
+
+    /// As [`new`](Self::new), decoding with `codecs`: a distribution's
+    /// registry, where a platform decoder may stand above Symphonia's.
+    pub fn with_codecs(
+        sink: Box<dyn FrameSink>,
+        codecs: CodecRegistry,
+    ) -> Self {
         Self {
             sink,
+            codecs,
             subject: None,
             in_hand: None,
         }
@@ -193,7 +215,7 @@ impl Warden for PlaybackSymphonia {
         let play: Play = from_value(&assignment.instruction)
             .map_err(|e| CustodyError(format!("instruction: {e}")))?;
         let mut track = play.track;
-        let (mut stream, format) = open(&track.uri)?;
+        let (mut stream, format) = open(&track.uri, &self.codecs)?;
         if track.duration_ms.is_none() {
             track.duration_ms = duration_ms(&stream);
         }
@@ -339,7 +361,10 @@ impl Warden for PlaybackSymphonia {
 
 /// Open a `file://` URI: probe it, pick its default audio track, make a
 /// decoder, and report the format the stream will come out in.
-fn open(uri: &str) -> Result<(Stream, Format), CustodyError> {
+fn open(
+    uri: &str,
+    codecs: &CodecRegistry,
+) -> Result<(Stream, Format), CustodyError> {
     let path = file_path(uri)?;
     let file = File::open(&path)
         .map_err(|e| CustodyError(format!("{}: {e}", path.display())))?;
@@ -366,7 +391,7 @@ fn open(uri: &str) -> Result<(Stream, Format), CustodyError> {
     else {
         return Err(CustodyError("no audio codec parameters".into()));
     };
-    let decoder = symphonia::default::get_codecs()
+    let decoder = codecs
         .make_audio_decoder(params, &AudioDecoderOptions::default())
         .map_err(|e| CustodyError(format!("decoder: {e}")))?;
     let format = Format {

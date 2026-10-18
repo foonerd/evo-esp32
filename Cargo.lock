@@ -59,7 +59,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "companion-core"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ccc5d413030fcc2032853b1f400032c38fd9e498#ccc5d413030fcc2032853b1f400032c38fd9e498"
 dependencies = [
  "companion-hal",
  "embedded-graphics",
@@ -70,7 +70,7 @@ dependencies = [
 [[package]]
 name = "companion-hal"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ccc5d413030fcc2032853b1f400032c38fd9e498#ccc5d413030fcc2032853b1f400032c38fd9e498"
 
 [[package]]
 name = "crc32fast"

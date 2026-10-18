@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 # The companion's pages, by commit until its next tag (MIT; the dependency
 # runs this way only, never the reverse).
-companion-core = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "b052ec2c63ca72647583295ccf351db6e4b1cd61" }
+companion-core = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ccc5d413030fcc2032853b1f400032c38fd9e498" }
 embedded-graphics = "0.8"
 evo-esp32-sdk = { path = "../../sdk" }
 
