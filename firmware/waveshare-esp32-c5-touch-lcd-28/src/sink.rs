@@ -7,7 +7,9 @@
 //! what it has room for with a zero timeout and says how many frames
 //! that was, so the I2S clock paces playback and a tick never waits on
 //! it. A frame cut by the DMA's boundary is carried whole into the next
-//! call, and a mono stream is doubled into both slots on the way.
+//! call, and a mono stream is doubled into both slots on the way. The
+//! ring is sized in time, a quarter second at the stream's rate, so a
+//! slow packet's decode is covered at any rate the chip can afford.
 //!
 //! The channel is made for one sample rate. A stream at another rate
 //! gets the channel rebuilt (`new_std_tx` again over a conjured `I2S0`)
@@ -19,17 +21,56 @@ use esp_idf_svc::hal::i2s::config::{
     Config as ChannelConfig, DataBitWidth, SlotMode, StdClkConfig, StdConfig,
     StdGpioConfig, StdSlotConfig,
 };
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
+
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
 use esp_idf_svc::sys;
 use evo_esp32_sdk::contract::audio::playback::{Format, FrameSink};
 use log::{info, warn};
 
-/// Frames per DMA buffer and how many; together the lead the sink holds
-/// (six of 1023 frames is 139 ms at 44.1 kHz).
+/// Frames per DMA buffer: the most the driver allows at four bytes a
+/// frame. The buffer count follows the rate so the ring holds [`LEAD_MS`]
+/// of audio, within [`MIN_BUFFERS`]..=[`MAX_BUFFERS`]. DMA memory is
+/// internal SRAM, 4 KB a buffer, and 64 KB of it is what the rest of the
+/// firmware can spare: at 96 kHz that is 160 ms of lead, three times
+/// the longest packet decode seen, and above that the rate is already
+/// more than the chip decodes in time.
 const FRAMES_PER_BUFFER: u32 = 1023;
-const BUFFERS: u32 = 6;
+const LEAD_MS: u32 = 250;
+const MIN_BUFFERS: u32 = 6;
+const MAX_BUFFERS: u32 = 16;
 /// Bytes per stereo 16-bit frame on the wire.
 const FRAME_BYTES: usize = 4;
+
+/// Times the DMA certainly ran dry since the last report, and the worst
+/// starvation in milliseconds; read and cleared by [`report_dry`].
+static DRY_COUNT: AtomicU32 = AtomicU32::new(0);
+static DRY_WORST_MS: AtomicU32 = AtomicU32::new(0);
+
+/// How many DMA buffers hold [`LEAD_MS`] at `rate`.
+fn buffers_for(rate: u32) -> u32 {
+    let frames = u64::from(rate) * u64::from(LEAD_MS) / 1000;
+    let n = frames.div_ceil(u64::from(FRAMES_PER_BUFFER)) as u32;
+    n.clamp(MIN_BUFFERS, MAX_BUFFERS)
+}
+
+/// The lead a ring of `buffers` holds at `rate`, in milliseconds. The
+/// driver hands the writer each buffer as it finishes, so the ring plays
+/// one less than it has while the writer is away.
+fn lead_ms(rate: u32, buffers: u32) -> u32 {
+    (u64::from(buffers - 1) * u64::from(FRAMES_PER_BUFFER) * 1000
+        / u64::from(rate.max(1))) as u32
+}
+
+/// Dry-outs since the last call, as a line for the log; `None` if none.
+pub fn report_dry() -> Option<String> {
+    let count = DRY_COUNT.swap(0, Ordering::Relaxed);
+    let worst = DRY_WORST_MS.swap(0, Ordering::Relaxed);
+    (count > 0).then(|| {
+        format!("the DMA ran dry {count} times, the worst by {worst} ms")
+    })
+}
 
 /// What the sink needs to say to the codec when the rate changes.
 pub trait RateFollower {
@@ -49,6 +90,10 @@ pub struct I2sSink<F> {
     follower: F,
     /// Frames taken since `start`, for the log.
     pub taken: u64,
+    /// What the ring holds when full, and when the DMA last took bytes:
+    /// a longer gap than the lead means it played silence meanwhile.
+    lead_ms: u32,
+    last_taken: Option<Instant>,
 }
 
 impl<F: RateFollower> I2sSink<F> {
@@ -66,7 +111,7 @@ impl<F: RateFollower> I2sSink<F> {
         rate: u32,
         follower: F,
     ) -> Result<Self, sys::EspError> {
-        let i2s = open(i2s0, bclk, dout, ws, rate)?;
+        let (i2s, lead) = open(i2s0, bclk, dout, ws, rate)?;
         Ok(Self {
             i2s: Some(i2s),
             rate,
@@ -75,6 +120,8 @@ impl<F: RateFollower> I2sSink<F> {
             scratch: Vec::new(),
             follower,
             taken: 0,
+            lead_ms: lead,
+            last_taken: None,
         })
     }
 
@@ -85,14 +132,27 @@ impl<F: RateFollower> I2sSink<F> {
     /// Write `bytes` with no waiting; what the DMA took. A full DMA is
     /// a timeout with nothing taken, which is the contract's "ask again".
     fn offer(&mut self, bytes: &[u8]) -> usize {
-        match self.driver().write(bytes, 0) {
+        let n = match self.driver().write(bytes, 0) {
             Ok(n) => n,
             Err(e) if e.code() == sys::ESP_ERR_TIMEOUT => 0,
             Err(e) => {
                 warn!("i2s: write: {e}");
                 0
             }
+        };
+        if n > 0 {
+            let now = Instant::now();
+            if let Some(last) = self.last_taken {
+                let gap = now.duration_since(last).as_millis() as u32;
+                if gap > self.lead_ms {
+                    DRY_COUNT.fetch_add(1, Ordering::Relaxed);
+                    DRY_WORST_MS
+                        .fetch_max(gap - self.lead_ms, Ordering::Relaxed);
+                }
+            }
+            self.last_taken = Some(now);
         }
+        n
     }
 
     /// Play a blocking tone through the channel; the boot's self-test.
@@ -111,11 +171,14 @@ fn open(
         + esp_idf_svc::hal::gpio::OutputPin
         + 'static,
     rate: u32,
-) -> Result<I2sDriver<'static, I2sTx>, sys::EspError> {
+) -> Result<(I2sDriver<'static, I2sTx>, u32), sys::EspError> {
+    let buffers = buffers_for(rate);
+    let lead = lead_ms(rate, buffers);
+    info!("i2s: {rate} Hz, {buffers} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead");
     let config = StdConfig::new(
         ChannelConfig::default()
             .auto_clear(true)
-            .dma_buffer_count(BUFFERS)
+            .dma_buffer_count(buffers)
             .frames_per_buffer(FRAMES_PER_BUFFER),
         StdClkConfig::from_sample_rate_hz(rate),
         StdSlotConfig::philips_slot_default(
@@ -127,7 +190,7 @@ fn open(
     let mut i2s =
         I2sDriver::new_std_tx(i2s0, &config, bclk, dout, None::<AnyIOPin>, ws)?;
     i2s.tx_enable()?;
-    Ok(i2s)
+    Ok((i2s, lead))
 }
 
 impl<F: RateFollower> FrameSink for I2sSink<F> {
@@ -135,6 +198,7 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         self.channels = usize::from(format.channels).max(1);
         self.carry.clear();
         self.taken = 0;
+        self.last_taken = None;
         if format.sample_rate != self.rate && format.sample_rate > 0 {
             info!("i2s: {} Hz -> {} Hz", self.rate, format.sample_rate);
             // The channel is remade for the new rate. The pins were moved
@@ -152,9 +216,10 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
             // The old channel goes before the new one takes the peripheral.
             drop(self.i2s.take());
             match open(i2s0, bclk, dout, ws, format.sample_rate) {
-                Ok(i2s) => {
+                Ok((i2s, lead)) => {
                     self.i2s = Some(i2s);
                     self.rate = format.sample_rate;
+                    self.lead_ms = lead;
                 }
                 Err(e) => {
                     // No channel is no player; say so and stop.

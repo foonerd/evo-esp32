@@ -26,6 +26,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the fabric went quiet; `CONFIG_FREERTOS_HZ=1000`. A full DMA is the
   HAL's `ESP_ERR_TIMEOUT` with nothing taken, which is the sink
   contract's "ask again", not a warning.
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the whole card, and real
+  FLAC. The listing walks folders depth first, one request to the files
+  source per folder; FatFs hands names to Rust as UTF-8. The I2S ring is
+  sized in time, a quarter second at the stream's rate within 64 KB of
+  SRAM (11 buffers at 44.1 kHz, 16 at 96 kHz), after a 96 kHz/24-bit
+  album came out choppy with the core 60% idle: six buffers were 53 ms
+  of cover and the decoder's cycle (20 ms idle plus one packet) was
+  longer. `opt-level = 3`. The heartbeat reports the core's busy share,
+  internal SRAM free, the playback position against the clock, and dry
+  spells the sink certainly had. Bench: 96 kHz FLAC at 1.000 of real
+  time, 37-58% busy, no dry spell, 54 KB internal free.
 - `scripts/image.sh` takes the newest esp-idf-sys build under `target/`
   when an sdkconfig change has left two.
 

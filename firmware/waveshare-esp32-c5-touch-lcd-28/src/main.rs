@@ -51,13 +51,14 @@ use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
 use evo_esp32_sdk::catalogue::Catalogue;
-use evo_esp32_sdk::contract::audio::playback::Play;
+use evo_esp32_sdk::contract::audio::playback::{self, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
 use evo_esp32_sdk::contract::audio::{
     delivery, from_value, shelf, to_value, Track,
 };
 use evo_esp32_sdk::happening::Seq;
 use evo_esp32_sdk::plugin::{Plugin, PluginDescription};
+use evo_esp32_sdk::projection::ProjectionKey;
 use evo_esp32_sdk::respondent::{CorrelationId, Request};
 use evo_esp32_sdk::subject::SubjectId;
 use evo_esp32_sdk::warden::Assignment;
@@ -269,27 +270,35 @@ fn main() -> anyhow::Result<()> {
     let mut next = 0usize;
     play(&mut steward, &tracks[next], now());
     next += 1;
+    let mut track_started = Instant::now();
 
     let mut seen = Seq(0);
     let mut last_beat = Instant::now();
+    let mut busy = Duration::ZERO;
     loop {
         let t = now();
+        let tick_started = Instant::now();
         let due = steward.tick(t);
+        busy += tick_started.elapsed();
         for h in steward.happenings_since(seen).happenings {
             seen = h.seq;
             let kind = serde_json::to_string(&h.kind).unwrap_or_default();
-            info!(
-                "#{:<4} +{:>7} ms  {kind}{}",
-                h.seq.0,
-                h.at.0,
-                h.subject
-                    .as_ref()
-                    .map(|s| format!("  {s}"))
-                    .unwrap_or_default()
-            );
+            // Position updates come every tick; the heartbeat reports them.
+            if kind != r#"{"kind":"updated"}"# {
+                info!(
+                    "#{:<4} +{:>7} ms  {kind}{}",
+                    h.seq.0,
+                    h.at.0,
+                    h.subject
+                        .as_ref()
+                        .map(|s| format!("  {s}"))
+                        .unwrap_or_default()
+                );
+            }
             if kind.contains("custody_released") {
                 if let Some(track) = tracks.get(next) {
                     play(&mut steward, track, now());
+                    track_started = Instant::now();
                     next += 1;
                 } else if next == tracks.len() {
                     info!(
@@ -301,16 +310,24 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if last_beat.elapsed() >= HEARTBEAT {
+            let busy_share =
+                busy.as_secs_f64() / last_beat.elapsed().as_secs_f64();
+            busy = Duration::ZERO;
             last_beat = Instant::now();
             // SAFETY: plain getters; a null handle means the calling task.
-            let (free, min, stack) = unsafe {
+            let (free, min, internal, stack) = unsafe {
                 (
                     sys::esp_get_free_heap_size(),
                     sys::esp_get_minimum_free_heap_size(),
+                    sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL),
                     sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut()),
                 )
             };
-            info!("heartbeat: free heap {free} B, low-water {min} B, main stack low-water {stack} B");
+            info!("heartbeat: free heap {free} B (internal {internal} B), low-water {min} B, main stack low-water {stack} B, ticking {:.0}% of the time", busy_share * 100.0);
+            report_playback(&steward, track_started.elapsed());
+            if let Some(line) = sink::report_dry() {
+                warn!("sink: {line}");
+            }
         }
         // The idle task must run or its watchdog bites: a short sleep
         // when the fabric wants ticking now, the tick length otherwise.
@@ -372,10 +389,50 @@ fn bring_up(sink: I2sSink<Codec>, now: Ticks) -> Result<Steward, String> {
 }
 
 /// Ask the source for the root and keep the tracks it lists, in order.
+/// Every track on the card, folders first and depth first, each folder
+/// in the files source's order: one listing request per folder.
 fn list_tracks(
     steward: &mut Steward,
     now: Ticks,
 ) -> Result<Vec<Track>, String> {
+    let mut tracks = Vec::new();
+    let mut pending = vec![String::new()];
+    while let Some(path) = pending.pop() {
+        let listing = list_folder(steward, &path, now)?;
+        let depth = path.split('/').filter(|s| !s.is_empty()).count();
+        let indent = "  ".repeat(depth);
+        let mut folders = Vec::new();
+        let mut here = 0usize;
+        for e in listing.entries {
+            match e {
+                Entry::Folder { name, path } => {
+                    info!("{indent}{name}/");
+                    folders.push(path);
+                }
+                Entry::Track(t) => {
+                    info!("{indent}  {}", t.title);
+                    tracks.push(t);
+                    here += 1;
+                }
+            }
+        }
+        if depth == 0 {
+            info!(
+                "source/files: {here} tracks at the root, {} folders",
+                folders.len()
+            );
+        }
+        // A stack: push in reverse so the first folder is listed next.
+        pending.extend(folders.into_iter().rev());
+    }
+    Ok(tracks)
+}
+
+fn list_folder(
+    steward: &mut Steward,
+    path: &str,
+    now: Ticks,
+) -> Result<Listing, String> {
     let response = steward
         .request(
             &Request {
@@ -383,27 +440,48 @@ fn list_tracks(
                 shelf: shelf::source_files(),
                 verb: LIST.into(),
                 subject: None,
-                args: to_value(&ListArgs::default()),
+                args: to_value(&ListArgs {
+                    path: path.to_string(),
+                }),
             },
             now,
         )
         .map_err(|e| format!("{e:?}"))?;
-    let listing: Listing = match response.outcome {
-        Ok(v) => from_value(&v)?,
-        Err(f) => return Err(format!("list: {f:?}")),
-    };
-    info!("source/files lists {} entries:", listing.entries.len());
-    let mut tracks = Vec::new();
-    for e in listing.entries {
-        match e {
-            Entry::Folder { name, .. } => info!("  {name}/"),
-            Entry::Track(t) => {
-                info!("  {}", t.title);
-                tracks.push(t);
-            }
-        }
+    match response.outcome {
+        Ok(v) => from_value(&v),
+        Err(f) => Err(format!("list {path:?}: {f:?}")),
     }
-    Ok(tracks)
+}
+
+/// The playback projection against the wall clock since the track was
+/// assigned: position over elapsed is 1.0 when the decoder keeps up.
+fn report_playback(steward: &Steward, elapsed: Duration) {
+    let p = steward.projection(ProjectionKey::Rack {
+        name: shelf::PLAYBACK.into(),
+    });
+    let Some(st) = p
+        .subjects
+        .first()
+        .and_then(|s| from_value::<playback::State>(&s.state).ok())
+    else {
+        return;
+    };
+    let elapsed_ms = elapsed.as_millis().max(1) as u64;
+    info!(
+        "playback: {:?} {} ms of {} ms elapsed ({:.3}){}{}",
+        st.status,
+        st.position_ms,
+        elapsed_ms,
+        st.position_ms as f64 / elapsed_ms as f64,
+        st.format
+            .as_ref()
+            .map(|f| format!("  {} Hz {} ch", f.sample_rate, f.channels))
+            .unwrap_or_default(),
+        st.track
+            .as_ref()
+            .map(|t| format!("  {:?}", t.title))
+            .unwrap_or_default()
+    );
 }
 
 /// Give the decoder custody of `track` from its start, at the volume.

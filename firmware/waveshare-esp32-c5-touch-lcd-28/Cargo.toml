@@ -42,7 +42,8 @@ embuild = "0.33.5"
 evo-esp32-catalogue = { path = "../../catalogue" }
 
 [profile.release]
-opt-level = "s"
+# The decoder runs here; speed over size, with 3 MB of app partition.
+opt-level = 3
 debug = false
 
 [profile.dev]
