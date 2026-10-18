@@ -1,0 +1,24 @@
+[package]
+name = "org-evoframework-playback-symphonia"
+description = "Playback warden for evo-esp32 that decodes a track with Symphonia and drives the frames into the distribution's sink: FLAC, MP3, WAV and PCM, position from frames delivered, pause, resume and seek."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# A reference warden — Apache 2.0 so a device's decoder can copy it.
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+# Pure Rust, MPL-2.0 (file-level copyleft; linking is unaffected). No SIMD
+# feature: that pulls rustfft, and the target has no SIMD. Codecs are the
+# ones a card of music holds.
+symphonia = { version = "0.6", default-features = false, features = ["flac", "mp3", "pcm", "wav"] }
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }
+serde_json = { workspace = true }

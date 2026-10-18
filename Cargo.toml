@@ -8,6 +8,7 @@ members = [
     "plugins/org.evoframework.playback.sim",
     "plugins/org.evoframework.delivery.null",
     "plugins/org.evoframework.source.files",
+    "plugins/org.evoframework.playback.symphonia",
     "distributions/host",
 ]
 

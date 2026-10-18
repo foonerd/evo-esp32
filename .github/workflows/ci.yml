@@ -33,3 +33,7 @@ jobs:
         with:
           name: host-panel
           path: target/host-panel.png
+      - uses: actions/upload-artifact@v7
+        with:
+          name: host-heard
+          path: target/host-heard.wav

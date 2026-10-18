@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The host distribution: the fabric playing a directory of music on a
-//! desktop, with nothing decoded and nothing heard.
+//! desktop, decoded for real into a sink made of a clock and a file.
 //!
 //! What a firmware distribution does, done here without a board: the
 //! catalogue compiled in, the plugins admitted, a consumer loop that
 //! reads projections and the happenings stream. The consumer is the
 //! panel: it draws the companion's pages from the projections and, on
-//! the host, writes the last frame as a PNG.
+//! the host, writes the last frame as a PNG. The sink paces the decoder
+//! at the sample rate as a DAC would and, if asked, records what it let
+//! out as a WAV, so the run leaves something to listen to.
 //!
 //! ```text
-//! evo-esp32-host --dir ~/Music --seconds 5 --panel face.png
+//! evo-esp32-host --dir ~/Music --seconds 5 --panel face.png --wav heard.wav
 //! ```
 
 mod panel;
+mod sink;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -34,8 +37,9 @@ use evo_esp32_sdk::warden::Assignment;
 use evo_esp32_sdk::Ticks;
 use evo_esp32_steward::{Config, Steward};
 use org_evoframework_delivery_null::DeliveryNull;
-use org_evoframework_playback_sim::PlaybackSim;
+use org_evoframework_playback_symphonia::PlaybackSymphonia;
 use org_evoframework_source_files::SourceFiles;
+use sink::PacedWav;
 
 mod generated {
     //! `catalogue()`, from `catalogue.toml` at build time.
@@ -50,6 +54,8 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
   --seconds N       how long to run (default 5)
   --panel PATH      write the panel's last frame as a PNG
   --rotation DEG    the panel's rotation, 0, 90, 180 or 270 (default 0)
+  --wav PATH        record what the sink let out as a WAV
+  --tone PATH       write a 440 Hz test tone (2 s, 44.1 kHz) there and exit
   --help";
 
 struct Cli {
@@ -57,6 +63,8 @@ struct Cli {
     seconds: u64,
     panel: Option<PathBuf>,
     rotation: u16,
+    wav: Option<PathBuf>,
+    tone: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Cli, String> {
@@ -65,6 +73,8 @@ fn parse_args() -> Result<Cli, String> {
         seconds: 5,
         panel: None,
         rotation: 0,
+        wav: None,
+        tone: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -83,6 +93,8 @@ fn parse_args() -> Result<Cli, String> {
                 })?;
             }
             "--panel" => cli.panel = Some(PathBuf::from(value)),
+            "--wav" => cli.wav = Some(PathBuf::from(value)),
+            "--tone" => cli.tone = Some(PathBuf::from(value)),
             "--rotation" => {
                 cli.rotation = match value.parse() {
                     Ok(r @ (0 | 90 | 180 | 270)) => r,
@@ -109,13 +121,18 @@ pub fn catalogue() -> Catalogue {
 fn descriptions(dir: &std::path::Path) -> Vec<PluginDescription> {
     vec![
         SourceFiles::new(dir).describe(),
-        PlaybackSim::new().describe(),
+        PlaybackSymphonia::new(Box::new(PacedWav::new(None))).describe(),
         DeliveryNull::new().describe(),
     ]
 }
 
 /// Build the fabric: steward, plugins, checked against the catalogue.
-fn bring_up(dir: &std::path::Path, now: Ticks) -> Result<Steward, String> {
+/// The decoder writes to a paced sink that records to `wav` if given.
+fn bring_up(
+    dir: &std::path::Path,
+    wav: Option<PathBuf>,
+    now: Ticks,
+) -> Result<Steward, String> {
     let catalogue = catalogue();
     let report = evo_esp32_catalogue::check(&catalogue, &descriptions(dir));
     if !report.is_clean() {
@@ -127,7 +144,10 @@ fn bring_up(dir: &std::path::Path, now: Ticks) -> Result<Steward, String> {
         .admit_respondent(Box::new(SourceFiles::new(dir)), now)
         .map_err(|e| e.to_string())?;
     steward
-        .admit_warden(Box::new(PlaybackSim::new()), now)
+        .admit_warden(
+            Box::new(PlaybackSymphonia::new(Box::new(PacedWav::new(wav)))),
+            now,
+        )
         .map_err(|e| e.to_string())?;
     steward
         .admit_respondent(Box::new(DeliveryNull::new()), now)
@@ -180,7 +200,16 @@ fn main() {
     let start = Instant::now();
     let now = || Ticks(start.elapsed().as_millis() as u64);
 
-    let mut steward = match bring_up(&cli.dir, now()) {
+    if let Some(path) = &cli.tone {
+        if let Err(e) = sink::write_tone(path, 44_100, 2000) {
+            eprintln!("tone: {}: {e}", path.display());
+            std::process::exit(1);
+        }
+        println!("tone written to {}", path.display());
+        return;
+    }
+
+    let mut steward = match bring_up(&cli.dir, cli.wav.clone(), now()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -209,12 +238,6 @@ fn main() {
         }
     };
 
-    // A simulated track has no decoder to tell its length; give it one so
-    // the run shows a start and an end.
-    let track = Track {
-        duration_ms: Some(cli.seconds.saturating_mul(1000) / 2),
-        ..track
-    };
     let handle = steward
         .assign(
             &shelf::playback_decode(),
@@ -345,18 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn a_track_plays_through_the_fabric() {
+    fn a_track_plays_through_the_fabric_and_is_heard_by_the_sink() {
         let dir = std::env::temp_dir()
             .join(format!("evo-host-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("song.flac"), b"").unwrap();
-        let mut s = bring_up(&dir, Ticks(0)).unwrap();
+        // 300 ms at 8 kHz: short enough to play out within the test.
+        sink::write_tone(&dir.join("song.wav"), 8000, 300).unwrap();
+        let heard = dir.join("heard.wav");
+        let mut s = bring_up(&dir, Some(heard.clone()), Ticks(0)).unwrap();
         let track = first_track(&mut s, Ticks(0)).unwrap().unwrap();
         assert_eq!(track.title, "song");
-        let track = Track {
-            duration_ms: Some(300),
-            ..track
-        };
         s.assign(
             &shelf::playback_decode(),
             Assignment {
@@ -366,24 +387,34 @@ mod tests {
             Ticks(0),
         )
         .unwrap();
-        s.tick(Ticks(200));
         let p = s.projection(ProjectionKey::Rack {
             name: shelf::PLAYBACK.into(),
         });
         let st: playback::State = from_value(&p.subjects[0].state).unwrap();
         assert_eq!(st.status, playback::Status::Playing);
-        assert_eq!(st.position_ms, 200);
-        s.tick(Ticks(400));
-        let p = s.projection(ProjectionKey::Rack {
-            name: shelf::PLAYBACK.into(),
-        });
-        let st: playback::State = from_value(&p.subjects[0].state).unwrap();
-        assert_eq!(st.status, playback::Status::Stopped);
+        assert_eq!(st.track.unwrap().duration_ms, Some(300));
+        assert_eq!(st.format.unwrap().sample_rate, 8000);
+
+        // The sink paces by the wall clock; tick until released.
+        let start = Instant::now();
+        let mut released = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            let t = Ticks(start.elapsed().as_millis() as u64);
+            if s.tick(t).is_none() {
+                released = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(released, "custody still open after 5 s");
+        assert!(start.elapsed() >= Duration::from_millis(100), "paced");
         let replay = s.happenings_since(Seq(0));
         assert!(replay.happenings.iter().any(|h| matches!(
             h.kind,
             evo_esp32_sdk::happening::HappeningKind::CustodyReleased { .. }
         )));
+        let bytes = std::fs::read(&heard).unwrap();
+        assert_eq!(bytes.len(), 44 + 2400 * 4, "every frame was heard");
         s.shutdown(Ticks(500));
         std::fs::remove_dir_all(dir).unwrap();
     }

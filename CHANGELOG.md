@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `evo-esp32-sdk`: `contract::audio::playback::FrameSink`, where decoded
+  frames go: the distribution owns the sink and hands it to the decoder;
+  `start`, non-blocking `write` that says how much it took, `flush`,
+  `stop`. Frames do not travel through the fabric's values.
+- `org.evoframework.playback.symphonia` (Apache-2.0, std): the real
+  decoder behind `playback/decode`, FLAC, MP3, WAV and PCM through
+  Symphonia 0.6; a bounded slice per tick, the sink pacing; position from
+  frames the sink accepted; seek to the frame, trimming after the
+  reader's packet boundary; duration from the container. 6 tests through
+  the steward.
+- `evo-esp32-host`: the Symphonia warden replaces the simulated one; a
+  paced sink (`sink.rs`) that holds 200 ms, drains at the sample rate and
+  records to `--wav`; `--tone` writes a test tone. The check decodes the
+  tone end to end and requires the recorded WAV to be the tone's size to
+  the byte; FLAC and WAV come out bit-exact, MP3 as lossy allows. CI
+  uploads the heard WAV.
 - `evo-esp32-sdk`: `contract::audio`, the player's slot contracts from
   evo-device-audio's vocabulary: shelves `source/files`, `source/radio`,
   `playback/decode`, `delivery/output`, `metadata/tags`,

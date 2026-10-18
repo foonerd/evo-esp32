@@ -1,6 +1,6 @@
 [package]
 name = "evo-esp32-host"
-description = "The host distribution of evo-esp32: the audio catalogue compiled in, the steward with the files source, the simulated playback warden and the null sink, driven from a directory of music on a desktop; what a firmware distribution does, without a board."
+description = "The host distribution of evo-esp32: the audio catalogue compiled in, the steward with the files source, the Symphonia playback warden decoding into a paced sink and the null output, driven from a directory of music on a desktop; what a firmware distribution does, without a board."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +21,7 @@ evo-esp32-catalogue = { path = "../../catalogue" }
 evo-esp32-sdk = { path = "../../sdk" }
 evo-esp32-steward = { path = "../../steward" }
 org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }
-org-evoframework-playback-sim = { path = "../../plugins/org.evoframework.playback.sim" }
+org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia" }
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
 serde_json = { workspace = true, features = ["std"] }
 

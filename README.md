@@ -16,12 +16,13 @@ required).
 the SDK a plugin implements against, with the audio slot contracts typed
 in; the steward that admits plugins, owns subjects, composes, emits
 happenings and serves projections; the catalogue tool that validates a
-`catalogue.toml` and checks a plugin set stocks it; three audio plugins
-(a file source, a simulated decoder, a null output) and the example; and
-a host distribution that compiles its catalogue in, plays a track through
-the steward end to end and draws the companion's face from the
-projections. Every device-shaped crate builds for bare-metal RISC-V. No
-board runs it yet; the hardware layers come from
+`catalogue.toml` and checks a plugin set stocks it; four audio plugins
+(a file source, a real decoder, a simulated one, a null output) and the
+example; and a host distribution that compiles its catalogue in, decodes
+FLAC, MP3 and WAV through the steward into a paced sink, bit-exact for
+the lossless two, and draws the companion's face from the projections.
+Every device-shaped crate builds for bare-metal RISC-V. No board runs it
+yet; the hardware layers come from
 [volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion)
 as they light up. The
 [wiki](https://github.com/foonerd/evo-esp32/wiki) has the
@@ -69,11 +70,12 @@ make a panel a player.
 | `plugins/` | `org-evoframework-example-echo` | The pedagogical plugin: one shelf, one verb, one subject. | Apache-2.0 |
 | | `org-evoframework-source-files` | `source/files` over a directory on a host: lists folders and audio files, announces each track as a subject. std. | Apache-2.0 |
 | | `org-evoframework-playback-sim` | `playback/decode` against the clock: custody of a track, position, pause, resume, seek, release at the end; decodes nothing. `no_std`. | Apache-2.0 |
+| | `org-evoframework-playback-symphonia` | `playback/decode` for real: FLAC, MP3, WAV and PCM through [Symphonia](https://github.com/pdeljanov/Symphonia) into the distribution's `FrameSink`, a bounded slice per tick, the sink pacing; position from frames delivered; seek to the frame. std. | Apache-2.0 |
 | | `org-evoframework-delivery-null` | `delivery/output` with no sink: volume and mute on an `output` subject. `no_std`. | Apache-2.0 |
-| `distributions/host/` | `evo-esp32-host` | What a firmware distribution does, on a desktop: the catalogue compiled in by `build.rs`, checked against the plugins at start, the three admitted, a track listed and played through the steward, projections and happenings printed, and the panel as a consumer: the companion's pages drawn from the playback and delivery projections, written as a PNG. | BSL 1.1 |
+| `distributions/host/` | `evo-esp32-host` | What a firmware distribution does, on a desktop: the catalogue compiled in by `build.rs`, checked against the plugins at start, the three admitted, a track listed and decoded through the steward into a sink made of a clock and a file (`--wav` keeps what was heard), projections and happenings printed, and the panel as a consumer: the companion's pages drawn from the playback and delivery projections, written as a PNG. | BSL 1.1 |
 | `firmware/` | | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board crate it stands on. None yet. | BSL 1.1 |
 
-Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop; `distributions/host/src/panel.rs` is that consumer, mapping the fabric's state to the companion's `PlayerState` and drawing with its `core`. The companion is a dependency by commit until its first tag, and the dependency runs that way only. Next: a decoder behind `playback/decode`; the ES8311 behind `delivery/output`; the first firmware distribution on the companion's board crate.
+Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop; `distributions/host/src/panel.rs` is that consumer, mapping the fabric's state to the companion's `PlayerState` and drawing with its `core`. Frames are not values either: the decoder writes to a `FrameSink` the distribution owns (`sdk::contract::audio::playback::FrameSink`), as evo-device-audio's decoder writes to the operating system's audio stack and not to the fabric; on a board that sink is the I2S peripheral, on the host a clock and a file. The companion is a dependency by commit until its first tag, and the dependency runs that way only. Next: the ES8311 and an I2S sink behind `delivery/output`; the first firmware distribution on the companion's board crate; the decoder measured on the target.
 
 ## Build
 
@@ -82,14 +84,16 @@ The host workspace builds on stable Rust, pinned by `rust-toolchain.toml`.
 ```sh
 scripts/check.sh   # format, clippy, tests, docs, no_std on bare metal, the host distribution end to end, scripts, then every firmware built
 cargo run -p evo-esp32-catalogue -- check distributions/host/catalogue.toml
-cargo run -p evo-esp32-host -- --dir ~/Music --seconds 5 --panel face.png
+cargo run -p evo-esp32-host -- --dir ~/Music --seconds 5 --panel face.png --wav heard.wav
 ```
 
 The `no_std` claim is proved, not asserted: the check builds the SDK, the
 steward and every device-shaped plugin for `riscv32imac-unknown-none-elf`, a
 target with no std at all. The host distribution is run once against a
-directory with one file and must play it to the end. With a firmware crate
-present and no ESP toolchain on the machine, the check fails and says so.
+directory with one file, a tone it writes itself, and must decode it to the
+end with every frame reaching the sink: the recorded WAV is the tone's size
+to the byte. With a firmware crate present and no ESP toolchain on the
+machine, the check fails and says so.
 
 ## Related
 
@@ -107,3 +111,6 @@ Business Source License 1.1 for the fabric; Apache License 2.0 for the
 crates whose directories carry it. See [LICENSE](LICENSE). The licence
 converts to Apache 2.0 four years after each release. For other
 arrangements, open an issue titled `[licensing] ...`.
+
+The Symphonia decoder the playback plugin uses is MPL-2.0, a file-level
+licence that leaves the crates linking it under their own.

@@ -9,3 +9,7 @@ Project ownership and marks:
 This repository is licensed under the Business Source License 1.1.
 Crates whose directory carries its own LICENSE file are licensed under
 the Apache License 2.0. See LICENSE for details.
+
+Third-party software:
+- Symphonia (https://github.com/pdeljanov/Symphonia), MPL-2.0, used by
+  org.evoframework.playback.symphonia as a dependency, unmodified.

@@ -232,6 +232,35 @@ pub mod playback {
             position_ms: u64,
         },
     }
+
+    /// Where decoded frames go.
+    ///
+    /// Frames do not travel through the fabric's values, as a picture does
+    /// not: the distribution owns the one sink its board has (an I2S
+    /// peripheral, a file, nothing) and hands it to the decoder it admits.
+    /// The decoder writes; what the sink does with level and mute is the
+    /// output plugin's business through its own route to the hardware, so
+    /// the two plugins still never meet.
+    ///
+    /// Samples are signed 16-bit, interleaved by channel, `channels` per
+    /// frame as the last [`start`](Self::start) said. A sink never blocks:
+    /// it takes what it has room for and says how much, and the decoder
+    /// keeps the rest for its next tick. That is how a tick stays bounded
+    /// and how the sink's clock, not the decoder's, paces playback.
+    pub trait FrameSink {
+        /// The stream's format from here on. Before the first write of a
+        /// stream and again whenever it changes.
+        fn start(&mut self, format: &Format);
+        /// Offer frames; the return is how many frames were taken, from
+        /// the front. Zero means full: ask again later.
+        fn write(&mut self, interleaved: &[i16]) -> usize;
+        /// Drop what has been taken but has not left yet. After a seek,
+        /// so the ear does not hear the old place first.
+        fn flush(&mut self);
+        /// Nothing more follows for this stream. The sink lets its tail
+        /// out and may stop its clock.
+        fn stop(&mut self);
+    }
 }
 
 /// `delivery/output`: the sink.
