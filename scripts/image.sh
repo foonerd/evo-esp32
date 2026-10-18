@@ -57,7 +57,13 @@ cp "$build/$boot_file" "$out/$stem-bootloader.bin"
 # the table in flasher_args.json is ESP-IDF's default. A crate that ships its
 # own partitions.csv gets it generated here with ESP-IDF's own tool.
 if [ -f "$crate/partitions.csv" ]; then
-  tools="${ESP_IDF_TOOLS_INSTALL_DIR#custom:}"; [ "$tools" = "${ESP_IDF_TOOLS_INSTALL_DIR:-}" ] && tools="$crate/.embuild"
+  # Tools live in the crate's .embuild unless ESP_IDF_TOOLS_INSTALL_DIR
+  # points a build at a shared directory (custom:<path>).
+  tools="${ESP_IDF_TOOLS_INSTALL_DIR:-}"
+  case "$tools" in
+    custom:*) tools="${tools#custom:}" ;;
+    *) tools="$crate/.embuild" ;;
+  esac
   gen=$(find "$tools" -name gen_esp32part.py | head -1)
   [ -n "$gen" ] || { echo "gen_esp32part.py not found under $tools" >&2; exit 1; }
   python3 "$gen" -q "$crate/partitions.csv" "$out/$stem-partition-table.bin"
