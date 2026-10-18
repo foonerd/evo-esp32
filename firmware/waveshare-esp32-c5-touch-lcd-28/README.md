@@ -1,6 +1,8 @@
 # Waveshare ESP32-C5-Touch-LCD-2.8
 
-The player's firmware for its first board. Today it makes a sound and nothing else: on boot it brings the IO expander up with the amplifier enabled, reads the ES8311's chip ID, opens the codec for 44.1 kHz 16-bit, starts I2S0 as master on the vendor BSP's pins, and plays a 1 kHz tone for two seconds every ten through the board's speaker, logging each with the time the write took. Paced by the I2S clock, two seconds of audio take two seconds to write; that figure is the check that the clock is right before a decoder is asked for frames.
+The player's firmware for its first board, and the fabric's first run on a chip. On boot it brings the IO expander up with the amplifier enabled, opens the ES8311, starts I2S0 as master on the vendor BSP's pins, mirrors the three signals onto header pins a Pi-HAT DAC can reach, brings up an ES9018K2M if one answers on the HAT's I2C, and plays half a second of 1 kHz as the self-test. Then it mounts the card, stands the fabric up as the host distribution does (the catalogue compiled in and checked against the plugins, the files source over the card, the Symphonia decoder, the null output) and plays the tracks at the card's root once each, in order, through the I2S sink; every happening goes to the log, and a heartbeat every ten seconds says what the heap and the main stack have left. A card with no music gets a two-second `tone.wav` written to it first, so the whole path is proven on any card.
+
+The sink (`src/sink.rs`) is I2S0 with its DMA as the buffer: the decoder offers frames, the sink hands the DMA what fits with a zero timeout and says how many frames that was, so the I2S clock paces playback and a tick never waits. A stream at another rate has the channel rebuilt and the codec told.
 
 | Part | Where |
 | --- | --- |
@@ -22,3 +24,5 @@ esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp3
 ```
 
 Known of the chip: no FPU. Software `sin` costs about 95 µs a call, so the tone is one exact cycle (441 samples) tiled, not 88 200 sines; the first build did the latter and the idle task's watchdog said so.
+
+Known of ESP-IDF: below one scheduler tick, `usleep()` spins instead of yielding, so at the default 100 Hz every sleep under 10 ms starves the idle task and its watchdog bites five seconds later. `sdkconfig.defaults` sets `CONFIG_FREERTOS_HZ=1000`; the player's loop is paced in milliseconds. The main task's stack is 48 KB; the heartbeat reports its low-water mark (45 KB free with the decoder running: Symphonia's state lives on the heap).

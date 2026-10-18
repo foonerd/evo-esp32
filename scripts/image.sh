@@ -32,8 +32,12 @@ PY
 elf="$crate/target/$target/release/$name"
 [ -f "$elf" ] || { echo "missing $elf: run cargo build --release in $1 first" >&2; exit 1; }
 
-mapfile -t found < <(find "$crate/target/$target/release/build" -path '*esp-idf-sys*' -name flasher_args.json)
-[ "${#found[@]}" -eq 1 ] || { echo "expected one flasher_args.json under $1/target, found ${#found[@]}" >&2; exit 1; }
+# esp-idf-sys leaves one build per configuration under target/; an
+# sdkconfig change makes a second. The newest is the one the ELF was
+# linked against.
+mapfile -t found < <(find "$crate/target/$target/release/build" -path '*esp-idf-sys*' -name flasher_args.json -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
+[ "${#found[@]}" -ge 1 ] || { echo "no flasher_args.json under $1/target: build first" >&2; exit 1; }
+[ "${#found[@]}" -eq 1 ] || echo "note: ${#found[@]} esp-idf-sys builds under $1/target; using the newest"
 args="${found[0]}"
 build="$(dirname "$args")"
 

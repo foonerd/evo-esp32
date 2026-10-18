@@ -21,13 +21,13 @@ happenings and serves projections; the catalogue tool that validates a
 example; and a host distribution that compiles its catalogue in, decodes
 FLAC, MP3 and WAV through the steward into a paced sink, bit-exact for
 the lossless two, and draws the companion's face from the projections.
-Every device-shaped crate builds for bare-metal RISC-V. The first board
-makes a sound: `firmware/waveshare-esp32-c5-touch-lcd-28` brings up the
-Waveshare ESP32-C5-Touch-LCD-2.8's codec and amplifier through the
-companion's drivers and plays a tone through its speaker over I2S, paced
-by the I2S clock to within two percent. The fabric is not on the board
-yet; that is the next step, now that frames have somewhere to go. The
-hardware layers come from
+Every device-shaped crate builds for bare-metal RISC-V. The fabric runs
+on the first board: `firmware/waveshare-esp32-c5-touch-lcd-28` brings up
+the Waveshare ESP32-C5-Touch-LCD-2.8's codec and amplifier through the
+companion's drivers, stands the steward and the three plugins up as the
+host distribution does, and plays the music on the card through an I2S
+sink paced by the I2S clock, to the board's speaker and to a Pi-HAT DAC
+on its header at once. The hardware layers come from
 [volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion)
 by tag. The [wiki](https://github.com/foonerd/evo-esp32/wiki) has the
 [hardware](https://github.com/foonerd/evo-esp32/wiki/Hardware) the
@@ -77,9 +77,9 @@ make a panel a player.
 | | `org-evoframework-playback-symphonia` | `playback/decode` for real: FLAC, MP3, WAV and PCM through [Symphonia](https://github.com/pdeljanov/Symphonia) into the distribution's `FrameSink`, a bounded slice per tick, the sink pacing; position from frames delivered; seek to the frame. std. | Apache-2.0 |
 | | `org-evoframework-delivery-null` | `delivery/output` with no sink: volume and mute on an `output` subject. `no_std`. | Apache-2.0 |
 | `distributions/host/` | `evo-esp32-host` | What a firmware distribution does, on a desktop: the catalogue compiled in by `build.rs`, checked against the plugins at start, the three admitted, a track listed and decoded through the steward into a sink made of a clock and a file (`--wav` keeps what was heard), projections and happenings printed, and the panel as a consumer: the companion's pages drawn from the playback and delivery projections, written as a PNG. | BSL 1.1 |
-| `firmware/` | | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board crate it stands on. None yet. | BSL 1.1 |
+| `firmware/` | `evo-esp32-waveshare-esp32-c5-touch-lcd-28` | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board it stands on. The first: the fabric on the Waveshare ESP32-C5-Touch-LCD-2.8, the card as the files source, Symphonia into an I2S sink with the DMA as the buffer, the ES8311 following the stream's rate, a Pi-HAT DAC on the header playing the same frames. | BSL 1.1 |
 
-Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop; `distributions/host/src/panel.rs` is that consumer, mapping the fabric's state to the companion's `PlayerState` and drawing with its `core`. Frames are not values either: the decoder writes to a `FrameSink` the distribution owns (`sdk::contract::audio::playback::FrameSink`), as evo-device-audio's decoder writes to the operating system's audio stack and not to the fabric; on a board that sink is the I2S peripheral, on the host a clock and a file. The companion is a dependency by commit until its first tag, and the dependency runs that way only. Next: the ES8311 and an I2S sink behind `delivery/output`; the first firmware distribution on the companion's board crate; the decoder measured on the target.
+Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop; `distributions/host/src/panel.rs` is that consumer, mapping the fabric's state to the companion's `PlayerState` and drawing with its `core`. Frames are not values either: the decoder writes to a `FrameSink` the distribution owns (`sdk::contract::audio::playback::FrameSink`), as evo-device-audio's decoder writes to the operating system's audio stack and not to the fabric; on a board that sink is the I2S peripheral, on the host a clock and a file. The companion is a dependency by commit until its first tag, and the dependency runs that way only. Next: the output plugin owning the codec's volume and mute instead of the null one; the panel as a consumer on the board's display; a DAC driver per HAT the fleet has.
 
 ## Build
 

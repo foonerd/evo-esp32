@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the fabric on the board.
+  The card mounted through the companion's platform crate; the catalogue
+  compiled in by `build.rs` and checked against the plugins at start; the
+  steward with the files source, the Symphonia decoder and the null
+  output; the tracks at the card's root played once each through
+  `sink::I2sSink`, I2S0 with its DMA as the buffer: the decoder offers
+  frames, the sink takes what fits with a zero timeout and says how many,
+  a frame cut by the DMA boundary carried into the next call, mono
+  doubled into both slots, the channel rebuilt and the ES8311 told when a
+  stream's rate differs. A card with no music gets a two-second `tone.wav`
+  first. Half a second of 1 kHz at boot as the self-test; an ES9018K2M on
+  the HAT's I2C brought up when one answers. Every happening logged; a
+  heartbeat every ten seconds with the heap and the main stack's
+  low-water mark. Bench: 2 s of WAV from the card decoded and played in
+  2.07 s, custody taken and released, no watchdog, 45 KB of the main
+  task's 48 KB stack never touched. Found on the way: ESP-IDF's `usleep()`
+  spins below one scheduler tick, so at 100 Hz the idle task starved once
+  the fabric went quiet; `CONFIG_FREERTOS_HZ=1000`. A full DMA is the
+  HAL's `ESP_ERR_TIMEOUT` with nothing taken, which is the sink
+  contract's "ask again", not a warning.
+- `scripts/image.sh` takes the newest esp-idf-sys build under `target/`
+  when an sdkconfig change has left two.
+
 - `firmware/waveshare-esp32-c5-touch-lcd-28`: the first firmware, and the
   first sound. std Rust on ESP-IDF v5.5.5 (the companion's pin and build
   files); the IO expander and the ES8311 through the companion's drivers

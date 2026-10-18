@@ -1,5 +1,6 @@
 # Rust std needs more than the default main task stack.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# The decoder runs on the main task; the heartbeat reports its low-water mark.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
 
@@ -19,3 +20,8 @@ CONFIG_FATFS_LFN_HEAP=y
 # The console on the USB Serial/JTAG port the board is programmed through,
 # so UART0's pins (GPIO11, GPIO12 on J6) are free for the HAT's I2S data.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# A 1 ms scheduler tick. Below one tick, ESP-IDF's usleep() spins instead
+# of yielding, so at the default 100 Hz every sleep under 10 ms starves the
+# idle task and its watchdog bites. The decoder is paced in milliseconds.
+CONFIG_FREERTOS_HZ=1000

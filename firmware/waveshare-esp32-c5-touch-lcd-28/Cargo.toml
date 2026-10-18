@@ -22,13 +22,24 @@ ch32v003-expander = { git = "https://github.com/foonerd/volumio-esp-companion", 
 es8311 = { git = "https://github.com/foonerd/volumio-esp-companion", tag = "v0.1.0" }
 # By commit until the companion's next tag carries it.
 es9018k2m = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "a44124c" }
+companion-platform-esp-idf = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "a44124c" }
 embedded-hal-bus = "0.3"
 esp-idf-svc = { version = "0.53", features = ["std", "binstart"] }
 log = "0.4"
 anyhow = "1"
+# The fabric, by path: this crate is a workspace of its own for the ESP
+# target, but the code it runs is this repository's.
+evo-esp32-sdk = { path = "../../sdk" }
+evo-esp32-steward = { path = "../../steward" }
+evo-esp32-catalogue = { path = "../../catalogue" }
+org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
+org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia" }
+org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }
+serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 
 [build-dependencies]
 embuild = "0.33.5"
+evo-esp32-catalogue = { path = "../../catalogue" }
 
 [profile.release]
 opt-level = "s"

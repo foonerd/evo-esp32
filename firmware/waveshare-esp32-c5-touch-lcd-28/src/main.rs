@@ -3,8 +3,7 @@
 
 //! evo-esp32 on the Waveshare ESP32-C5-Touch-LCD-2.8.
 //!
-//! The first thing this firmware does is make a sound, because nothing
-//! else about a player matters until it does. On boot:
+//! The fabric on its first board. On boot:
 //! 1. The I2C bus (SDA GPIO0, SCL GPIO1) shared by the IO expander and
 //!    the codec, as the vendor BSP wires it.
 //! 2. The CH32V003 expander up with its outputs high; EXIO3 is the
@@ -12,49 +11,75 @@
 //! 3. The ES8311 answers its chip ID, is opened, told the stream's
 //!    rate and width, started, unmuted, set to a modest volume.
 //! 4. I2S0 as master in Philips format, 16-bit stereo slots, on the
-//!    BSP's pins: BCLK GPIO24, WS GPIO25, data to the codec GPIO26, no
-//!    MCLK (the codec derives its own from the bit clock).
-//! 5. The same three I2S signals mirrored through the GPIO matrix onto
-//!    the header pins a Pi-HAT DAC can reach: BCLK on GPIO2 and WS on
-//!    GPIO3 (J8 pins 7 and 8), data on GPIO11 (J6's TXD, free once the
-//!    console is on USB). The speaker and the HAT play the same frames.
-//!    If an ES9018K2M answers on the bus (a LightSABRE or an I-Sabre K2M
-//!    HAT on J5's SDA/SCL), it is brought up and set to a modest volume;
-//!    a HAT without one, a bare PCM5102A, needs nothing said to it.
-//! 6. A 1 kHz tone for two seconds every ten, each one logged with how
-//!    long the write took: paced by the I2S clock it takes two seconds,
-//!    and that figure is the proof the clock is right before any
-//!    decoder is asked for frames.
-//!
-//! Everything here is the device layer; the fabric arrives once this
-//! is heard.
+//!    BSP's pins (BCLK GPIO24, WS GPIO25, data to the codec GPIO26, no
+//!    MCLK), as the board's [`sink::I2sSink`].
+//! 5. The same three signals mirrored through the GPIO matrix onto the
+//!    header pins a Pi-HAT DAC can reach: BCLK GPIO2 (J8.7), WS GPIO3
+//!    (J8.8), data GPIO11 (J6 TXD; the console is on USB). An ES9018K2M
+//!    answering on J5's I2C is brought up; a HAT without one needs
+//!    nothing said to it. The speaker and the HAT play the same frames.
+//! 6. Half a second of 1 kHz through the sink: the boot's self-test,
+//!    and the proof the clock is right before a decoder is asked for
+//!    frames.
+//! 7. The card mounted at `/sdcard`. Without one there is nothing to
+//!    play and the firmware says so and idles.
+//! 8. The fabric, as the host distribution builds it: the catalogue
+//!    compiled in and checked against the plugins, the steward, the files
+//!    source over the card, the Symphonia decoder into the I2S sink, the
+//!    null output. The tracks at the card's root are played once each
+//!    in order; every happening goes to the log, and a heartbeat every
+//!    ten seconds says what the heap and the main stack have left. A
+//!    card with no music gets `tone.wav` written to it first, so the
+//!    whole path is proven on any card.
+
+mod sink;
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use ch32v003_expander::{Expander, Pin as Exio};
+use companion_platform_esp_idf::Card;
 use embedded_hal_bus::i2c::RefCellDevice;
 use es8311::Es8311;
 use es9018k2m::Es9018k2m;
-use esp_idf_svc::hal::gpio::{AnyIOPin, Pin};
+use esp_idf_svc::hal::gpio::Pin;
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
-use esp_idf_svc::hal::i2s::config::{
-    Config as I2sChannelConfig, DataBitWidth, SlotMode, StdClkConfig,
-    StdConfig, StdGpioConfig, StdSlotConfig,
-};
-use esp_idf_svc::hal::i2s::I2sDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::spi::{config::DriverConfig, Dma, SpiDriver};
 use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
+use evo_esp32_sdk::catalogue::Catalogue;
+use evo_esp32_sdk::contract::audio::playback::Play;
+use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
+use evo_esp32_sdk::contract::audio::{
+    delivery, from_value, shelf, to_value, Track,
+};
+use evo_esp32_sdk::happening::Seq;
+use evo_esp32_sdk::plugin::{Plugin, PluginDescription};
+use evo_esp32_sdk::respondent::{CorrelationId, Request};
+use evo_esp32_sdk::subject::SubjectId;
+use evo_esp32_sdk::warden::Assignment;
+use evo_esp32_sdk::Ticks;
+use evo_esp32_steward::{Config, Steward};
 use log::{info, warn};
+use org_evoframework_delivery_null::DeliveryNull;
+use org_evoframework_playback_symphonia::PlaybackSymphonia;
+use org_evoframework_source_files::SourceFiles;
+use sink::{I2sSink, RateFollower};
 
-/// The stream the tone is made in.
+mod generated {
+    //! `catalogue()`, from `catalogue.toml` at build time.
+    extern crate alloc;
+    include!(concat!(env!("OUT_DIR"), "/catalogue.rs"));
+}
+
+/// The rate the sink opens at; a stream at another rate reopens it.
 const RATE: u32 = 44_100;
-/// Tone pitch and length, and the silence between tones.
+/// The self-test tone.
 const TONE_HZ: f32 = 1000.0;
-const TONE: Duration = Duration::from_secs(2);
-const REST: Duration = Duration::from_secs(8);
+const TONE: Duration = Duration::from_millis(500);
 /// Tone amplitude as a fraction of full scale; the amplifier is small
 /// and the speaker smaller.
 const AMPLITUDE: f32 = 0.3;
@@ -63,11 +88,30 @@ const VOLUME_PERCENT: u8 = 40;
 /// The board's hardware gain the codec driver takes off, in half-dB
 /// (the vendor's 5 V amplifier against the codec's 3.3 V output).
 const HW_GAIN_HALF_DB: i16 = -7;
+/// Where the card appears, and where the files source looks.
+const MUSIC: &str = companion_platform_esp_idf::card::MOUNT_POINT;
+/// How often the loop logs the heap and the stack.
+const HEARTBEAT: Duration = Duration::from_secs(10);
+/// How long the loop sleeps between ticks when the fabric is idle.
+const TICK: Duration = Duration::from_millis(5);
 
 /// The expander lines this board drives.
 const TOUCH_RST: Exio = Exio::P0;
 const PANEL_RST: Exio = Exio::P1;
 const AMP_EN: Exio = Exio::P3;
+
+type Bus = &'static RefCell<I2cDriver<'static>>;
+
+/// The codec follows the sink's rate.
+struct Codec(Es8311<RefCellDevice<'static, I2cDriver<'static>>>);
+
+impl RateFollower for Codec {
+    fn rate_changed(&mut self, rate: u32, bits: u8) {
+        if let Err(e) = self.0.set_format(rate, bits) {
+            warn!("es8311: no setting for {rate} Hz {bits}-bit: {e:?}; the speaker may be off-pitch");
+        }
+    }
+}
 
 fn main() -> anyhow::Result<()> {
     sys::link_patches();
@@ -79,18 +123,21 @@ fn main() -> anyhow::Result<()> {
     );
 
     let Peripherals {
-        i2c0, i2s0, pins, ..
+        i2c0,
+        i2s0,
+        spi2,
+        pins,
+        ..
     } = Peripherals::take()?;
 
-    // The bus, leaked: it lives as long as the firmware, and both the
-    // expander and the codec borrow it.
-    let bus: &'static RefCell<I2cDriver<'static>> =
-        Box::leak(Box::new(RefCell::new(I2cDriver::new(
-            i2c0,
-            pins.gpio0,
-            pins.gpio1,
-            &I2cConfig::new().baudrate(400.kHz().into()),
-        )?)));
+    // The bus, leaked: it lives as long as the firmware, and the expander,
+    // the codec and a HAT's DAC borrow it.
+    let bus: Bus = Box::leak(Box::new(RefCell::new(I2cDriver::new(
+        i2c0,
+        pins.gpio0,
+        pins.gpio1,
+        &I2cConfig::new().baudrate(400.kHz().into()),
+    )?)));
 
     let mut expander = Expander::new(RefCellDevice::new(bus));
     expander
@@ -124,33 +171,20 @@ fn main() -> anyhow::Result<()> {
     codec
         .set_volume(half_db)
         .map_err(|e| anyhow::anyhow!("es8311 volume: {e:?}"))?;
-    info!(
-        "es8311: open, {RATE} Hz 16-bit, started, volume {VOLUME_PERCENT}% ({half_db} half-dB), bit clock {} Hz",
-        es8311::bit_clock_for(RATE)
-    );
+    info!("es8311: open, {RATE} Hz 16-bit, started, volume {VOLUME_PERCENT}% ({half_db} half-dB)");
 
-    let config = StdConfig::new(
-        I2sChannelConfig::default().auto_clear(true),
-        StdClkConfig::from_sample_rate_hz(RATE),
-        StdSlotConfig::philips_slot_default(
-            DataBitWidth::Bits16,
-            SlotMode::Stereo,
-        ),
-        StdGpioConfig::default(),
-    );
-    let mut i2s = I2sDriver::new_std_tx(
+    let mut sink = I2sSink::new(
         i2s0,
-        &config,
         pins.gpio24,
         pins.gpio26,
-        None::<AnyIOPin>,
         pins.gpio25,
+        RATE,
+        Codec(codec),
     )?;
-    i2s.tx_enable()?;
     info!("i2s0: master, Philips 16-bit stereo, BCLK GPIO24, WS GPIO25, DOUT GPIO26");
 
     // The HAT's copy of the bus. The Pi header's I2S is BCLK pin 12, LRCLK
-    // pin 35, DIN pin 40, 5 V pin 2, GND pin 6.
+    // pin 35, DIN pin 40, GND pin 6; the HAT's 5 V is its own.
     mirror(pins.gpio2.pin(), sys::I2SO_BCK_OUT_IDX);
     mirror(pins.gpio3.pin(), sys::I2SO_WS_OUT_IDX);
     mirror(pins.gpio11.pin(), sys::I2SO_SD_OUT_IDX);
@@ -176,20 +210,267 @@ fn main() -> anyhow::Result<()> {
         Err(_) => info!("es9018k2m: none on the bus"),
     }
 
-    let tone = tone_bytes();
-    let mut n = 0u32;
+    let started = Instant::now();
+    sink.tone_blocking(&tone_bytes())?;
+    info!(
+        "self-test: {} ms of tone written in {} ms",
+        TONE.as_millis(),
+        started.elapsed().as_millis()
+    );
+
+    let spi = Rc::new(SpiDriver::new(
+        spi2,
+        pins.gpio6,
+        pins.gpio7,
+        Some(pins.gpio8),
+        &DriverConfig::new().dma(Dma::Auto(4096)),
+    )?);
+    let _card = match Card::mount(spi, pins.gpio23) {
+        Ok(card) => {
+            info!("card: mounted at {MUSIC}, {} MB", card.capacity >> 20);
+            card
+        }
+        Err(e) => {
+            warn!("card: none mounted ({e}); nothing to play");
+            idle();
+        }
+    };
+
+    let now = || Ticks(started.elapsed().as_millis() as u64);
+    let mut steward = bring_up(sink, now()).map_err(|e| anyhow::anyhow!(e))?;
+    info!(
+        "steward up with {} plugins: {}",
+        steward.plugins().count(),
+        steward
+            .plugins()
+            .map(|p| p.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    let mut tracks =
+        list_tracks(&mut steward, now()).map_err(|e| anyhow::anyhow!(e))?;
+    if tracks.is_empty() {
+        // A card with no music gets a tone to play, so the path from the
+        // card through the decoder to the sink is proven on any card.
+        let path = format!("{MUSIC}/tone.wav");
+        match write_tone_wav(&path) {
+            Ok(bytes) => info!("no audio file on the card; wrote {path} ({bytes} bytes)"),
+            Err(e) => warn!("no audio file on the card and {path} could not be written: {e}"),
+        }
+        tracks =
+            list_tracks(&mut steward, now()).map_err(|e| anyhow::anyhow!(e))?;
+        if tracks.is_empty() {
+            warn!("still nothing to play");
+            idle();
+        }
+    }
+    // Each track once, in the card's order; then the fabric idles.
+    let mut next = 0usize;
+    play(&mut steward, &tracks[next], now());
+    next += 1;
+
+    let mut seen = Seq(0);
+    let mut last_beat = Instant::now();
     loop {
-        n += 1;
-        let started = Instant::now();
-        i2s.write_all(&tone, sys::TickType_t::MAX)?;
-        let took = started.elapsed();
-        info!(
-            "tone {n}: {} bytes written in {} ms (expected {} ms)",
-            tone.len(),
-            took.as_millis(),
-            TONE.as_millis()
-        );
-        std::thread::sleep(REST);
+        let t = now();
+        let due = steward.tick(t);
+        for h in steward.happenings_since(seen).happenings {
+            seen = h.seq;
+            let kind = serde_json::to_string(&h.kind).unwrap_or_default();
+            info!(
+                "#{:<4} +{:>7} ms  {kind}{}",
+                h.seq.0,
+                h.at.0,
+                h.subject
+                    .as_ref()
+                    .map(|s| format!("  {s}"))
+                    .unwrap_or_default()
+            );
+            if kind.contains("custody_released") {
+                if let Some(track) = tracks.get(next) {
+                    play(&mut steward, track, now());
+                    next += 1;
+                } else if next == tracks.len() {
+                    info!(
+                        "all {} tracks played; the fabric idles",
+                        tracks.len()
+                    );
+                    next += 1;
+                }
+            }
+        }
+        if last_beat.elapsed() >= HEARTBEAT {
+            last_beat = Instant::now();
+            // SAFETY: plain getters; a null handle means the calling task.
+            let (free, min, stack) = unsafe {
+                (
+                    sys::esp_get_free_heap_size(),
+                    sys::esp_get_minimum_free_heap_size(),
+                    sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut()),
+                )
+            };
+            info!("heartbeat: free heap {free} B, low-water {min} B, main stack low-water {stack} B");
+        }
+        // The idle task must run or its watchdog bites: a short sleep
+        // when the fabric wants ticking now, the tick length otherwise.
+        std::thread::sleep(if due.is_some_and(|d| d.0 <= t.0) {
+            Duration::from_millis(1)
+        } else {
+            TICK
+        });
+    }
+}
+
+/// The catalogue this distribution was built with.
+fn catalogue() -> Catalogue {
+    generated::catalogue()
+}
+
+/// The plugins this distribution admits, in admission order, described
+/// so the catalogue can be checked against them before any is loaded.
+fn descriptions() -> Vec<PluginDescription> {
+    vec![
+        SourceFiles::new(MUSIC).describe(),
+        PlaybackSymphonia::new(Box::new(Silent)).describe(),
+        DeliveryNull::new().describe(),
+    ]
+}
+
+/// A sink that takes nothing, for describing the decoder before the
+/// real one is handed over.
+struct Silent;
+
+impl evo_esp32_sdk::contract::audio::playback::FrameSink for Silent {
+    fn start(&mut self, _: &evo_esp32_sdk::contract::audio::playback::Format) {}
+    fn write(&mut self, _: &[i16]) -> usize {
+        0
+    }
+    fn flush(&mut self) {}
+    fn stop(&mut self) {}
+}
+
+/// Build the fabric: steward, plugins, checked against the catalogue.
+fn bring_up(sink: I2sSink<Codec>, now: Ticks) -> Result<Steward, String> {
+    let catalogue = catalogue();
+    let report = evo_esp32_catalogue::check(&catalogue, &descriptions());
+    if !report.is_clean() {
+        return Err(format!("the catalogue is not stocked:\n{report}"));
+    }
+    let mut steward = Steward::new(catalogue, Config::default())
+        .map_err(|e| e.to_string())?;
+    steward
+        .admit_respondent(Box::new(SourceFiles::new(MUSIC)), now)
+        .map_err(|e| e.to_string())?;
+    steward
+        .admit_warden(Box::new(PlaybackSymphonia::new(Box::new(sink))), now)
+        .map_err(|e| e.to_string())?;
+    steward
+        .admit_respondent(Box::new(DeliveryNull::new()), now)
+        .map_err(|e| e.to_string())?;
+    Ok(steward)
+}
+
+/// Ask the source for the root and keep the tracks it lists, in order.
+fn list_tracks(
+    steward: &mut Steward,
+    now: Ticks,
+) -> Result<Vec<Track>, String> {
+    let response = steward
+        .request(
+            &Request {
+                cid: CorrelationId(1),
+                shelf: shelf::source_files(),
+                verb: LIST.into(),
+                subject: None,
+                args: to_value(&ListArgs::default()),
+            },
+            now,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+    let listing: Listing = match response.outcome {
+        Ok(v) => from_value(&v)?,
+        Err(f) => return Err(format!("list: {f:?}")),
+    };
+    info!("source/files lists {} entries:", listing.entries.len());
+    let mut tracks = Vec::new();
+    for e in listing.entries {
+        match e {
+            Entry::Folder { name, .. } => info!("  {name}/"),
+            Entry::Track(t) => {
+                info!("  {}", t.title);
+                tracks.push(t);
+            }
+        }
+    }
+    Ok(tracks)
+}
+
+/// Give the decoder custody of `track` from its start, at the volume.
+fn play(steward: &mut Steward, track: &Track, now: Ticks) {
+    match steward.assign(
+        &shelf::playback_decode(),
+        Assignment {
+            subject: SubjectId::new("playback/now"),
+            instruction: to_value(&Play {
+                track: track.clone(),
+                start_ms: 0,
+            }),
+        },
+        now,
+    ) {
+        Ok(handle) => {
+            info!("playing {:?} under custody {}", track.title, handle.0)
+        }
+        Err(e) => warn!("assign {:?}: {e:?}", track.title),
+    }
+    let _ = steward.request(
+        &Request {
+            cid: CorrelationId(2),
+            shelf: shelf::delivery_output(),
+            verb: delivery::VOLUME.into(),
+            subject: None,
+            args: to_value(&delivery::Volume {
+                level: VOLUME_PERCENT,
+            }),
+        },
+        now,
+    );
+}
+
+/// Two seconds of the self-test tone as a 44.1 kHz 16-bit stereo WAV at
+/// `path`; the bytes written.
+fn write_tone_wav(path: &str) -> std::io::Result<usize> {
+    use std::io::Write;
+    let mut pcm = tone_bytes();
+    pcm.extend_from_within(..); // the half-second tone, four times
+    pcm.extend_from_within(..);
+    let data_len = pcm.len() as u32;
+    let mut f = std::fs::File::create(path)?;
+    let mut header = Vec::with_capacity(44);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(36 + data_len).to_le_bytes());
+    header.extend_from_slice(b"WAVEfmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    header.extend_from_slice(&2u16.to_le_bytes()); // channels
+    header.extend_from_slice(&RATE.to_le_bytes());
+    header.extend_from_slice(&(RATE * 4).to_le_bytes()); // bytes per second
+    header.extend_from_slice(&4u16.to_le_bytes()); // block align
+    header.extend_from_slice(&16u16.to_le_bytes()); // bits
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+    f.write_all(&header)?;
+    f.write_all(&pcm)?;
+    f.flush()?;
+    Ok(header.len() + pcm.len())
+}
+
+/// Nothing to do; stay up so the log stays readable.
+fn idle() -> ! {
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+        info!("idle");
     }
 }
 
