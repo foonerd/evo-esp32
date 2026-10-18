@@ -15,3 +15,7 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
 # The card: long file names (the default is 8.3 only), buffers on the heap.
 CONFIG_FATFS_LFN_HEAP=y
+
+# The console on the USB Serial/JTAG port the board is programmed through,
+# so UART0's pins (GPIO11, GPIO12 on J6) are free for the HAT's I2S data.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

@@ -15,7 +15,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each logged with the time the write took. Bench: chip ID `83 11 01`,
   352 800 bytes in 1 972 ms against 2 000 expected. Found on the way: the
   C5 has no FPU, and 88 200 software sines took eight seconds and tripped
-  the idle task's watchdog; the tone is one exact cycle, tiled.
+  the idle task's watchdog; the tone is one exact cycle, tiled. The three
+  I2S signals are also mirrored through the GPIO matrix onto header pins
+  a Pi-HAT DAC can reach (BCLK GPIO2, WS GPIO3, data GPIO11), with the
+  console moved to the USB Serial/JTAG port so J6 is free; the speaker
+  and the HAT play the same frames.
 - `scripts/image.sh` from the companion, naming the image by the crate;
   `scripts/check.sh` builds every firmware crate with clippy and drops an
   esp-idf-sys CMake cache made against another ESP-IDF version; CI gains
