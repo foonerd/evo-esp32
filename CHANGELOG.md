@@ -37,6 +37,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   internal SRAM free, the playback position against the clock, and dry
   spells the sink certainly had. Bench: 96 kHz FLAC at 1.000 of real
   time, 37-58% busy, no dry spell, 54 KB internal free.
+- `distributions/panel` (`evo-esp32-panel`): the panel as a consumer,
+  shared by the host and the firmware: the playback and delivery
+  projections mapped to the companion's `PlayerState`, the resting face
+  drawn on any RGB565 target, repainting the whole face only on a scene
+  change, the text block when the ticker moves, the seek strip when the
+  position has moved a second. The host's `panel.rs` is the PNG wrapper
+  over it. 2 tests.
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the panel lit. The board
+  comes up through the companion's new `boards/` crate (expander, ST7789,
+  CST3530, backlight; the I2C bus handed out for the codec and a HAT's
+  DAC), the card read before the panel as the companion does; the shared
+  face drawn every 40 ms from the projections, the backlight after the
+  first frame. The tracks are shuffled, so a bench run meets every format
+  on the card early. The heartbeat adds the drawing share and the count
+  of full frames. Every companion dependency at one commit. Measured: the
+  face costs 1-2% of the core; MP3 decodes at 0.555 of real time with the
+  core 98% busy (Symphonia's MP3 is floating point and the C5 has no
+  FPU), so MP3 is not playable on this chip as it stands.
 - `scripts/image.sh` takes the newest esp-idf-sys build under `target/`
   when an sdkconfig change has left two.
 

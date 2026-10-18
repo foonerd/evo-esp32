@@ -57,6 +57,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "az"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
+
+[[package]]
 name = "bindgen"
 version = "0.71.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -195,7 +201,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 [[package]]
 name = "ch32v003-expander"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?tag=v0.1.0#b4d3849899d3dab8788208cced7ceba73ed0a734"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -232,14 +238,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "companion-board-waveshare-esp32-c5-touch-lcd-28"
+version = "0.1.0"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
+dependencies = [
+ "ch32v003-expander",
+ "companion-hal",
+ "cst3530",
+ "embedded-hal-bus",
+ "esp-idf-svc",
+ "log",
+ "mipidsi",
+]
+
+[[package]]
+name = "companion-core"
+version = "0.1.0"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
+dependencies = [
+ "companion-hal",
+ "embedded-graphics",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "companion-hal"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=a44124c#a44124c53103b8365d9b747b779988bd518f0720"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
 
 [[package]]
 name = "companion-platform-esp-idf"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=a44124c#a44124c53103b8365d9b747b779988bd518f0720"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
 dependencies = [
  "companion-hal",
  "esp-idf-svc",
@@ -309,6 +340,15 @@ name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
+name = "cst3530"
+version = "0.1.0"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
+dependencies = [
+ "companion-hal",
+ "embedded-hal 1.0.0",
+]
 
 [[package]]
 name = "cvt"
@@ -407,7 +447,7 @@ dependencies = [
  "embedded-io-async",
  "futures-core",
  "futures-sink",
- "heapless",
+ "heapless 0.9.3",
 ]
 
 [[package]]
@@ -417,6 +457,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9d2e857f87ac832df68fa498d18ddc679175cf3d2e4aa893988e5601baf9438"
 dependencies = [
  "nb 1.1.0",
+]
+
+[[package]]
+name = "embedded-graphics"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e8da660bb0c829b34a56a965490597f82a55e767b91f9543be80ce8ccb416fe"
+dependencies = [
+ "az",
+ "byteorder",
+ "embedded-graphics-core",
+ "float-cmp",
+ "micromath",
+]
+
+[[package]]
+name = "embedded-graphics-core"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95743bef3ff70fcba3930246c4e6872882bbea0dcc6da2ca860112e0cd4bd09f"
+dependencies = [
+ "az",
+ "byteorder",
 ]
 
 [[package]]
@@ -489,7 +552,7 @@ dependencies = [
  "embedded-io",
  "embedded-io-async",
  "enumset",
- "heapless",
+ "heapless 0.9.3",
  "num_enum",
  "serde",
  "strum 0.27.2",
@@ -569,7 +632,7 @@ dependencies = [
 [[package]]
 name = "es8311"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?tag=v0.1.0#b4d3849899d3dab8788208cced7ceba73ed0a734"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -577,7 +640,7 @@ dependencies = [
 [[package]]
 name = "es9018k2m"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=a44124c#a44124c53103b8365d9b747b779988bd518f0720"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=b052ec2c63ca72647583295ccf351db6e4b1cd61#b052ec2c63ca72647583295ccf351db6e4b1cd61"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -600,7 +663,7 @@ dependencies = [
  "embuild",
  "enumset",
  "esp-idf-sys",
- "heapless",
+ "heapless 0.9.3",
  "log",
  "nb 1.1.0",
 ]
@@ -618,7 +681,7 @@ dependencies = [
  "enumset",
  "esp-idf-hal",
  "futures-io",
- "heapless",
+ "heapless 0.9.3",
  "log",
  "num_enum",
  "uncased",
@@ -656,6 +719,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-panel"
+version = "0.1.0"
+dependencies = [
+ "companion-core",
+ "embedded-graphics",
+ "evo-esp32-sdk",
+]
+
+[[package]]
 name = "evo-esp32-sdk"
 version = "0.1.0"
 dependencies = [
@@ -676,7 +748,7 @@ name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ch32v003-expander",
+ "companion-board-waveshare-esp32-c5-touch-lcd-28",
  "companion-platform-esp-idf",
  "embedded-hal-bus",
  "embuild",
@@ -684,6 +756,7 @@ dependencies = [
  "es9018k2m",
  "esp-idf-svc",
  "evo-esp32-catalogue",
+ "evo-esp32-panel",
  "evo-esp32-sdk",
  "evo-esp32-steward",
  "log",
@@ -720,6 +793,15 @@ name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
+name = "float-cmp"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "fnv"
@@ -832,6 +914,16 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
+name = "heapless"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "heapless"
@@ -1008,10 +1100,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "micromath"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "mipidsi"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790ebd28bd67addbccf41b1c0c188c26bb9f5bdcd91d4d6da9bd558e20d97a1d"
+dependencies = [
+ "embedded-graphics-core",
+ "embedded-hal 1.0.0",
+ "heapless 0.8.0",
+]
 
 [[package]]
 name = "nb"

@@ -4,10 +4,12 @@
 //! evo-esp32 on the Waveshare ESP32-C5-Touch-LCD-2.8.
 //!
 //! The fabric on its first board. On boot:
-//! 1. The I2C bus (SDA GPIO0, SCL GPIO1) shared by the IO expander and
-//!    the codec, as the vendor BSP wires it.
-//! 2. The CH32V003 expander up with its outputs high; EXIO3 is the
-//!    NS4150B amplifier's enable.
+//! 1. The SPI bus and the card on it; then the board through the
+//!    companion's board crate: the I2C bus (SDA GPIO0, SCL GPIO1), the
+//!    CH32V003 expander with its outputs high (EXIO3 is the NS4150B
+//!    amplifier's enable), the ST7789 panel, the CST3530 touch.
+//! 2. The codec and a HAT's DAC on the same I2C bus, handed out by the
+//!    board.
 //! 3. The ES8311 answers its chip ID, is opened, told the stream's
 //!    rate and width, started, unmuted, set to a modest volume.
 //! 4. I2S0 as master in Philips format, 16-bit stereo slots, on the
@@ -21,35 +23,36 @@
 //! 6. Half a second of 1 kHz through the sink: the boot's self-test,
 //!    and the proof the clock is right before a decoder is asked for
 //!    frames.
-//! 7. The card mounted at `/sdcard`. Without one there is nothing to
-//!    play and the firmware says so and idles.
+//! 7. The card mounted at `/sdcard` (before the panel, so it is read
+//!    first). Without one there is nothing to play and the firmware says
+//!    so and idles.
 //! 8. The fabric, as the host distribution builds it: the catalogue
 //!    compiled in and checked against the plugins, the steward, the files
 //!    source over the card, the Symphonia decoder into the I2S sink, the
-//!    null output. The tracks at the card's root are played once each
-//!    in order; every happening goes to the log, and a heartbeat every
-//!    ten seconds says what the heap and the main stack have left. A
-//!    card with no music gets `tone.wav` written to it first, so the
-//!    whole path is proven on any card.
+//!    null output. Every track on the card is played once, shuffled;
+//!    every happening but a position update goes to the log, and a
+//!    heartbeat every ten seconds says what the heap and the main stack
+//!    have left, how busy the core is and how the position stands
+//!    against the clock. A card with no music gets `tone.wav` written to
+//!    it first, so the whole path is proven on any card.
+//! 9. The panel as a consumer: the shared face (`evo-esp32-panel`) drawn
+//!    from the playback and delivery projections every 40 ms, repainting
+//!    only what moved; the backlight comes on after the first frame.
 
 mod sink;
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use ch32v003_expander::{Expander, Pin as Exio};
 use companion_platform_esp_idf::Card;
 use embedded_hal_bus::i2c::RefCellDevice;
 use es8311::Es8311;
 use es9018k2m::Es9018k2m;
 use esp_idf_svc::hal::gpio::Pin;
-use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::spi::{config::DriverConfig, Dma, SpiDriver};
-use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
+use evo_esp32_panel::{player_state, Face, Repaint};
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -95,13 +98,12 @@ const MUSIC: &str = companion_platform_esp_idf::card::MOUNT_POINT;
 const HEARTBEAT: Duration = Duration::from_secs(10);
 /// How long the loop sleeps between ticks when the fabric is idle.
 const TICK: Duration = Duration::from_millis(5);
-
-/// The expander lines this board drives.
-const TOUCH_RST: Exio = Exio::P0;
-const PANEL_RST: Exio = Exio::P1;
-const AMP_EN: Exio = Exio::P3;
-
-type Bus = &'static RefCell<I2cDriver<'static>>;
+/// The face's cadence: the companion steps its ticker every 40 ms.
+const FACE_TICK: Duration = Duration::from_millis(40);
+/// The panel's rotation, degrees; the companion's default.
+const ROTATION: u16 = 0;
+/// Backlight, 0 to 100.
+const BACKLIGHT_PERCENT: u8 = 100;
 
 /// The codec follows the sink's rate.
 struct Codec(Es8311<RefCellDevice<'static, I2cDriver<'static>>>);
@@ -131,25 +133,35 @@ fn main() -> anyhow::Result<()> {
         ..
     } = Peripherals::take()?;
 
-    // The bus, leaked: it lives as long as the firmware, and the expander,
-    // the codec and a HAT's DAC borrow it.
-    let bus: Bus = Box::leak(Box::new(RefCell::new(I2cDriver::new(
-        i2c0,
-        pins.gpio0,
-        pins.gpio1,
-        &I2cConfig::new().baudrate(400.kHz().into()),
-    )?)));
+    // The SPI bus first, so the card is read before the panel is up.
+    let spi = board::spi_bus(spi2, pins.gpio6, pins.gpio7, pins.gpio8)?;
+    let _card = match Card::mount(spi.clone(), pins.gpio23) {
+        Ok(card) => {
+            info!("card: mounted at {MUSIC}, {} MB", card.capacity >> 20);
+            card
+        }
+        Err(e) => {
+            warn!("card: none mounted ({e}); nothing to play");
+            idle();
+        }
+    };
 
-    let mut expander = Expander::new(RefCellDevice::new(bus));
-    expander
-        .init(TOUCH_RST.mask() | PANEL_RST.mask() | AMP_EN.mask())
-        .map_err(|e| anyhow::anyhow!("expander init: {e:?}"))?;
-    expander
-        .write_outputs(TOUCH_RST.mask() | PANEL_RST.mask() | AMP_EN.mask())
-        .map_err(|e| anyhow::anyhow!("expander outputs: {e:?}"))?;
-    info!("expander: up, outputs high (amplifier enabled on EXIO3)");
+    // The board in the vendor BSP's order: expander (amplifier enabled on
+    // EXIO3), panel, touch. The backlight waits for the first frame.
+    let mut board = board::bring_up(
+        board::Pins {
+            i2c0,
+            sda: pins.gpio0,
+            scl: pins.gpio1,
+            dc: pins.gpio9,
+            cs: pins.gpio10,
+            touch_int: pins.gpio5,
+        },
+        spi,
+        ROTATION,
+    )?;
 
-    let mut codec = Es8311::new(RefCellDevice::new(bus));
+    let mut codec = Es8311::new(RefCellDevice::new(board.bus));
     match codec.chip_id() {
         Ok(id) => {
             info!("es8311: chip id {:02x} {:02x} {:02x}", id[0], id[1], id[2])
@@ -191,7 +203,7 @@ fn main() -> anyhow::Result<()> {
     mirror(pins.gpio11.pin(), sys::I2SO_SD_OUT_IDX);
     info!("i2s0: mirrored for a HAT: BCLK GPIO2 (J8.7), WS GPIO3 (J8.8), DATA GPIO11 (J6 TXD)");
 
-    let mut sabre = Es9018k2m::new(RefCellDevice::new(bus));
+    let mut sabre = Es9018k2m::new(RefCellDevice::new(board.bus));
     match sabre.detect() {
         Ok(Some(id)) => {
             info!(
@@ -218,24 +230,6 @@ fn main() -> anyhow::Result<()> {
         TONE.as_millis(),
         started.elapsed().as_millis()
     );
-
-    let spi = Rc::new(SpiDriver::new(
-        spi2,
-        pins.gpio6,
-        pins.gpio7,
-        Some(pins.gpio8),
-        &DriverConfig::new().dma(Dma::Auto(4096)),
-    )?);
-    let _card = match Card::mount(spi, pins.gpio23) {
-        Ok(card) => {
-            info!("card: mounted at {MUSIC}, {} MB", card.capacity >> 20);
-            card
-        }
-        Err(e) => {
-            warn!("card: none mounted ({e}); nothing to play");
-            idle();
-        }
-    };
 
     let now = || Ticks(started.elapsed().as_millis() as u64);
     let mut steward = bring_up(sink, now()).map_err(|e| anyhow::anyhow!(e))?;
@@ -266,11 +260,21 @@ fn main() -> anyhow::Result<()> {
             idle();
         }
     }
-    // Each track once, in the card's order; then the fabric idles.
+    // Each track once, shuffled so a bench run meets every format and
+    // rate on the card early; then the fabric idles.
+    shuffle(&mut tracks);
+    info!("{} tracks, shuffled", tracks.len());
     let mut next = 0usize;
     play(&mut steward, &tracks[next], now());
     next += 1;
     let mut track_started = Instant::now();
+
+    // The panel: the shared face, lit after its first frame.
+    let mut face = Face::new(ROTATION);
+    let mut lit = false;
+    let mut last_face = Instant::now() - FACE_TICK;
+    let mut drawing = Duration::ZERO;
+    let mut full_frames = 0u32;
 
     let mut seen = Seq(0);
     let mut last_beat = Instant::now();
@@ -280,6 +284,24 @@ fn main() -> anyhow::Result<()> {
         let tick_started = Instant::now();
         let due = steward.tick(t);
         busy += tick_started.elapsed();
+        if last_face.elapsed() >= FACE_TICK {
+            last_face = Instant::now();
+            let state = player_state(
+                &playback_state(&steward).unwrap_or_default(),
+                output_state(&steward).as_ref(),
+            );
+            match face.refresh(&mut board.panel, &state) {
+                Ok(Repaint::Full) => full_frames += 1,
+                Ok(_) => {}
+                Err(e) => warn!("panel: {e:?}"),
+            }
+            drawing += last_face.elapsed();
+            if !lit {
+                board.backlight(BACKLIGHT_PERCENT)?;
+                lit = true;
+                info!("panel lit");
+            }
+        }
         for h in steward.happenings_since(seen).happenings {
             seen = h.seq;
             let kind = serde_json::to_string(&h.kind).unwrap_or_default();
@@ -310,9 +332,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if last_beat.elapsed() >= HEARTBEAT {
-            let busy_share =
-                busy.as_secs_f64() / last_beat.elapsed().as_secs_f64();
+            let period = last_beat.elapsed().as_secs_f64();
+            let busy_share = busy.as_secs_f64() / period;
+            let drawing_share = drawing.as_secs_f64() / period;
             busy = Duration::ZERO;
+            drawing = Duration::ZERO;
             last_beat = Instant::now();
             // SAFETY: plain getters; a null handle means the calling task.
             let (free, min, internal, stack) = unsafe {
@@ -323,7 +347,12 @@ fn main() -> anyhow::Result<()> {
                     sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut()),
                 )
             };
-            info!("heartbeat: free heap {free} B (internal {internal} B), low-water {min} B, main stack low-water {stack} B, ticking {:.0}% of the time", busy_share * 100.0);
+            info!(
+                "heartbeat: free heap {free} B (internal {internal} B), low-water {min} B, main stack low-water {stack} B, ticking {:.0}% and drawing {:.0}% of the time, {full_frames} full frames",
+                busy_share * 100.0,
+                drawing_share * 100.0
+            );
+            full_frames = 0;
             report_playback(&steward, track_started.elapsed());
             if let Some(line) = sink::report_dry() {
                 warn!("sink: {line}");
@@ -453,17 +482,41 @@ fn list_folder(
     }
 }
 
+/// The playback projection's state, if a warden has published one.
+fn playback_state(steward: &Steward) -> Option<playback::State> {
+    steward
+        .projection(ProjectionKey::Rack {
+            name: shelf::PLAYBACK.into(),
+        })
+        .subjects
+        .first()
+        .and_then(|s| from_value(&s.state).ok())
+}
+
+/// The output's state, if the delivery plugin has published one.
+fn output_state(steward: &Steward) -> Option<delivery::State> {
+    steward
+        .projection(ProjectionKey::Rack {
+            name: shelf::DELIVERY.into(),
+        })
+        .subjects
+        .first()
+        .and_then(|s| from_value(&s.state).ok())
+}
+
+/// A Fisher-Yates shuffle on the chip's hardware random numbers.
+fn shuffle<T>(items: &mut [T]) {
+    for i in (1..items.len()).rev() {
+        // SAFETY: esp_random reads the hardware RNG; no preconditions.
+        let r = unsafe { sys::esp_random() } as usize;
+        items.swap(i, r % (i + 1));
+    }
+}
+
 /// The playback projection against the wall clock since the track was
 /// assigned: position over elapsed is 1.0 when the decoder keeps up.
 fn report_playback(steward: &Steward, elapsed: Duration) {
-    let p = steward.projection(ProjectionKey::Rack {
-        name: shelf::PLAYBACK.into(),
-    });
-    let Some(st) = p
-        .subjects
-        .first()
-        .and_then(|s| from_value::<playback::State>(&s.state).ok())
-    else {
+    let Some(st) = playback_state(steward) else {
         return;
     };
     let elapsed_ms = elapsed.as_millis().max(1) as u64;

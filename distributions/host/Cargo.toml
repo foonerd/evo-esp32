@@ -12,12 +12,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# The companion's pages, by commit until its first tag (MIT; the
-# dependency runs this way only, never the reverse).
-companion-core = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "581a51121470ee266968502e7240f8af326a1987" }
 embedded-graphics = "0.8"
 embedded-graphics-simulator = { version = "0.8", default-features = false }
 evo-esp32-catalogue = { path = "../../catalogue" }
+evo-esp32-panel = { path = "../panel" }
 evo-esp32-sdk = { path = "../../sdk" }
 evo-esp32-steward = { path = "../../steward" }
 org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }
