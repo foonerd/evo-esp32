@@ -1,0 +1,365 @@
+// Copyright (c) 2026 Just a Nerd
+// SPDX-License-Identifier: Apache-2.0
+
+//! The audio player's shelves, from evo-device-audio's slot vocabulary.
+//!
+//! | Rack | Shelf | Shape | Interaction | What stocks it |
+//! | --- | --- | --- | --- | --- |
+//! | `source` | `files` | 1 | respondent | a tree of files: a card, a directory |
+//! | `source` | `radio` | 1 | respondent | streams by URL |
+//! | `playback` | `decode` | 1 | warden | turns a track into frames and drives them out |
+//! | `delivery` | `output` | 1 | respondent | the sink's level and mute |
+//! | `metadata` | `tags` | 1 | respondent | what a track is called |
+//! | `artwork` | `embedded` | 1 | respondent | where a track's picture is |
+//!
+//! Presentation is not a shelf. The panel is a consumer: it reads the
+//! steward's projections and draws, as the network does; a plugin cannot,
+//! because a plugin holds a [`Context`](crate::context::Context) and not
+//! the steward. The distribution's loop is where the pages live.
+//!
+//! Every type here serialises to the JSON the fabric carries and back;
+//! `to_value` and `from_value` are the two conversions, so a plugin does
+//! not hand-build objects and a consumer does not hand-read them.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+use crate::catalogue::ShelfRef;
+use crate::Value;
+
+/// A value in the contract's shape, or why the given one was not.
+pub fn from_value<T: DeserializeOwned>(v: &Value) -> Result<T, String> {
+    serde_json::from_value(v.clone()).map_err(|e| alloc::format!("{e}"))
+}
+
+/// A contract type as the value the fabric carries.
+pub fn to_value<T: Serialize>(t: &T) -> Value {
+    serde_json::to_value(t).unwrap_or(Value::Null)
+}
+
+/// The shelves, one spelling for catalogues, plugins and consumers.
+pub mod shelf {
+    use super::ShelfRef;
+
+    /// Rack `source`.
+    pub const SOURCE: &str = "source";
+    /// Rack `playback`.
+    pub const PLAYBACK: &str = "playback";
+    /// Rack `delivery`.
+    pub const DELIVERY: &str = "delivery";
+    /// Rack `metadata`.
+    pub const METADATA: &str = "metadata";
+    /// Rack `artwork`.
+    pub const ARTWORK: &str = "artwork";
+
+    /// `source/files`.
+    pub const FILES: &str = "files";
+    /// `source/radio`.
+    pub const RADIO: &str = "radio";
+    /// `playback/decode`.
+    pub const DECODE: &str = "decode";
+    /// `delivery/output`.
+    pub const OUTPUT: &str = "output";
+    /// `metadata/tags`.
+    pub const TAGS: &str = "tags";
+    /// `artwork/embedded`.
+    pub const EMBEDDED: &str = "embedded";
+
+    /// The shape every shelf in this contract is at.
+    pub const SHAPE: u32 = 1;
+
+    /// `source/files` as a reference.
+    pub fn source_files() -> ShelfRef {
+        ShelfRef::new(SOURCE, FILES)
+    }
+    /// `source/radio` as a reference.
+    pub fn source_radio() -> ShelfRef {
+        ShelfRef::new(SOURCE, RADIO)
+    }
+    /// `playback/decode` as a reference.
+    pub fn playback_decode() -> ShelfRef {
+        ShelfRef::new(PLAYBACK, DECODE)
+    }
+    /// `delivery/output` as a reference.
+    pub fn delivery_output() -> ShelfRef {
+        ShelfRef::new(DELIVERY, OUTPUT)
+    }
+    /// `metadata/tags` as a reference.
+    pub fn metadata_tags() -> ShelfRef {
+        ShelfRef::new(METADATA, TAGS)
+    }
+    /// `artwork/embedded` as a reference.
+    pub fn artwork_embedded() -> ShelfRef {
+        ShelfRef::new(ARTWORK, EMBEDDED)
+    }
+}
+
+/// What a track is, wherever it came from. The state of a `track` subject
+/// and the entry a source lists.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Track {
+    /// How to ask for it again: `file:///music/a.flac`,
+    /// `http://host/stream`.
+    pub uri: String,
+    /// Title, or the file name when nothing better is known.
+    pub title: String,
+    /// Artist, where known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    /// Album, where known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// Length in milliseconds, where known. Streams have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+/// The subject kind a source announces a track under.
+pub const TRACK_KIND: &str = "track";
+
+/// `source/*`: where tracks come from.
+pub mod source {
+    use super::*;
+
+    /// Verb: list what is under a path. Args [`ListArgs`], reply [`Listing`].
+    pub const LIST: &str = "list";
+
+    /// Arguments to [`LIST`].
+    #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub struct ListArgs {
+        /// Where to look, in the source's own terms; empty is the root.
+        #[serde(default)]
+        pub path: String,
+    }
+
+    /// One thing a listing holds.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case", tag = "entry")]
+    pub enum Entry {
+        /// Somewhere to list further.
+        Folder {
+            /// Its path, to pass back as [`ListArgs::path`].
+            path: String,
+            /// What to call it.
+            name: String,
+        },
+        /// Something to play.
+        Track(Track),
+    }
+
+    /// Reply to [`LIST`].
+    #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub struct Listing {
+        /// The path that was listed.
+        pub path: String,
+        /// Its entries, folders first, each group in the source's order.
+        pub entries: Vec<Entry>,
+    }
+}
+
+/// `playback/decode`: the warden that plays.
+pub mod playback {
+    use super::*;
+
+    /// The subject kind the warden keeps its state under.
+    pub const KIND: &str = "playback";
+
+    /// Where the warden is.
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+    )]
+    #[serde(rename_all = "lowercase")]
+    pub enum Status {
+        /// Nothing in custody.
+        #[default]
+        Stopped,
+        /// Frames are going out.
+        Playing,
+        /// Held at a position.
+        Paused,
+    }
+
+    /// The stream's format once the decoder knows it.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Format {
+        /// Codec name as the decoder reports it: `flac`, `mp3`, `pcm`.
+        pub codec: String,
+        /// Frames per second.
+        pub sample_rate: u32,
+        /// Bits per sample.
+        pub bits: u8,
+        /// Channels.
+        pub channels: u8,
+    }
+
+    /// The warden's state: what a consumer draws.
+    #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+    pub struct State {
+        /// Where the warden is.
+        pub status: Status,
+        /// The track in custody, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub track: Option<Track>,
+        /// Position in the track, milliseconds.
+        pub position_ms: u64,
+        /// The stream's format, once known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub format: Option<Format>,
+    }
+
+    /// An [`Assignment`](crate::warden::Assignment)'s instruction.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Play {
+        /// What to play.
+        pub track: Track,
+        /// Where to start, milliseconds.
+        #[serde(default)]
+        pub start_ms: u64,
+    }
+
+    /// A [`CourseCorrection`](crate::warden::CourseCorrection)'s instruction.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case", tag = "do")]
+    pub enum Correction {
+        /// Hold at the current position.
+        Pause,
+        /// Carry on from it.
+        Resume,
+        /// Move to a position.
+        Seek {
+            /// Milliseconds from the start.
+            position_ms: u64,
+        },
+    }
+}
+
+/// `delivery/output`: the sink.
+pub mod delivery {
+    use super::*;
+
+    /// The subject kind the sink keeps its state under.
+    pub const KIND: &str = "output";
+
+    /// Verb: set the level. Args [`Volume`].
+    pub const VOLUME: &str = "volume";
+    /// Verb: mute or unmute. Args [`Mute`].
+    pub const MUTE: &str = "mute";
+
+    /// Arguments to [`VOLUME`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Volume {
+        /// 0 to 100.
+        pub level: u8,
+    }
+
+    /// Arguments to [`MUTE`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Mute {
+        /// True to silence.
+        pub on: bool,
+    }
+
+    /// The sink's state.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct State {
+        /// The sink, in the board's words: `es8311`, `i2s-dac`, `null`.
+        pub sink: String,
+        /// 0 to 100.
+        pub volume: u8,
+        /// True while silenced.
+        pub muted: bool,
+    }
+}
+
+/// `metadata/tags`: what a track is called.
+pub mod metadata {
+    use super::*;
+
+    /// Verb: the tags of a track. Args [`Lookup`], reply [`Track`].
+    pub const LOOKUP: &str = "lookup";
+
+    /// Arguments to [`LOOKUP`].
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Lookup {
+        /// The track's URI.
+        pub uri: String,
+    }
+}
+
+/// `artwork/embedded`: where a track's picture is.
+pub mod artwork {
+    use super::*;
+
+    /// Verb: the picture for a track. Args [`Fetch`], reply [`Art`].
+    pub const FETCH: &str = "fetch";
+
+    /// Arguments to [`FETCH`].
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Fetch {
+        /// The track's URI.
+        pub uri: String,
+    }
+
+    /// Where a consumer fetches the picture from. A reference, never the
+    /// bytes: a picture does not travel through the fabric's values.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Art {
+        /// A URL the consumer's HTTP client can GET, or an `embedded:` URI
+        /// the distribution's art loader understands.
+        pub source: String,
+        /// The MIME type, where known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mime: Option<String>,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_track_round_trips_and_omits_the_unknown() {
+        let t = Track {
+            uri: "file:///a.flac".into(),
+            title: "a".into(),
+            artist: None,
+            album: None,
+            duration_ms: Some(1000),
+        };
+        let v = to_value(&t);
+        // Value maps sort their keys; the unknown fields are absent.
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"duration_ms":1000,"title":"a","uri":"file:///a.flac"}"#
+        );
+        assert_eq!(from_value::<Track>(&v).unwrap(), t);
+    }
+
+    #[test]
+    fn corrections_are_tagged_with_do() {
+        let v = to_value(&playback::Correction::Seek { position_ms: 5 });
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#"{"do":"seek","position_ms":5}"#
+        );
+        assert_eq!(
+            from_value::<playback::Correction>(&v).unwrap(),
+            playback::Correction::Seek { position_ms: 5 }
+        );
+    }
+
+    #[test]
+    fn a_wrong_shape_says_why() {
+        let err = from_value::<delivery::Volume>(
+            &serde_json::json!({"level": "loud"}),
+        );
+        assert!(err.unwrap_err().contains("expected u8"));
+    }
+
+    #[test]
+    fn shelf_references_spell_the_catalogue() {
+        assert_eq!(shelf::playback_decode().to_string(), "playback/decode");
+        assert_eq!(shelf::source_files().to_string(), "source/files");
+    }
+}

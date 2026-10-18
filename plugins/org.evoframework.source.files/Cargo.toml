@@ -1,0 +1,20 @@
+[package]
+name = "org-evoframework-source-files"
+description = "Source respondent for evo-esp32 over a directory tree on a host: lists folders and audio files as the contract's entries, titles from file names, and announces each listed track as a subject."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# A reference respondent — Apache 2.0 so a card-backed source can copy it.
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }
+serde_json = { workspace = true }

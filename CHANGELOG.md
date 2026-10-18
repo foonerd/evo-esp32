@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `evo-esp32-sdk`: `contract::audio`, the player's slot contracts from
+  evo-device-audio's vocabulary: shelves `source/files`, `source/radio`,
+  `playback/decode`, `delivery/output`, `metadata/tags`,
+  `artwork/embedded`; `Track`; the verbs and their argument types; the
+  playback warden's `Play` instruction, `Correction` and `State`;
+  `to_value` / `from_value`. Presentation is a consumer, not a shelf.
+- Plugins (Apache-2.0): `org.evoframework.source.files` (a directory on a
+  host, std), `org.evoframework.playback.sim` (plays against the clock,
+  `no_std`), `org.evoframework.delivery.null` (level and mute, no sink,
+  `no_std`). 11 tests through the steward.
+- `evo-esp32-host` (`distributions/host/`): the catalogue compiled in by
+  `build.rs` and checked against the admitted plugins at start; a track
+  listed, played to its end and released, projections and happenings
+  printed. `check.sh` runs it once and builds the two `no_std` plugins
+  for bare-metal RISC-V.
 - `evo-esp32-sdk` (Apache-2.0): the surface a plugin implements against.
   The catalogue as data (racks, shelves, shapes; validated), the plugin
   contract (describe, load, unload, health), respondents and wardens,

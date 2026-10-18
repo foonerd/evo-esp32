@@ -1,0 +1,37 @@
+# The host distribution's catalogue: the audio shelves this distribution
+# stocks today. build.rs compiles it in; at start the distribution checks
+# it against the plugins it admits and refuses to run with a shelf nothing
+# stocks, so the declaration and the image cannot drift apart.
+
+[[racks]]
+name = "source"
+family = "domain"
+kinds = ["producer", "registrar"]
+charter = "Where tracks come from; lists them and announces them as subjects."
+
+[[racks.shelves]]
+name = "files"
+shape = 1
+description = "A tree of files: a directory on the host, a card on a device."
+
+[[racks]]
+name = "playback"
+family = "domain"
+kinds = ["transformer"]
+charter = "Turns one track at a time into frames and drives them to the output."
+
+[[racks.shelves]]
+name = "decode"
+shape = 1
+description = "The warden that plays: custody of a track, position, pause, seek."
+
+[[racks]]
+name = "delivery"
+family = "domain"
+kinds = ["transformer"]
+charter = "The sink: level and mute of what reaches the listener."
+
+[[racks.shelves]]
+name = "output"
+shape = 1
+description = "Volume and mute of the one output."

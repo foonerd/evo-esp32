@@ -19,14 +19,25 @@ cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
 echo "== no_std, on bare metal"
-# The sdk claims no_std; proving it means building it for a target that
-# has no std at all.
+# The sdk, the steward and the device-shaped plugins claim no_std; proving
+# it means building them for a target that has no std at all.
 bare=riscv32imac-unknown-none-elf
 if ! rustup target list --installed | grep -qx "$bare"; then
   echo "target $bare is not installed: rustup target add $bare" >&2
   exit 1
 fi
-cargo build -p evo-esp32-sdk -p evo-esp32-steward -p org-evoframework-example-echo --target "$bare" --locked
+cargo build -p evo-esp32-sdk -p evo-esp32-steward -p org-evoframework-example-echo \
+  -p org-evoframework-playback-sim -p org-evoframework-delivery-null \
+  --target "$bare" --locked
+
+echo "== host distribution"
+# The fabric end to end on this machine: catalogue checked, three plugins
+# admitted, one track listed, played to its end, custody released.
+tmp=$(mktemp -d)
+touch "$tmp/song.flac"
+cargo run -q -p evo-esp32-host --locked -- --dir "$tmp" --seconds 1 | tee "$tmp/run.log"
+grep -q 'custody_released' "$tmp/run.log"
+rm -rf "$tmp"
 
 echo "== scripts"
 for f in scripts/*.sh; do bash -n "$f"; done

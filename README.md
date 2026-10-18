@@ -60,29 +60,33 @@ make a panel a player.
 
 | Part | Crate | Holds | Licence |
 | --- | --- | --- | --- |
-| `sdk/` | `evo-esp32-sdk` | The surface a plugin implements against: the catalogue types, the plugin contract, respondents and wardens, subjects, happenings, projections, the context. `no_std`. | Apache-2.0 |
+| `sdk/` | `evo-esp32-sdk` | The surface a plugin implements against: the catalogue types, the plugin contract, respondents and wardens, subjects, happenings, projections, the context; and the slot contracts, `contract::audio` first: the player's shelves, verbs, instructions and subject states as typed values. `no_std`. | Apache-2.0 |
 | `steward/` | `evo-esp32-steward` | The sole authority: admission against the catalogue, the subject tables with per-plugin contributions, composition, a bounded happenings ring with gap-aware replay, projections by rack or subject, custody and ticking of wardens. `no_std`. | BSL 1.1 |
-| `catalogue/` | `evo-esp32-catalogue` | The host tool: parse and validate `catalogue.toml`, check a plugin set stocks it, emit the catalogue as Rust for a firmware's build. | BSL 1.1 |
+| `catalogue/` | `evo-esp32-catalogue` | The host tool: parse and validate `catalogue.toml`, check a plugin set stocks it, emit the catalogue as Rust for a distribution's build. | BSL 1.1 |
 | `plugins/` | `org-evoframework-example-echo` | The pedagogical plugin: one shelf, one verb, one subject. | Apache-2.0 |
+| | `org-evoframework-source-files` | `source/files` over a directory on a host: lists folders and audio files, announces each track as a subject. std. | Apache-2.0 |
+| | `org-evoframework-playback-sim` | `playback/decode` against the clock: custody of a track, position, pause, resume, seek, release at the end; decodes nothing. `no_std`. | Apache-2.0 |
+| | `org-evoframework-delivery-null` | `delivery/output` with no sink: volume and mute on an `output` subject. `no_std`. | Apache-2.0 |
+| `distributions/host/` | `evo-esp32-host` | What a firmware distribution does, on a desktop: the catalogue compiled in by `build.rs`, checked against the plugins at start, the three admitted, a track listed and played through the steward, projections and happenings printed. | BSL 1.1 |
 | `firmware/` | | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board crate it stands on. None yet. | BSL 1.1 |
 
-The audio plugins (sources, decode, delivery over I2S, metadata,
-artwork, presentation on the panel) and a host distribution that runs
-them against a desktop audio output and a simulated panel are next.
+Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop. Next: that loop drawing the companion's pages from the playback projection; a decoder behind `playback/decode`; the ES8311 behind `delivery/output`; the first firmware distribution on the companion's board crate.
 
 ## Build
 
 The host workspace builds on stable Rust, pinned by `rust-toolchain.toml`.
 
 ```sh
-scripts/check.sh   # format, clippy, tests, docs, no_std on bare metal, scripts, then every firmware built
-cargo run -p evo-esp32-catalogue -- check plugins/org.evoframework.example.echo/catalogue.toml
+scripts/check.sh   # format, clippy, tests, docs, no_std on bare metal, the host distribution end to end, scripts, then every firmware built
+cargo run -p evo-esp32-catalogue -- check distributions/host/catalogue.toml
+cargo run -p evo-esp32-host -- --dir ~/Music --seconds 5
 ```
 
 The `no_std` claim is proved, not asserted: the check builds the SDK, the
-steward and the example plugin for `riscv32imac-unknown-none-elf`, a
-target with no std at all. With a firmware crate present and no ESP
-toolchain on the machine, the check fails and says so.
+steward and every device-shaped plugin for `riscv32imac-unknown-none-elf`, a
+target with no std at all. The host distribution is run once against a
+directory with one file and must play it to the end. With a firmware crate
+present and no ESP toolchain on the machine, the check fails and says so.
 
 ## Related
 

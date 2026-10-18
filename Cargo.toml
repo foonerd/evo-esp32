@@ -5,6 +5,10 @@ members = [
     "steward",
     "catalogue",
     "plugins/org.evoframework.example.echo",
+    "plugins/org.evoframework.playback.sim",
+    "plugins/org.evoframework.delivery.null",
+    "plugins/org.evoframework.source.files",
+    "distributions/host",
 ]
 
 [workspace.package]

@@ -21,6 +21,9 @@
 //!   keeps the registry; plugins announce, update and retract.
 //! - The steward emits [`happening::Happening`]s on a stream and serves
 //!   [`projection::Projection`]s on demand. Consumers read nothing else.
+//! - A [`contract`] says what is inside the values a shelf's verbs,
+//!   instructions and subject states carry; [`contract::audio`] is the
+//!   player's.
 //!
 //! What has no equivalent on a microcontroller is dropped rather than
 //! imitated: processes, sockets, runtime admission of signed bundles, hot
@@ -36,6 +39,7 @@ extern crate alloc;
 
 pub mod catalogue;
 pub mod context;
+pub mod contract;
 pub mod happening;
 pub mod plugin;
 pub mod projection;

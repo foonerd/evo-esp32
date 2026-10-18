@@ -12,6 +12,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-host"
+version = "0.1.0"
+dependencies = [
+ "evo-esp32-catalogue",
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "org-evoframework-delivery-null",
+ "org-evoframework-playback-sim",
+ "org-evoframework-source-files",
+ "serde_json",
+]
+
+[[package]]
 name = "evo-esp32-sdk"
 version = "0.1.0"
 dependencies = [
@@ -40,10 +53,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "org-evoframework-delivery-null"
+version = "0.1.0"
+dependencies = [
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "serde_json",
+]
+
+[[package]]
 name = "org-evoframework-example-echo"
 version = "0.1.0"
 dependencies = [
  "evo-esp32-catalogue",
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "serde_json",
+]
+
+[[package]]
+name = "org-evoframework-playback-sim"
+version = "0.1.0"
+dependencies = [
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "serde_json",
+]
+
+[[package]]
+name = "org-evoframework-source-files"
+version = "0.1.0"
+dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
  "serde_json",

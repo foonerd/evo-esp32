@@ -1,0 +1,20 @@
+[package]
+name = "org-evoframework-delivery-null"
+description = "Delivery respondent for evo-esp32 with no sink behind it: holds the level and the mute as the contract names them, so the fabric has an output subject before a codec or a DAC is driven."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# A reference respondent — Apache 2.0 so a real sink can copy it.
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }
+serde_json = { workspace = true }
