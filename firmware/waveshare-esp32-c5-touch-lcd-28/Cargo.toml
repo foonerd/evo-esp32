@@ -20,6 +20,8 @@ harness = false
 # way only, never the reverse).
 ch32v003-expander = { git = "https://github.com/foonerd/volumio-esp-companion", tag = "v0.1.0" }
 es8311 = { git = "https://github.com/foonerd/volumio-esp-companion", tag = "v0.1.0" }
+# By commit until the companion's next tag carries it.
+es9018k2m = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "a44124c" }
 embedded-hal-bus = "0.3"
 esp-idf-svc = { version = "0.53", features = ["std", "binstart"] }
 log = "0.4"

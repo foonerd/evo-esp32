@@ -18,6 +18,9 @@
 //!    the header pins a Pi-HAT DAC can reach: BCLK on GPIO2 and WS on
 //!    GPIO3 (J8 pins 7 and 8), data on GPIO11 (J6's TXD, free once the
 //!    console is on USB). The speaker and the HAT play the same frames.
+//!    If an ES9018K2M answers on the bus (a LightSABRE or an I-Sabre K2M
+//!    HAT on J5's SDA/SCL), it is brought up and set to a modest volume;
+//!    a HAT without one, a bare PCM5102A, needs nothing said to it.
 //! 6. A 1 kHz tone for two seconds every ten, each one logged with how
 //!    long the write took: paced by the I2S clock it takes two seconds,
 //!    and that figure is the proof the clock is right before any
@@ -32,6 +35,7 @@ use std::time::{Duration, Instant};
 use ch32v003_expander::{Expander, Pin as Exio};
 use embedded_hal_bus::i2c::RefCellDevice;
 use es8311::Es8311;
+use es9018k2m::Es9018k2m;
 use esp_idf_svc::hal::gpio::{AnyIOPin, Pin};
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::i2s::config::{
@@ -151,6 +155,26 @@ fn main() -> anyhow::Result<()> {
     mirror(pins.gpio3.pin(), sys::I2SO_WS_OUT_IDX);
     mirror(pins.gpio11.pin(), sys::I2SO_SD_OUT_IDX);
     info!("i2s0: mirrored for a HAT: BCLK GPIO2 (J8.7), WS GPIO3 (J8.8), DATA GPIO11 (J6 TXD)");
+
+    let mut sabre = Es9018k2m::new(RefCellDevice::new(bus));
+    match sabre.detect() {
+        Ok(Some(id)) => {
+            info!(
+                "es9018k2m: found on the bus, status {:#04x}, revision {}",
+                id.status, id.revision
+            );
+            match sabre.init().and_then(|()| sabre.set_volume(VOLUME_PERCENT)) {
+                Ok(()) => {
+                    info!("es9018k2m: initialised, volume {VOLUME_PERCENT}%")
+                }
+                Err(e) => warn!("es9018k2m: init failed: {e:?}"),
+            }
+        }
+        Ok(None) => {
+            info!("es9018k2m: something answers at 0x48 but is not one")
+        }
+        Err(_) => info!("es9018k2m: none on the bus"),
+    }
 
     let tone = tone_bytes();
     let mut n = 0u32;
