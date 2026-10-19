@@ -37,7 +37,7 @@
 //!    have left, how busy the core is and how the position stands
 //!    against the clock. A card with no music gets `tone.wav` written to
 //!    it first, so the whole path is proven on any card.
-//! 9. The panel as a consumer: the shared face (`evo-esp32-panel`) drawn
+//! 9. The panel as a consumer: the player's face (`evo-esp32-face`) drawn
 //!    from the playback and delivery projections every 40 ms, repainting
 //!    only what moved; the backlight comes on after the first frame.
 
@@ -54,7 +54,7 @@ use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
-use evo_esp32_panel::{player_state, Face, Repaint};
+use evo_esp32_face::{theme, Face, Repaint, Style, View};
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -281,8 +281,8 @@ fn main() -> anyhow::Result<()> {
     // The output subject's level and mute reach the sink from here.
     let mut level: Option<(u8, bool)> = None;
 
-    // The panel: the shared face, lit after its first frame.
-    let mut face = Face::new(ROTATION);
+    // The panel: the player's face, lit after its first frame.
+    let mut face = Face::new(ROTATION, Style::Disc, theme::EVO_DEFAULT);
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
     let mut drawing = Duration::ZERO;
@@ -327,7 +327,7 @@ fn main() -> anyhow::Result<()> {
                     current = None;
                 }
             }
-            let state = player_state(&pb, output.as_ref());
+            let state = View::new(&pb, output.as_ref(), "Card");
             match face.refresh(&mut board.panel, &state) {
                 Ok(Repaint::Full) => full_frames += 1,
                 Ok(_) => {}

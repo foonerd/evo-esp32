@@ -15,7 +15,7 @@ workspace = true
 embedded-graphics = "0.8"
 embedded-graphics-simulator = { version = "0.8", default-features = false }
 evo-esp32-catalogue = { path = "../../catalogue" }
-evo-esp32-panel = { path = "../panel" }
+evo-esp32-face = { path = "../face" }
 evo-esp32-sdk = { path = "../../sdk" }
 evo-esp32-steward = { path = "../../steward" }
 org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }

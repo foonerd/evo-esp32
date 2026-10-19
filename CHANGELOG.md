@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `distributions/face` (`evo-esp32-face`) replaces `distributions/panel`:
+  the player's own face instead of the companion's remote-control pages.
+  Now Playing from the playback and delivery projections, in the evo
+  family's themes (evo-ui's `styles.css` tokens, OKLCH converted once to
+  RGB565: Evo Default, Night Sky, Sunrise, Air, Liquid), in two styles (the disc,
+  with the progress on a ring round the art; the card, with the text on a
+  band over the art's foot) and at rotations 0, 90, 180 and 270 (portrait
+  and landscape layouts; the display driver turns the pixels). Inter
+  (OFL 1.1, `assets/fonts`) is rasterised by `build.rs` into a 4-bit glyph
+  atlas at the face's five sizes; text and every shape (discs, rings, the
+  arc, rounded corners, the triangles of the transport glyphs) are drawn
+  as rows with anti-aliased edges blended against the colour under them,
+  so no frame buffer is read back. A layout test proves no region overlaps
+  another at any rotation or style; `Layout::hit` maps a point to the
+  play, previous and next buttons, the seek strip, the navigation and the
+  art, for touch. `no_std`. The host gains `--style`, `--theme` and
+  `--gallery DIR` (every rotation, style and theme as PNGs); the firmware
+  draws the disc in Evo Default. On the board: full frame 1, then 5% of
+  the time drawing, internal SRAM 49 KB free.
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: a track whose stream rate
+  is above the chip's ceiling (96 kHz; 192 kHz FLAC decoded at 0.4 of
+  real time) is passed over as soon as the decoder reports its format.
+- `scripts/image.sh`: removes the crate's previous image before writing
+  and finds esptool as a module, on PATH or in ESP-IDF's python_env.
+
 - `platform/esp-idf` (`evo-esp32-platform-esp-idf`): Espressif's fixed-point
   MP3 decoder (`esp_audio_codec` 2.6.2, fetched by the ESP-IDF component
   manager; Espressif Modified MIT, for Espressif chips only) as a Symphonia

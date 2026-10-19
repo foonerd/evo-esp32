@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "ab_glyph"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "owned_ttf_parser",
+]
+
+[[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -57,22 +73,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
-name = "companion-core"
-version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ccc5d413030fcc2032853b1f400032c38fd9e498#ccc5d413030fcc2032853b1f400032c38fd9e498"
-dependencies = [
- "companion-hal",
- "embedded-graphics",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "companion-hal"
-version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ccc5d413030fcc2032853b1f400032c38fd9e498#ccc5d413030fcc2032853b1f400032c38fd9e498"
-
-[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -125,29 +125,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-face"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "embedded-graphics",
+ "embedded-graphics-simulator",
+ "evo-esp32-sdk",
+]
+
+[[package]]
 name = "evo-esp32-host"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
  "embedded-graphics-simulator",
  "evo-esp32-catalogue",
- "evo-esp32-panel",
+ "evo-esp32-face",
  "evo-esp32-sdk",
  "evo-esp32-steward",
  "org-evoframework-delivery-null",
  "org-evoframework-playback-symphonia",
  "org-evoframework-source-files",
  "serde_json",
-]
-
-[[package]]
-name = "evo-esp32-panel"
-version = "0.1.0"
-dependencies = [
- "companion-core",
- "embedded-graphics",
- "embedded-graphics-simulator",
- "evo-esp32-sdk",
 ]
 
 [[package]]
@@ -337,6 +337,15 @@ dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
  "serde_json",
+]
+
+[[package]]
+name = "owned_ttf_parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
+dependencies = [
+ "ttf-parser",
 ]
 
 [[package]]
@@ -585,6 +594,12 @@ checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
 dependencies = [
  "winnow 1.0.4",
 ]
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "unicode-ident"

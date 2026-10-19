@@ -1,0 +1,25 @@
+[package]
+name = "evo-esp32-face"
+description = "The player's own face: the playback and delivery projections drawn on the panel in the evo family's themes, in two styles and at four rotations, repainting only what moved; shared by the host distribution and the firmware."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-graphics = "0.8"
+evo-esp32-sdk = { path = "../../sdk" }
+
+[build-dependencies]
+# Rasterises Inter (assets/fonts, OFL 1.1) into the glyph atlas at build
+# time; nothing of it reaches the target.
+ab_glyph = "0.2"
+
+[dev-dependencies]
+embedded-graphics-simulator = { version = "0.8", default-features = false }
