@@ -7,7 +7,9 @@
 //! what it has room for with a zero timeout and says how many frames
 //! that was, so the I2S clock paces playback and a tick never waits on
 //! it. A frame cut by the DMA's boundary is carried whole into the next
-//! call, and a mono stream is doubled into both slots on the way. The
+//! call, and a mono stream is doubled into both slots on the way, each
+//! sample scaled by the shared [`Volume`] (the DACs sit at their 100%;
+//! the speaker and a HAT share the stream, so one level serves both). The
 //! ring is sized in time, a quarter second at the stream's rate, so a
 //! slow packet's decode is covered at any rate the chip can afford.
 //!
@@ -21,7 +23,8 @@ use esp_idf_svc::hal::i2s::config::{
     Config as ChannelConfig, DataBitWidth, SlotMode, StdClkConfig, StdConfig,
     StdGpioConfig, StdSlotConfig,
 };
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
@@ -63,6 +66,33 @@ fn lead_ms(rate: u32, buffers: u32) -> u32 {
         / u64::from(rate.max(1))) as u32
 }
 
+/// Unity on the Q15 gain scale.
+const UNITY: u16 = 32767;
+
+/// The volume the sink applies to every frame, shared with whoever owns
+/// the `output` subject: the one level both the speaker and a HAT hear,
+/// since they share the stream. The DACs themselves sit at their 100%.
+#[derive(Clone, Debug)]
+pub struct Volume(Arc<AtomicU16>);
+
+impl Volume {
+    /// A level on the house curve: 0 is silence, 1..=100 run from
+    /// -49.5 dB to 0 dB in half-decibel steps; `muted` is silence too.
+    pub fn set(&self, percent: u8, muted: bool) {
+        let gain = if muted || percent == 0 {
+            0
+        } else {
+            let half_db = f32::from(percent.min(100)) - 100.0;
+            (f32::from(UNITY) * 10f32.powf(half_db / 40.0)).round() as u16
+        };
+        self.0.store(gain, Ordering::Relaxed);
+    }
+
+    fn gain(&self) -> u16 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 /// Dry-outs since the last call, as a line for the log; `None` if none.
 pub fn report_dry() -> Option<String> {
     let count = DRY_COUNT.swap(0, Ordering::Relaxed);
@@ -90,6 +120,7 @@ pub struct I2sSink<F> {
     follower: F,
     /// Frames taken since `start`, for the log.
     pub taken: u64,
+    volume: Volume,
     /// What the ring holds when full, and when the DMA last took bytes:
     /// a longer gap than the lead means it played silence meanwhile.
     lead_ms: u32,
@@ -120,9 +151,15 @@ impl<F: RateFollower> I2sSink<F> {
             scratch: Vec::new(),
             follower,
             taken: 0,
+            volume: Volume(Arc::new(AtomicU16::new(UNITY))),
             lead_ms: lead,
             last_taken: None,
         })
+    }
+
+    /// The volume this sink applies, to hand to the output's owner.
+    pub fn volume(&self) -> Volume {
+        self.volume.clone()
     }
 
     fn driver(&mut self) -> &mut I2sDriver<'static, I2sTx> {
@@ -253,9 +290,18 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         }
         self.scratch.clear();
         self.scratch.reserve(frames * FRAME_BYTES);
+        let gain = i32::from(self.volume.gain());
+        let scale = |s: i16| -> [u8; 2] {
+            if gain == i32::from(UNITY) {
+                s.to_le_bytes()
+            } else {
+                let scaled = ((i32::from(s) * gain) + (1 << 14)) >> 15;
+                (scaled as i16).to_le_bytes()
+            }
+        };
         for f in interleaved[..frames * ch].chunks_exact(ch) {
-            let l = f[0].to_le_bytes();
-            let r = if ch >= 2 { f[1].to_le_bytes() } else { l };
+            let l = scale(f[0]);
+            let r = if ch >= 2 { scale(f[1]) } else { l };
             self.scratch.extend_from_slice(&l);
             self.scratch.extend_from_slice(&r);
         }

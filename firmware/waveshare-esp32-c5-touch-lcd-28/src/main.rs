@@ -87,7 +87,7 @@ const TONE: Duration = Duration::from_millis(500);
 /// Tone amplitude as a fraction of full scale; the amplifier is small
 /// and the speaker smaller.
 const AMPLITUDE: f32 = 0.3;
-/// Playback volume, percent of the codec's curve.
+/// Playback volume, percent on the house curve, applied in the sink.
 const VOLUME_PERCENT: u8 = 40;
 /// The board's hardware gain the codec driver takes off, in half-dB
 /// (the vendor's 5 V amplifier against the codec's 3.3 V output).
@@ -180,11 +180,13 @@ fn main() -> anyhow::Result<()> {
     codec
         .set_mute(false)
         .map_err(|e| anyhow::anyhow!("es8311 unmute: {e:?}"))?;
-    let half_db = es8311::percent_to_half_db(VOLUME_PERCENT, HW_GAIN_HALF_DB);
+    // The codec sits at its 100%: the level is the sink's, so that the
+    // HAT on the same stream hears the same volume.
+    let half_db = es8311::percent_to_half_db(100, HW_GAIN_HALF_DB);
     codec
         .set_volume(half_db)
         .map_err(|e| anyhow::anyhow!("es8311 volume: {e:?}"))?;
-    info!("es8311: open, {RATE} Hz 16-bit, started, volume {VOLUME_PERCENT}% ({half_db} half-dB)");
+    info!("es8311: open, {RATE} Hz 16-bit, started, at its 100% ({half_db} half-dB); the level is the sink's");
 
     let mut sink = I2sSink::new(
         i2s0,
@@ -210,9 +212,9 @@ fn main() -> anyhow::Result<()> {
                 "es9018k2m: found on the bus, status {:#04x}, revision {}",
                 id.status, id.revision
             );
-            match sabre.init().and_then(|()| sabre.set_volume(VOLUME_PERCENT)) {
+            match sabre.init().and_then(|()| sabre.set_volume(100)) {
                 Ok(()) => {
-                    info!("es9018k2m: initialised, volume {VOLUME_PERCENT}%")
+                    info!("es9018k2m: initialised, at its 100%; the level is the sink's")
                 }
                 Err(e) => warn!("es9018k2m: init failed: {e:?}"),
             }
@@ -223,6 +225,8 @@ fn main() -> anyhow::Result<()> {
         Err(_) => info!("es9018k2m: none on the bus"),
     }
 
+    let volume = sink.volume();
+    volume.set(VOLUME_PERCENT, false);
     let started = Instant::now();
     sink.tone_blocking(&tone_bytes())?;
     info!(
@@ -268,6 +272,9 @@ fn main() -> anyhow::Result<()> {
     play_next(&mut steward, &tracks, &mut next, now());
     let mut track_started = Instant::now();
 
+    // The output subject's level and mute reach the sink from here.
+    let mut level: Option<(u8, bool)> = None;
+
     // The panel: the shared face, lit after its first frame.
     let mut face = Face::new(ROTATION);
     let mut lit = false;
@@ -285,9 +292,22 @@ fn main() -> anyhow::Result<()> {
         busy += tick_started.elapsed();
         if last_face.elapsed() >= FACE_TICK {
             last_face = Instant::now();
+            let output = output_state(&steward);
+            if let Some(out) = &output {
+                let now_level = (out.volume, out.muted);
+                if level != Some(now_level) {
+                    volume.set(out.volume, out.muted);
+                    info!(
+                        "volume: {}%{}",
+                        out.volume,
+                        if out.muted { ", muted" } else { "" }
+                    );
+                    level = Some(now_level);
+                }
+            }
             let state = player_state(
                 &playback_state(&steward).unwrap_or_default(),
-                output_state(&steward).as_ref(),
+                output.as_ref(),
             );
             match face.refresh(&mut board.panel, &state) {
                 Ok(Repaint::Full) => full_frames += 1,
