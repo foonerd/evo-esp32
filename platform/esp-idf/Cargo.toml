@@ -1,6 +1,6 @@
 [package]
 name = "evo-esp32-platform-esp-idf"
-description = "evo-esp32 on ESP-IDF: what every Espressif firmware distribution shares. Today: Espressif's MP3 decoder (esp_audio_codec, fixed point) as a Symphonia codec, preferred over the floating-point one on chips without an FPU."
+description = "evo-esp32 on ESP-IDF: what every Espressif firmware distribution shares. Espressif's MP3 decoder (esp_audio_codec, fixed point) as a Symphonia codec, preferred over the floating-point one on chips without an FPU; Espressif's JPEG decoder (esp_jpeg, TJpgDec) for album art."
 version = "0.1.0"
 edition = "2021"
 license = "BUSL-1.1"
@@ -28,3 +28,11 @@ symphonia-core = "0.6"
 remote_component = { name = "espressif/esp_audio_codec", version = "2.6.2" }
 bindings_header = "bindings.h"
 bindings_module = "esp_audio_codec"
+
+# Espressif's JPEG decoder component: TJpgDec (ChaN), Apache-2.0, in ROM
+# on the C5; decodes at 1/1, 1/2, 1/4 or 1/8 in a few kilobytes of work
+# area. Bindings land in `esp_idf_svc::sys::esp_jpeg`.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_jpeg", version = "1.3.1" }
+bindings_header = "jpeg_bindings.h"
+bindings_module = "esp_jpeg"

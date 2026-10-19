@@ -8,6 +8,10 @@ The ESP32-C5 has no FPU. Symphonia's MP3 decoder is floating point and reaches a
 
 The component is fetched by the ESP-IDF component manager at build (`espressif/esp_audio_codec` 2.6.2, declared in this crate's `Cargo.toml` for esp-idf-sys); the firmware's `components_<chip>.lock` pins what was resolved. Its bindings land in `esp_idf_svc::sys::esp_audio_codec`.
 
+## `jpeg`: Espressif's JPEG decoder for album art
+
+`jpeg::decode(bytes, min_side)` decodes a baseline JPEG with the `esp_jpeg` component (TJpgDec, in ROM on the ESP32-C5) at the largest of 1/2, 1/4 and 1/8 that keeps the picture's shorter side at least `min_side`, into RGB565 in the panel's raw order; the face fits the rest. `jpeg::info` gives the stored size without decoding. Progressive JPEGs are refused by the decoder. The component is `espressif/esp_jpeg` 1.3.1, Apache-2.0, fetched by the component manager like the audio codec; its bindings land in `esp_idf_svc::sys::esp_jpeg`.
+
 ## Licence of the decoder
 
 `esp_audio_codec` is Espressif's, under the Espressif Modified MIT licence: it may be used, copied, modified and distributed **exclusively with Espressif Systems products**, and redistribution for use with non-Espressif products is prohibited. This crate links it only into firmware for Espressif chips, which is what the licence permits. The licence text ships inside the component the build fetches, and must accompany any copy of a firmware image that carries the decoder. This crate itself is BSL 1.1 like the rest of the distribution layer.

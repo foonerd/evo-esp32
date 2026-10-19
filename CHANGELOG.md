@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Album art. `distributions/face`: `art::Art` (a square of RGB565 at the
+  art area's size) and `art::fit` (centre crop, box-filter scale, integer
+  arithmetic); `Face::set_art` shows or drops a picture with a repaint of
+  the art alone (`Repaint::Art`); the picture is drawn through the disc's
+  circle or the card's rounded corners with the same anti-aliased edge
+  as the stand-ins, one window a row, touching only the pixels the shape
+  covers so the ring through the square's corners stays. The stand-ins
+  remain when there is no picture. `platform/esp-idf`: `jpeg`, Espressif's
+  `esp_jpeg` component (TJpgDec, Apache-2.0, in ROM on the C5) decoding
+  at the largest of 1/2, 1/4 and 1/8 that keeps the picture at least the
+  art's size; baseline JPEG only. `firmware/waveshare-esp32-c5-touch-lcd-28`:
+  `art::Fetcher`, one worker thread below the main task's priority (the
+  main task is raised to 2, the worker runs at 1), which on a change of
+  album folder looks for `cover.jpg`, `folder.jpg`, `albumart.jpg` or
+  `front.jpg`, reads it in 4 KB pieces with a 2 ms breath between (the
+  card shares its SPI bus with the music), decodes, fits and hands the
+  result back through a channel; the newest request wins, and the next
+  track from the same folder keeps the art. Measured: an 87 KB, 600 px
+  cover read in 560 ms, decoded at 1/4 in 594 ms, fitted in 26 ms, on
+  the face 1.4 s into the track, with 96 kHz FLAC playing at half the
+  core and no dry spell; a 1.7 MB, 1500 px cover at 1/8 in under a
+  second. Internal SRAM free settles at 47 KB (was 76 KB): the worker's
+  stack and the decoder's tables; the stack can move to PSRAM if that
+  is ever needed.
 - `plugins/org.evoframework.playback.symphonia`: ID3 tags are read. The
   crate was built without Symphonia's `id3v2` and `id3v1` readers, so the
   probe scanned every tagged MP3 from byte 0 for a frame sync; the

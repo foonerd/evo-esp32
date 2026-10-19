@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+pub mod art;
 pub mod draw;
 pub mod layout;
 pub mod text;
@@ -28,6 +29,7 @@ pub mod touch;
 use alloc::format;
 use alloc::string::{String, ToString};
 
+pub use art::Art;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::{DrawTarget, Point, Size};
 use embedded_graphics::primitives::Rectangle;
@@ -152,6 +154,8 @@ pub enum Repaint {
     Volume,
     /// The transport: play became pause or back.
     Transport,
+    /// The art: a picture arrived, or went.
+    Art,
     /// One stage of a full frame; call again soon for the next.
     Partial,
     /// The whole face: a scene change, or the first frame, complete.
@@ -182,6 +186,10 @@ pub struct Face {
     ring_to: f32,
     /// The next stage of a full paint in progress.
     stage: Option<u8>,
+    /// The album's picture, when the distribution has one.
+    art: Option<Art>,
+    /// The art changed since it was last painted.
+    art_due: bool,
 }
 
 /// A full frame is painted in stages, one per `refresh`, so the caller's
@@ -205,7 +213,24 @@ impl Face {
             level: None,
             ring_to: 0.0,
             stage: None,
+            art: None,
+            art_due: false,
         }
+    }
+
+    /// The album's picture, or none: the next refresh repaints the art.
+    /// A picture of another size than the layout's art square is drawn
+    /// from its top-left corner, so fit it first ([`art::fit`]).
+    pub fn set_art(&mut self, art: Option<Art>) {
+        if self.art != art {
+            self.art = art;
+            self.art_due = true;
+        }
+    }
+
+    /// The album's picture the face holds.
+    pub fn art(&self) -> Option<&Art> {
+        self.art.as_ref()
     }
 
     /// The layout the face is drawn to; its `frame` is the panel's size.
@@ -277,7 +302,13 @@ impl Face {
                 return Ok(Repaint::Partial);
             }
             self.stage = None;
+            self.art_due = false;
             return Ok(Repaint::Full);
+        }
+        if self.art_due {
+            self.paint_art(target)?;
+            self.art_due = false;
+            return Ok(Repaint::Art);
         }
         if second != self.second {
             self.paint_progress(target, view)?;
@@ -362,17 +393,30 @@ impl Face {
         }
     }
 
-    /// The art: the disc, or the card with its text band.
+    /// The art: the album's picture in a disc or on the card, or the
+    /// stand-in; the card's text band is laid over its foot either way.
     fn paint_art<D>(&self, target: &mut D) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
         let l = self.layout;
         let t = self.theme;
-        match l.style {
-            Style::Disc => draw::placeholder_disc(target, l.art, &t),
-            Style::Card => {
-                draw::placeholder_card(target, l.art, RADIUS, &t)?;
+        match (l.style, &self.art) {
+            (Style::Disc, Some(art)) => {
+                draw::art_disc(target, l.art, art, t.background)
+            }
+            (Style::Disc, None) => draw::placeholder_disc(target, l.art, &t),
+            (Style::Card, art) => {
+                match art {
+                    Some(art) => draw::art_card(
+                        target,
+                        l.art,
+                        RADIUS,
+                        art,
+                        t.background,
+                    )?,
+                    None => draw::placeholder_card(target, l.art, RADIUS, &t)?,
+                }
                 if let Some((band, band_colour)) = self.card_band() {
                     draw::rounded_corners(
                         target,
@@ -1011,6 +1055,56 @@ mod tests {
                 Ok(Repaint::Full)
             );
             assert_ne!(display.get_pixel(Point::new(2, 2)), Rgb565::BLACK);
+        }
+    }
+
+    #[test]
+    fn art_arrives_as_its_own_repaint_and_shows_in_both_styles() {
+        for style in [Style::Disc, Style::Card] {
+            let mut face = Face::new(0, style, theme::EVO_DEFAULT);
+            let mut display =
+                SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+            let view = View::new(&playing(), Some(&out()), "Card");
+            face.refresh_whole(&mut display, &view).unwrap();
+            let centre = face.layout().art.center();
+            let before = display.get_pixel(centre);
+            // A flat orange picture at the art's size.
+            let size = face.layout().art.size.width;
+            let orange = Rgb565::new(31, 40, 0);
+            let art = art::fit(1, 1, &[0xFD00], size).unwrap();
+            face.set_art(Some(art));
+            assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Art));
+            assert_eq!(display.get_pixel(centre), orange, "{style:?}");
+            assert_ne!(before, orange);
+            // The corner of the art square is not the art's: the disc's
+            // and the card's corners are cut, and what was there stays
+            // (the disc's ring passes through the square's corners).
+            let corner = face.layout().art.top_left;
+            assert_ne!(display.get_pixel(corner), orange, "{style:?}");
+            if let Some((inner, outer)) = face.layout().ring_radii() {
+                let c = face.layout().art_centre();
+                let on_ring = (inner + outer) / 2;
+                // 45 degrees up and left: inside the art square's corner.
+                let d = (on_ring as f32 / core::f32::consts::SQRT_2) as i32;
+                let p = Point::new(c.x - d, c.y - d);
+                assert!(
+                    face.layout().art.contains(p),
+                    "the probe is in the square"
+                );
+                assert_eq!(
+                    display.get_pixel(p),
+                    theme::EVO_DEFAULT.border,
+                    "the ring's track survives the art"
+                );
+            }
+            assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
+            // Taking it away repaints the stand-in.
+            face.set_art(None);
+            assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Art));
+            assert_eq!(display.get_pixel(centre), before, "{style:?}");
+            // Setting the same art again is not a change.
+            face.set_art(None);
+            assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
         }
     }
 

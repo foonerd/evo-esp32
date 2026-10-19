@@ -22,6 +22,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::{DrawTarget, Point, Size};
 use embedded_graphics::primitives::Rectangle;
 
+use crate::art::Art;
 use crate::theme::{mix, Theme};
 
 /// The widest edge run the row blender handles at once.
@@ -671,6 +672,108 @@ where
         )?;
     }
     icon_note(target, c, label_r * 5 / 4, theme.accent, label)
+}
+
+/// Album art in a circle inscribed in `area`, its edge blended onto
+/// `bg`: one window a row, each pixel the picture's, the rim by how
+/// much of the pixel the circle covers.
+pub fn art_disc<D>(
+    target: &mut D,
+    area: Rectangle,
+    art: &Art,
+    bg: Rgb565,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let r = area.size.width as i32 / 2;
+    let c = area.center();
+    let origin = area.top_left;
+    let mut buf = [bg; ROW];
+    let width = (2 * r + 3) as usize;
+    for dy in -r - 1..=r + 1 {
+        let y = c.y + dy;
+        // Only the pixels the circle touches are sent: the square's
+        // corners belong to whatever is drawn round the disc.
+        let mut span: Option<(usize, usize)> = None;
+        for (i, px) in buf[..width].iter_mut().enumerate() {
+            let x = c.x - r - 1 + i as i32;
+            let cover = cover_disc(x - c.x, dy, r);
+            if cover == 0 {
+                continue;
+            }
+            let p = art.at(x - origin.x, y - origin.y).unwrap_or(bg);
+            *px = if cover == 16 { p } else { mix(bg, p, cover) };
+            span = Some(span.map_or((i, i), |(first, _)| (first, i)));
+        }
+        if let Some((first, last)) = span {
+            target.fill_contiguous(
+                &Rectangle::new(
+                    Point::new(c.x - r - 1 + first as i32, y),
+                    Size::new((last - first + 1) as u32, 1),
+                ),
+                buf[first..=last].iter().copied(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Album art filling `area` with its corners rounded by `radius` onto
+/// `bg`: one window a row.
+pub fn art_card<D>(
+    target: &mut D,
+    area: Rectangle,
+    radius: i32,
+    art: &Art,
+    bg: Rgb565,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let (x0, y0) = (area.top_left.x, area.top_left.y);
+    let (w, h) = (area.size.width as i32, area.size.height as i32);
+    let r = radius.min(w / 2).min(h / 2);
+    let (lx, rx) = (x0 + r, x0 + w - 1 - r);
+    let (ty, by) = (y0 + r, y0 + h - 1 - r);
+    let mut buf = [bg; ROW];
+    let width = (w as usize).min(ROW);
+    for yy in 0..h {
+        let y = y0 + yy;
+        let cy = if y < ty {
+            Some(ty)
+        } else if y > by {
+            Some(by)
+        } else {
+            None
+        };
+        // Only the pixels the shape touches are sent; the corners stay.
+        let mut span: Option<(usize, usize)> = None;
+        for (i, px) in buf[..width].iter_mut().enumerate() {
+            let x = x0 + i as i32;
+            let cover = match cy {
+                Some(cy) if x < lx => cover_disc(x - lx, y - cy, r),
+                Some(cy) if x > rx => cover_disc(x - rx, y - cy, r),
+                _ => 16,
+            };
+            if cover == 0 {
+                continue;
+            }
+            let p = art.at(i as i32, yy).unwrap_or(bg);
+            *px = if cover == 16 { p } else { mix(bg, p, cover) };
+            span = Some(span.map_or((i, i), |(first, _)| (first, i)));
+        }
+        if let Some((first, last)) = span {
+            target.fill_contiguous(
+                &Rectangle::new(
+                    Point::new(x0 + first as i32, y),
+                    Size::new((last - first + 1) as u32, 1),
+                ),
+                buf[first..=last].iter().copied(),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The stand-in for album art on a card: a tinted square with the note.

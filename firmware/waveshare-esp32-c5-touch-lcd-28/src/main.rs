@@ -43,6 +43,7 @@
 //!    between each, so a track change does not starve the DMA ring; the
 //!    backlight comes on after the first frame.
 
+mod art;
 mod sink;
 
 use std::time::{Duration, Instant};
@@ -284,6 +285,8 @@ fn main() -> anyhow::Result<()> {
     // ticks between them and the DMA ring is fed; `painting` keeps the
     // passes coming without waiting for the face's cadence.
     let mut face = Face::new(ROTATION, Style::Disc, theme::EVO_DEFAULT);
+    // Album art, fetched beneath this task; the face shows it when it lands.
+    let mut art = art::Fetcher::new(face.layout().art.size.width)?;
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
     let mut painting = false;
@@ -429,6 +432,14 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let state = View::new(&pb, output.as_ref(), "Card");
+            if let Some(track) = pb.track.as_ref() {
+                if art.track(&track.uri) {
+                    face.set_art(None);
+                }
+            }
+            if let Some(found) = art.poll() {
+                face.set_art(found.art);
+            }
             let painted = face.refresh(&mut board.panel, &state);
             let took = last_face.elapsed();
             drawing += took;
