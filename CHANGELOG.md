@@ -16,7 +16,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off by the stream's drift from its mean rate. Other formats stay
   accurate (FLAC seeks by its table in 0.3 s). On the host: forward,
   back and near the end of a 4-minute MP3, each landing on the packet
-  before the target with up to 76 ms to drop.
+  before the target with up to 76 ms to drop. On the board: twenty seeks
+  in a minute, forward and back across whole tracks, none long enough to
+  run the ring dry (under 231 ms each); the position is moving again
+  within 70 ms of the tap.
 - `distributions/face`: a full frame is painted in stages, one per
   `refresh` (`Repaint::Partial` until the last returns `Repaint::Full`;
   `refresh_whole` for a host that wants the frame in one call), so the
