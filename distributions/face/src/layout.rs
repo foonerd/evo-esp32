@@ -287,6 +287,20 @@ impl Layout {
         }
     }
 
+    /// A touch controller's point, reported in the panel's native 240 by
+    /// 320 portrait frame whatever the display was told, brought into
+    /// this layout's rotated frame.
+    pub fn map_touch(&self, x: u16, y: u16) -> Point {
+        let (x, y) = (i32::from(x), i32::from(y));
+        let (nw, nh) = (240i32, 320i32);
+        match self.rotation % 360 {
+            90 => Point::new(y, nw - 1 - x),
+            180 => Point::new(nw - 1 - x, nh - 1 - y),
+            270 => Point::new(nh - 1 - y, x),
+            _ => Point::new(x, y),
+        }
+    }
+
     /// What is under `p`, for a touch.
     pub fn hit(&self, p: Point) -> Option<Hotspot> {
         let t = &self.transport;

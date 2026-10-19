@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `distributions/face`: touch. `touch::Tracker` turns the panel's reports
+  into intents against the layout: a tap (under 800 ms, under 12 px of
+  travel) on a button is `Intent::Tap`; a finger on the volume strip or
+  the seek ring is `Intent::Slide` with the fraction as it moves and
+  `Intent::Commit` on lift, sticky to the slider it started on.
+  `Layout::map_touch` takes the CST3530's native portrait frame to the
+  layout's frame at each rotation. A status change alone (pause, resume)
+  repaints only the transport (`Repaint::Transport`), not the frame.
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the face is live. Taps on
+  play pause and resume (or start the next track when nothing holds
+  custody), next and previous skip, the volume follows the finger on the
+  strip, and a lift on the ring seeks. The sink applies the level as a
+  Q15 gain on the house curve (1..=100 as -49.5..0 dB in half-decibel
+  steps), so the speaker and a HAT hear the same level; it starts at 40%
+  instead of full. Measured on the board: pause and resume, skip, a
+  slide from 29% to 57%, and a seek on 96 kHz FLAC back playing 0.3 s
+  later; a seek on MP3 takes 4-7 s, since Symphonia's demuxer walks the
+  frames to the target (open).
 - `firmware/waveshare-esp32-c5-touch-lcd-28`: the build id. `build.rs`
   stamps `git describe` into the binary, the boot log's first line names
   it (`build:<describe>`), and `scripts/image.sh` refuses to call an image

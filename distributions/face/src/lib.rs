@@ -23,6 +23,7 @@ pub mod draw;
 pub mod layout;
 pub mod text;
 pub mod theme;
+pub mod touch;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -149,6 +150,8 @@ pub enum Repaint {
     Progress,
     /// The volume slider.
     Volume,
+    /// The transport: play became pause or back.
+    Transport,
     /// The whole face: a scene change, or the first frame.
     Full,
 }
@@ -239,6 +242,18 @@ impl Face {
         };
         let second = Some(view.position_ms / 1000);
         let level = Some((view.volume, view.muted));
+        if let Some(was) = self.scene.as_ref().filter(|was| **was != scene) {
+            // Only the status moved: the play button, not the face.
+            let only_status = Scene {
+                status: scene.status,
+                ..was.clone()
+            } == scene;
+            if only_status {
+                self.paint_transport(target, view)?;
+                self.scene = Some(scene);
+                return Ok(Repaint::Transport);
+            }
+        }
         if self.scene.as_ref() != Some(&scene) {
             self.paint_all(target, view)?;
             self.scene = Some(scene);
@@ -415,36 +430,7 @@ impl Face {
         self.paint_seek(target, view)?;
         self.paint_volume(target, view)?;
 
-        // Transport.
-        let tr = l.transport;
-        for (c, forward) in [(tr.prev, false), (tr.next, true)] {
-            draw::disc(target, c, tr.skip_r as i32, t.border, t.background)?;
-            draw::disc(target, c, tr.skip_r as i32 - 1, t.secondary, t.border)?;
-            draw::icon_skip(
-                target,
-                c,
-                tr.skip_r as i32 * 9 / 16,
-                forward,
-                t.foreground,
-                t.secondary,
-            )?;
-        }
-        draw::disc(target, tr.play, tr.play_r as i32, t.accent, t.background)?;
-        match view.status {
-            Status::Playing => draw::icon_pause(
-                target,
-                tr.play,
-                tr.play_r as i32 / 2,
-                t.accent_fg,
-            )?,
-            _ => draw::icon_play(
-                target,
-                tr.play,
-                tr.play_r as i32 / 2,
-                t.accent_fg,
-                t.accent,
-            )?,
-        }
+        self.paint_transport(target, view)?;
 
         // Navigation.
         target.fill_solid(&l.nav, t.card)?;
@@ -479,6 +465,48 @@ impl Face {
                 1 => draw::icon_list(target, c, 7, colour)?,
                 _ => draw::icon_gear(target, c, 8, colour, under)?,
             }
+        }
+        Ok(())
+    }
+
+    /// The three buttons; the big one shows pause while playing.
+    fn paint_transport<D>(
+        &self,
+        target: &mut D,
+        view: &View,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let (l, t) = (&self.layout, &self.theme);
+        let tr = l.transport;
+        for (c, forward) in [(tr.prev, false), (tr.next, true)] {
+            draw::disc(target, c, tr.skip_r as i32, t.border, t.background)?;
+            draw::disc(target, c, tr.skip_r as i32 - 1, t.secondary, t.border)?;
+            draw::icon_skip(
+                target,
+                c,
+                tr.skip_r as i32 * 9 / 16,
+                forward,
+                t.foreground,
+                t.secondary,
+            )?;
+        }
+        draw::disc(target, tr.play, tr.play_r as i32, t.accent, t.background)?;
+        match view.status {
+            Status::Playing => draw::icon_pause(
+                target,
+                tr.play,
+                tr.play_r as i32 / 2,
+                t.accent_fg,
+            )?,
+            _ => draw::icon_play(
+                target,
+                tr.play,
+                tr.play_r as i32 / 2,
+                t.accent_fg,
+                t.accent,
+            )?,
         }
         Ok(())
     }
@@ -916,7 +944,11 @@ mod tests {
                 status: Status::Paused,
                 ..muted
             };
-            assert_eq!(face.refresh(&mut display, &paused), Ok(Repaint::Full));
+            // A status change alone repaints the transport, not the face.
+            assert_eq!(
+                face.refresh(&mut display, &paused),
+                Ok(Repaint::Transport)
+            );
             face.set_theme(theme::SUNRISE);
             assert_eq!(face.refresh(&mut display, &paused), Ok(Repaint::Full));
             assert_ne!(display.get_pixel(Point::new(2, 2)), Rgb565::BLACK);
