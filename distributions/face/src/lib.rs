@@ -152,7 +152,9 @@ pub enum Repaint {
     Volume,
     /// The transport: play became pause or back.
     Transport,
-    /// The whole face: a scene change, or the first frame.
+    /// One stage of a full frame; call again soon for the next.
+    Partial,
+    /// The whole face: a scene change, or the first frame, complete.
     Full,
 }
 
@@ -178,7 +180,14 @@ pub struct Face {
     level: Option<(u8, bool)>,
     /// How far round the ring the accent reaches.
     ring_to: f32,
+    /// The next stage of a full paint in progress.
+    stage: Option<u8>,
 }
+
+/// A full frame is painted in stages, one per `refresh`, so the caller's
+/// loop (the decoder's tick, on a board) runs between them: no stage
+/// holds the loop as long as a whole frame would.
+const STAGES: u8 = 10;
 
 /// The card's corner radius: evo-ui's `--radius`, 0.75 rem.
 const RADIUS: i32 = 12;
@@ -195,6 +204,7 @@ impl Face {
             second: None,
             level: None,
             ring_to: 0.0,
+            stage: None,
         }
     }
 
@@ -221,7 +231,9 @@ impl Face {
     }
 
     /// Bring `target` up to date with `view`, painting as little as the
-    /// change allows.
+    /// change allows. A full frame (the first, or a scene change) comes
+    /// in ten calls, each returning [`Repaint::Partial`] until the last
+    /// returns [`Repaint::Full`]; call again as soon as convenient.
     pub fn refresh<D>(
         &mut self,
         target: &mut D,
@@ -255,10 +267,16 @@ impl Face {
             }
         }
         if self.scene.as_ref() != Some(&scene) {
-            self.paint_all(target, view)?;
             self.scene = Some(scene);
-            self.second = second;
-            self.level = level;
+            self.stage = Some(0);
+        }
+        if let Some(stage) = self.stage {
+            self.paint_stage(target, view, stage)?;
+            if stage + 1 < STAGES {
+                self.stage = Some(stage + 1);
+                return Ok(Repaint::Partial);
+            }
+            self.stage = None;
             return Ok(Repaint::Full);
         }
         if second != self.second {
@@ -274,35 +292,136 @@ impl Face {
         Ok(Repaint::None)
     }
 
-    fn paint_all<D>(
+    /// [`refresh`](Self::refresh) through to a frame that is not partial:
+    /// a whole frame in one call, for a host that draws an image.
+    pub fn refresh_whole<D>(
         &mut self,
         target: &mut D,
         view: &View,
+    ) -> Result<Repaint, D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        loop {
+            let painted = self.refresh(target, view)?;
+            if painted != Repaint::Partial {
+                return Ok(painted);
+            }
+        }
+    }
+
+    /// One stage of the full frame, in painting order: the ground, the
+    /// status strip, the art, the three text lines, the progress, the
+    /// volume, the transport, the navigation.
+    fn paint_stage<D>(
+        &mut self,
+        target: &mut D,
+        view: &View,
+        stage: u8,
     ) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
         let l = self.layout;
         let t = self.theme;
-        target.clear(t.background)?;
+        match stage {
+            0 => target.clear(t.background),
+            1 => {
+                // Where the music is from, and the stream.
+                let status = if view.format_line().is_empty() {
+                    view.source.to_string()
+                } else {
+                    format!("{}  ·  {}", view.source, view.format_line())
+                };
+                text::TINY.line(
+                    target,
+                    &status,
+                    l.status,
+                    Align::Left,
+                    t.muted_fg,
+                    t.background,
+                )
+            }
+            2 => self.paint_art(target),
+            3..=5 => self.paint_text_line(target, view, stage - 3),
+            6 => {
+                let frac = view.progress().unwrap_or(0.0);
+                self.paint_ring(target, 0.0, frac, true)?;
+                self.paint_times(target, view)?;
+                self.paint_seek(target, view)?;
+                self.second = Some(view.position_ms / 1000);
+                Ok(())
+            }
+            7 => {
+                self.paint_volume(target, view)?;
+                self.level = Some((view.volume, view.muted));
+                Ok(())
+            }
+            8 => self.paint_transport(target, view),
+            _ => self.paint_nav(target),
+        }
+    }
 
-        // Status strip: where the music is from, and the stream.
-        let status = if view.format_line().is_empty() {
-            view.source.to_string()
-        } else {
-            format!("{}  ·  {}", view.source, view.format_line())
-        };
-        text::TINY.line(
-            target,
-            &status,
-            l.status,
-            Align::Left,
-            t.muted_fg,
-            t.background,
-        )?;
+    /// The art: the disc, or the card with its text band.
+    fn paint_art<D>(&self, target: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let l = self.layout;
+        let t = self.theme;
+        match l.style {
+            Style::Disc => draw::placeholder_disc(target, l.art, &t),
+            Style::Card => {
+                draw::placeholder_card(target, l.art, RADIUS, &t)?;
+                if let Some((band, band_colour)) = self.card_band() {
+                    draw::rounded_corners(
+                        target,
+                        band,
+                        RADIUS,
+                        band_colour,
+                        t.background,
+                        false,
+                        true,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
 
-        // Art and the text block.
-        let frac = view.progress().unwrap_or(0.0);
+    /// The card style's text band over the art's foot, where the layout
+    /// centres the text; the band and its colour.
+    fn card_band(&self) -> Option<(Rectangle, Rgb565)> {
+        let l = self.layout;
+        let t = self.theme;
+        (l.style == Style::Card && l.nav_axis == layout::NavAxis::Bar).then(
+            || {
+                let band_top = l.title.top_left.y - 8;
+                let band = Rectangle::new(
+                    Point::new(l.art.top_left.x, band_top),
+                    Size::new(
+                        l.art.size.width,
+                        (l.art.top_left.y + l.art.size.height as i32 - band_top)
+                            as u32,
+                    ),
+                );
+                (band, mix(t.secondary, t.background, 10))
+            },
+        )
+    }
+
+    /// Text line `n`: 0 the title, 1 the artist, 2 the album.
+    fn paint_text_line<D>(
+        &self,
+        target: &mut D,
+        view: &View,
+        n: u8,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let l = self.layout;
+        let t = self.theme;
         let (title, artist, album) = if view.title.is_empty() {
             (
                 match view.status {
@@ -320,119 +439,47 @@ impl Face {
             )
         };
         let centred = l.nav_axis == layout::NavAxis::Bar;
-        match l.style {
-            Style::Disc => {
-                draw::placeholder_disc(target, l.art, &t)?;
-                self.paint_ring(target, 0.0, frac, true)?;
-                let align = if centred { Align::Centre } else { Align::Left };
-                text::TITLE.line(
-                    target,
-                    title,
-                    l.title,
-                    align,
-                    t.foreground,
-                    t.background,
-                )?;
-                text::BODY.line(
-                    target,
-                    artist,
-                    l.artist,
-                    align,
-                    t.muted_fg,
-                    t.background,
-                )?;
-                text::SMALL.line(
-                    target,
-                    album,
-                    l.album,
-                    align,
-                    mix(t.muted_fg, t.background, 5),
-                    t.background,
-                )?;
-            }
-            Style::Card => {
-                draw::placeholder_card(target, l.art, RADIUS, &t)?;
-                if centred {
-                    // The text sits on a band over the card's foot.
-                    let band_top = l.title.top_left.y - 8;
-                    let band = Rectangle::new(
-                        Point::new(l.art.top_left.x, band_top),
-                        Size::new(
-                            l.art.size.width,
-                            (l.art.top_left.y + l.art.size.height as i32
-                                - band_top) as u32,
-                        ),
-                    );
-                    let band_colour = mix(t.secondary, t.background, 10);
-                    draw::rounded_corners(
-                        target,
-                        band,
-                        RADIUS,
-                        band_colour,
-                        t.background,
-                        false,
-                        true,
-                    )?;
-                    text::TITLE.line(
-                        target,
-                        title,
-                        l.title,
-                        Align::Left,
-                        t.foreground,
-                        band_colour,
-                    )?;
-                    text::SMALL.line(
-                        target,
-                        artist,
-                        l.artist,
-                        Align::Left,
-                        t.muted_fg,
-                        band_colour,
-                    )?;
-                    text::TINY.line(
-                        target,
-                        album,
-                        l.album,
-                        Align::Left,
-                        mix(t.muted_fg, band_colour, 5),
-                        band_colour,
-                    )?;
-                } else {
-                    text::TITLE.line(
-                        target,
-                        title,
-                        l.title,
-                        Align::Left,
-                        t.foreground,
-                        t.background,
-                    )?;
-                    text::BODY.line(
-                        target,
-                        artist,
-                        l.artist,
-                        Align::Left,
-                        t.muted_fg,
-                        t.background,
-                    )?;
-                    text::SMALL.line(
-                        target,
-                        album,
-                        l.album,
-                        Align::Left,
-                        mix(t.muted_fg, t.background, 5),
-                        t.background,
-                    )?;
-                }
-            }
+        let band = self.card_band();
+        let under = band.map_or(t.background, |(_, colour)| colour);
+        let align = match l.style {
+            Style::Disc if centred => Align::Centre,
+            _ => Align::Left,
+        };
+        // On the band the lines step down a size, to sit on the art.
+        let (artist_font, album_font) = if band.is_some() {
+            (&text::SMALL, &text::TINY)
+        } else {
+            (&text::BODY, &text::SMALL)
+        };
+        match n {
+            0 => text::TITLE.line(
+                target,
+                title,
+                l.title,
+                align,
+                t.foreground,
+                under,
+            ),
+            1 => artist_font
+                .line(target, artist, l.artist, align, t.muted_fg, under),
+            _ => album_font.line(
+                target,
+                album,
+                l.album,
+                align,
+                mix(t.muted_fg, under, 5),
+                under,
+            ),
         }
+    }
 
-        self.paint_times(target, view)?;
-        self.paint_seek(target, view)?;
-        self.paint_volume(target, view)?;
-
-        self.paint_transport(target, view)?;
-
-        // Navigation.
+    /// The navigation bar or rail, with the first item active.
+    fn paint_nav<D>(&self, target: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let l = self.layout;
+        let t = self.theme;
         target.fill_solid(&l.nav, t.card)?;
         let hairline = match l.nav_axis {
             layout::NavAxis::Bar => {
@@ -546,23 +593,25 @@ impl Face {
         };
         let c = self.layout.art_centre();
         if lay_track {
-            draw::ring(
+            draw::ring_arc(
                 target,
                 c,
-                outer,
-                inner,
+                (outer, inner),
+                (from, to),
                 self.theme.border,
+                self.theme.accent,
+                self.theme.background,
+            )?;
+        } else {
+            draw::arc(
+                target,
+                c,
+                (outer, inner),
+                (from, to),
+                self.theme.accent,
                 self.theme.background,
             )?;
         }
-        draw::arc(
-            target,
-            c,
-            (outer, inner),
-            (from, to),
-            self.theme.accent,
-            self.theme.background,
-        )?;
         self.ring_to = to;
         Ok(())
     }
@@ -906,6 +955,13 @@ mod tests {
             let mut display =
                 SimulatorDisplay::<Rgb565>::new(face.layout().frame);
             let view = View::new(&playing(), Some(&out()), "Card");
+            // The first frame comes in stages, the last of them Full.
+            for _ in 1..STAGES {
+                assert_eq!(
+                    face.refresh(&mut display, &view),
+                    Ok(Repaint::Partial)
+                );
+            }
             assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Full));
             let lit = display
                 .bounding_box()
@@ -950,9 +1006,34 @@ mod tests {
                 Ok(Repaint::Transport)
             );
             face.set_theme(theme::SUNRISE);
-            assert_eq!(face.refresh(&mut display, &paused), Ok(Repaint::Full));
+            assert_eq!(
+                face.refresh_whole(&mut display, &paused),
+                Ok(Repaint::Full)
+            );
             assert_ne!(display.get_pixel(Point::new(2, 2)), Rgb565::BLACK);
         }
+    }
+
+    #[test]
+    fn a_scene_change_mid_paint_starts_the_frame_again() {
+        let mut face = Face::new(0, Style::Disc, theme::EVO_DEFAULT);
+        let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+        let view = View::new(&playing(), Some(&out()), "Card");
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Partial));
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Partial));
+        let other = View {
+            title: "Another".into(),
+            ..view
+        };
+        // The new scene paints from the ground up: STAGES calls again.
+        for _ in 1..STAGES {
+            assert_eq!(
+                face.refresh(&mut display, &other),
+                Ok(Repaint::Partial)
+            );
+        }
+        assert_eq!(face.refresh(&mut display, &other), Ok(Repaint::Full));
+        assert_eq!(face.refresh(&mut display, &other), Ok(Repaint::None));
     }
 
     #[test]

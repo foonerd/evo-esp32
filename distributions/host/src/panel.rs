@@ -31,7 +31,7 @@ impl Panel {
 
     /// Bring the buffer up to date with `view`.
     pub fn draw(&mut self, view: &View) {
-        let Ok(_) = self.face.refresh(&mut self.display, view);
+        let Ok(_) = self.face.refresh_whole(&mut self.display, view);
     }
 
     /// Write what is drawn to `path` as a PNG at panel resolution.

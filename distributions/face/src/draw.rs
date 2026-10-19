@@ -11,6 +11,12 @@
 //! The face knows what it painted under every shape, so no frame buffer
 //! is read back; and at 240 by 320 the stair-step on a circle is what
 //! separates a sketch from a product.
+//!
+//! A shape with texture inside it (the placeholder disc's grooves, the
+//! progress ring with its accent) is composed per pixel from the radius
+//! and sent as one window a row, rather than as a stack of shapes each
+//! with its own edge windows: on the board a window costs about 70 µs,
+//! and the disc drawn as twelve rings cost 433 ms.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::{DrawTarget, Point, Size};
@@ -20,6 +26,9 @@ use crate::theme::{mix, Theme};
 
 /// The widest edge run the row blender handles at once.
 const RUN: usize = 48;
+/// The widest row a composed shape sends at once: the ring round the
+/// largest art (radius 80) is 163 pixels across.
+const ROW: usize = 256;
 
 /// A horizontal span.
 fn span<D>(
@@ -172,30 +181,8 @@ where
     D: DrawTarget<Color = Rgb565>,
 {
     let (outer, inner) = radii;
-    let to = turns.1.clamp(0.0, 1.0);
-    let from = turns.0.clamp(0.0, to);
-    if to <= from {
+    let Some(sector) = Sector::new(turns) else {
         return Ok(());
-    }
-    // Direction vectors of the two ends, in 1/1024 units; "inside" is
-    // clockwise of `a` and anticlockwise of `b`. Screen y grows downward,
-    // so clockwise on screen is anticlockwise in the usual sense.
-    let dir = |turns: f32| {
-        let (s, cc) = sin_cos_turns(turns);
-        (s, -cc) // twelve o'clock is up; x = sin, y = -cos
-    };
-    let (ax, ay) = dir(from);
-    let (bx, by) = dir(to);
-    let wide = to - from > 0.5;
-    let inside = move |dx: i32, dy: i32| {
-        // cross(a, p) >= 0 means p is clockwise of a on screen.
-        let ca = ax * dy - ay * dx;
-        let cb = bx * dy - by * dx;
-        if wide {
-            ca >= 0 || cb <= 0
-        } else {
-            ca >= 0 && cb <= 0
-        }
     };
     for dy in -outer - 1..=outer + 1 {
         row(
@@ -207,7 +194,7 @@ where
             bg,
             |x| {
                 let dx = x - c.x;
-                if !inside(dx, dy) {
+                if !sector.inside(dx, dy) {
                     return 0;
                 }
                 cover_disc(dx, dy, outer)
@@ -216,6 +203,107 @@ where
         )?;
     }
     Ok(())
+}
+
+/// The ring's track and the accent from `turns.0` to `turns.1` over it,
+/// in one pass: each row of the band goes as one window a side (one
+/// where the sides meet), every pixel composed from its radius and
+/// angle exactly as [`ring`] then [`arc`] would have left it.
+pub fn ring_arc<D>(
+    target: &mut D,
+    c: Point,
+    radii: (i32, i32),
+    turns: (f32, f32),
+    track: Rgb565,
+    accent: Rgb565,
+    bg: Rgb565,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let (outer, inner) = radii;
+    let sector = Sector::new(turns);
+    let mut buf = [bg; ROW];
+    for dy in -outer - 1..=outer + 1 {
+        let mut dx = -outer - 1;
+        while dx <= outer + 1 {
+            let cov = |dx: i32| {
+                cover_disc(dx, dy, outer)
+                    .saturating_sub(cover_disc(dx, dy, inner))
+            };
+            if cov(dx) == 0 {
+                dx += 1;
+                continue;
+            }
+            let start = dx;
+            let mut n = 0;
+            while dx <= outer + 1 && n < ROW {
+                let cv = cov(dx);
+                if cv == 0 {
+                    break;
+                }
+                let on = sector.as_ref().is_some_and(|s| s.inside(dx, dy));
+                let colour = if on { accent } else { track };
+                buf[n] = if cv == 16 {
+                    colour
+                } else {
+                    mix(bg, colour, cv)
+                };
+                n += 1;
+                dx += 1;
+            }
+            target.fill_contiguous(
+                &Rectangle::new(
+                    Point::new(c.x + start, c.y + dy),
+                    Size::new(n as u32, 1),
+                ),
+                buf[..n].iter().copied(),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The angular test of an arc from `turns.0` to `turns.1` clockwise from
+/// twelve o'clock; `None` for an empty arc.
+struct Sector {
+    a: (i32, i32),
+    b: (i32, i32),
+    wide: bool,
+}
+
+impl Sector {
+    fn new(turns: (f32, f32)) -> Option<Self> {
+        let to = turns.1.clamp(0.0, 1.0);
+        let from = turns.0.clamp(0.0, to);
+        if to <= from {
+            return None;
+        }
+        // Direction vectors of the two ends, in 1/1024 units; "inside" is
+        // clockwise of `a` and anticlockwise of `b`. Screen y grows
+        // downward, so clockwise on screen is anticlockwise in the usual
+        // sense.
+        let dir = |turns: f32| {
+            let (s, cc) = sin_cos_turns(turns);
+            (s, -cc) // twelve o'clock is up; x = sin, y = -cos
+        };
+        Some(Self {
+            a: dir(from),
+            b: dir(to),
+            wide: to - from > 0.5,
+        })
+    }
+
+    fn inside(&self, dx: i32, dy: i32) -> bool {
+        // cross(a, p) >= 0 means p is clockwise of a on screen.
+        let ca = self.a.0 * dy - self.a.1 * dx;
+        let cb = self.b.0 * dy - self.b.1 * dx;
+        if self.wide {
+            ca >= 0 || cb <= 0
+        } else {
+            ca >= 0 && cb <= 0
+        }
+    }
 }
 
 /// sin and cos of `turns` (0 to 1) in 1/1024 units, from a quarter-wave
@@ -533,14 +621,55 @@ where
     let groove = Rgb565::new(5, 9, 6);
     let label_r = r * 9 / 20;
     let label = mix(theme.card, theme.accent, 4);
-    disc(target, c, r, vinyl, theme.background)?;
-    // Grooves: thin rings, no need to blend, they are texture.
-    let mut g = r - 4;
-    while g > label_r + 3 {
-        ring(target, c, g, g - 1, groove, vinyl)?;
-        g -= 4;
+    let bg = theme.background;
+    // One window a row: the disc's edge on the background, a groove
+    // every four pixels from four inside the edge to three outside the
+    // label, and the label, each blended as its own shape would be.
+    let pixel = |d16: i32| {
+        let cover = |radius: i32| (radius * 16 + 8 - d16).clamp(0, 16) as u8;
+        let edge = cover(r);
+        if edge == 0 {
+            return bg;
+        }
+        let mut colour = if edge == 16 {
+            vinyl
+        } else {
+            mix(bg, vinyl, edge)
+        };
+        let mut g = r - 4;
+        while g > label_r + 3 {
+            let cut = cover(g).saturating_sub(cover(g - 1));
+            if cut == 16 {
+                colour = groove;
+            } else if cut > 0 {
+                colour = mix(vinyl, groove, cut);
+            }
+            g -= 4;
+        }
+        let on_label = cover(label_r);
+        if on_label == 16 {
+            label
+        } else if on_label > 0 {
+            mix(vinyl, label, on_label)
+        } else {
+            colour
+        }
+    };
+    let mut buf = [bg; ROW];
+    let width = (2 * r + 3) as usize;
+    for dy in -r - 1..=r + 1 {
+        for (i, px) in buf[..width].iter_mut().enumerate() {
+            let dx = i as i32 - r - 1;
+            *px = pixel(dist16(dx, dy));
+        }
+        target.fill_contiguous(
+            &Rectangle::new(
+                Point::new(c.x - r - 1, c.y + dy),
+                Size::new(width as u32, 1),
+            ),
+            buf[..width].iter().copied(),
+        )?;
     }
-    disc(target, c, label_r, label, vinyl)?;
     icon_note(target, c, label_r * 5 / 4, theme.accent, label)
 }
 

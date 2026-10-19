@@ -39,7 +39,9 @@
 //!    same, saying so.
 //! 9. The panel as a consumer: the player's face (`evo-esp32-face`) drawn
 //!    from the playback and delivery projections every 40 ms, repainting
-//!    only what moved; the backlight comes on after the first frame.
+//!    only what moved; a full frame comes in stages with a decoder tick
+//!    between each, so a track change does not starve the DMA ring; the
+//!    backlight comes on after the first frame.
 
 mod sink;
 
@@ -277,10 +279,17 @@ fn main() -> anyhow::Result<()> {
     // One finger on the panel, into taps and slides.
     let mut tracker = Tracker::default();
 
-    // The panel: the player's face, lit after its first frame.
+    // The panel: the player's face, lit after its first frame. A full
+    // frame comes in stages, one per pass of the loop, so the decoder
+    // ticks between them and the DMA ring is fed; `painting` keeps the
+    // passes coming without waiting for the face's cadence.
     let mut face = Face::new(ROTATION, Style::Disc, theme::EVO_DEFAULT);
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
+    let mut painting = false;
+    let mut frame_started: Option<Instant> = None;
+    let mut longest_stage = Duration::ZERO;
+    let mut stage_ms: Vec<u32> = Vec::new();
     let mut drawing = Duration::ZERO;
     let mut full_frames = 0u32;
 
@@ -388,7 +397,7 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => log::debug!("touch: {e:?}"),
             }
         }
-        if last_face.elapsed() >= FACE_TICK {
+        if painting || last_face.elapsed() >= FACE_TICK {
             last_face = Instant::now();
             let output = output_state(&steward);
             if let Some(out) = &output {
@@ -420,16 +429,47 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let state = View::new(&pb, output.as_ref(), "Card");
-            match face.refresh(&mut board.panel, &state) {
-                Ok(Repaint::Full) => full_frames += 1,
+            let painted = face.refresh(&mut board.panel, &state);
+            let took = last_face.elapsed();
+            drawing += took;
+            match painted {
+                Ok(Repaint::Partial) => {
+                    if !painting {
+                        frame_started = Some(last_face);
+                        longest_stage = Duration::ZERO;
+                        stage_ms.clear();
+                    }
+                    painting = true;
+                    longest_stage = longest_stage.max(took);
+                    stage_ms.push(took.as_millis() as u32);
+                }
+                Ok(Repaint::Full) => {
+                    painting = false;
+                    full_frames += 1;
+                    longest_stage = longest_stage.max(took);
+                    stage_ms.push(took.as_millis() as u32);
+                    let whole =
+                        frame_started.take().map_or(took, |s| s.elapsed());
+                    log::debug!(
+                        "panel: full frame in {} ms, the longest stage {} ms",
+                        whole.as_millis(),
+                        longest_stage.as_millis()
+                    );
+                    if !lit {
+                        board.backlight(BACKLIGHT_PERCENT)?;
+                        lit = true;
+                        info!(
+                            "panel lit: first frame in {} ms, the longest stage {} ms, stages {stage_ms:?} ms",
+                            whole.as_millis(),
+                            longest_stage.as_millis()
+                        );
+                    }
+                }
                 Ok(_) => {}
-                Err(e) => warn!("panel: {e:?}"),
-            }
-            drawing += last_face.elapsed();
-            if !lit {
-                board.backlight(BACKLIGHT_PERCENT)?;
-                lit = true;
-                info!("panel lit");
+                Err(e) => {
+                    painting = false;
+                    warn!("panel: {e:?}");
+                }
             }
         }
         for h in steward.happenings_since(seen).happenings {
@@ -495,8 +535,9 @@ fn main() -> anyhow::Result<()> {
             }
         }
         // The idle task must run or its watchdog bites: a short sleep
-        // when the fabric wants ticking now, the tick length otherwise.
-        std::thread::sleep(if due.is_some_and(|d| d.0 <= t.0) {
+        // when the fabric wants ticking now or a frame is mid-paint, the
+        // tick length otherwise.
+        std::thread::sleep(if painting || due.is_some_and(|d| d.0 <= t.0) {
             Duration::from_millis(1)
         } else {
             TICK

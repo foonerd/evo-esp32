@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `distributions/face`: a full frame is painted in stages, one per
+  `refresh` (`Repaint::Partial` until the last returns `Repaint::Full`;
+  `refresh_whole` for a host that wants the frame in one call), so the
+  caller's loop runs between them. The placeholder disc and the progress
+  ring are composed per pixel and sent one window a row instead of as a
+  stack of shapes each with its own edge windows; the frames are pixel
+  for pixel what they were (the gallery compared). On the board a window
+  costs about 70 µs: the disc as twelve rings took 433 ms, composed 70 ms;
+  the ring with its accent 149 ms, composed 73 ms. The first frame is
+  421 ms end to end, the longest stage 73 ms.
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the face's stages run on
+  consecutive passes of the loop with a decoder tick between, and the
+  panel lights on the first complete frame. A track start no longer runs
+  the DMA dry (it did by 500 ms, the face's first frame on top of a ring
+  of 159-231 ms); five track starts in a capture, none dry. The first
+  frame's stage times are logged with "panel lit".
 - `firmware/waveshare-esp32-c5-touch-lcd-28`: the empty-card tone is
   retired. The firmware no longer writes `tone.wav` to a card with no
   music (it stayed on the card once music arrived and came round in the
