@@ -320,6 +320,7 @@ fn main() -> anyhow::Result<()> {
                                     .unwrap_or_default();
                                 match (current, status) {
                                     (Some(h), playback::Status::Playing) => {
+                                        sink::expect_gap();
                                         correct(
                                             &mut steward,
                                             h,
@@ -340,6 +341,7 @@ fn main() -> anyhow::Result<()> {
                                         if next >= tracks.len() {
                                             next = 0;
                                         }
+                                        sink::expect_gap();
                                         current = play_next(
                                             &mut steward,
                                             &tracks,

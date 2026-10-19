@@ -23,7 +23,7 @@ use esp_idf_svc::hal::i2s::config::{
     Config as ChannelConfig, DataBitWidth, SlotMode, StdClkConfig, StdConfig,
     StdGpioConfig, StdSlotConfig,
 };
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -50,6 +50,9 @@ const FRAME_BYTES: usize = 4;
 /// starvation in milliseconds; read and cleared by [`report_dry`].
 static DRY_COUNT: AtomicU32 = AtomicU32::new(0);
 static DRY_WORST_MS: AtomicU32 = AtomicU32::new(0);
+/// Set by [`expect_gap`]: the writer is going quiet on purpose, so the
+/// gap before its next write is not a dry spell.
+static EXPECTED_GAP: AtomicBool = AtomicBool::new(false);
 
 /// How many DMA buffers hold [`LEAD_MS`] at `rate`.
 fn buffers_for(rate: u32) -> u32 {
@@ -100,6 +103,12 @@ pub fn report_dry() -> Option<String> {
     (count > 0).then(|| {
         format!("the DMA ran dry {count} times, the worst by {worst} ms")
     })
+}
+
+/// The writer is about to go quiet on purpose (a pause, a start from
+/// idle): the gap before its next write is not counted as a dry spell.
+pub fn expect_gap() {
+    EXPECTED_GAP.store(true, Ordering::Relaxed);
 }
 
 /// What the sink needs to say to the codec when the rate changes.
@@ -179,12 +188,15 @@ impl<F: RateFollower> I2sSink<F> {
         };
         if n > 0 {
             let now = Instant::now();
-            if let Some(last) = self.last_taken {
+            if EXPECTED_GAP.swap(false, Ordering::Relaxed) {
+                // Quiet on purpose; measure from here.
+            } else if let Some(last) = self.last_taken {
                 let gap = now.duration_since(last).as_millis() as u32;
                 if gap > self.lead_ms {
+                    let dry = gap - self.lead_ms;
+                    info!("sink: the DMA ran dry for {dry} ms");
                     DRY_COUNT.fetch_add(1, Ordering::Relaxed);
-                    DRY_WORST_MS
-                        .fetch_max(gap - self.lead_ms, Ordering::Relaxed);
+                    DRY_WORST_MS.fetch_max(dry, Ordering::Relaxed);
                 }
             }
             self.last_taken = Some(now);

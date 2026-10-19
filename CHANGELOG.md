@@ -22,8 +22,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   steps), so the speaker and a HAT hear the same level; it starts at 40%
   instead of full. Measured on the board: pause and resume, skip, a
   slide from 29% to 57%, and a seek on 96 kHz FLAC back playing 0.3 s
-  later; a seek on MP3 takes 4-7 s, since Symphonia's demuxer walks the
-  frames to the target (open).
+  later; a seek on MP3 takes 3-13 s in proportion to the distance, since
+  Symphonia's demuxer walks the frames to the target at about 25 times
+  real time off the card (open).
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the sink names each dry
+  spell as it sees it (`sink: the DMA ran dry for N ms`, at the write
+  that ends it), so a capture places it in time; the ten-second report
+  stays as the tally. A gap the firmware announces (`sink::expect_gap`,
+  before a pause and before a start from idle) is not a dry spell.
 - `firmware/waveshare-esp32-c5-touch-lcd-28`: the build id. `build.rs`
   stamps `git describe` into the binary, the boot log's first line names
   it (`build:<describe>`), and `scripts/image.sh` refuses to call an image
