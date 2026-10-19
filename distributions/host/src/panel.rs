@@ -1,16 +1,15 @@
 // Copyright (c) 2026 Just a Nerd
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The panel on the host: the shared face (`evo-esp32-panel`) drawn into
+//! The panel on the host: the player's face (`evo-esp32-face`) drawn into
 //! a buffer the size of the panel, written as a PNG at the end.
 
 use std::path::Path;
 
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::Size;
 use embedded_graphics_simulator::{OutputSettings, SimulatorDisplay};
-pub use evo_esp32_panel::player_state;
-use evo_esp32_panel::{Face, PlayerState};
+pub use evo_esp32_face::View;
+use evo_esp32_face::{Face, Style, Theme};
 
 /// The face, drawn into a buffer the size of the panel.
 pub struct Panel {
@@ -19,22 +18,20 @@ pub struct Panel {
 }
 
 impl Panel {
-    /// A panel at `rotation` degrees, showing nothing yet.
-    pub fn new(rotation: u16) -> Self {
-        let face = Face::new(rotation);
-        let frame = face.layout().frame.size;
+    /// A panel at `rotation` degrees in `style` and `theme`, showing
+    /// nothing yet.
+    pub fn new(rotation: u16, style: Style, theme: Theme) -> Self {
+        let face = Face::new(rotation, style, theme);
+        let frame = face.layout().frame;
         Self {
             face,
-            display: SimulatorDisplay::new(Size::new(
-                frame.width,
-                frame.height,
-            )),
+            display: SimulatorDisplay::new(frame),
         }
     }
 
-    /// Bring the buffer up to date with `state`.
-    pub fn draw(&mut self, state: &PlayerState) {
-        let Ok(_) = self.face.refresh(&mut self.display, state);
+    /// Bring the buffer up to date with `view`.
+    pub fn draw(&mut self, view: &View) {
+        let Ok(_) = self.face.refresh(&mut self.display, view);
     }
 
     /// Write what is drawn to `path` as a PNG at panel resolution.

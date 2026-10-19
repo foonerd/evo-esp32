@@ -128,5 +128,16 @@ echo "app $app_size bytes in a $app_cap byte partition"
     "$pt_off" "$out/$stem-partition-table.bin" \
     "$app_off" "$out/$stem-app.bin"
 
+# The firmware carries `build:<git describe>` and logs it at boot. The image
+# must carry this tree's id, or it is some other build and must not be
+# flashed as this one.
+want="build:$(git describe --always --dirty --tags 2>/dev/null || echo unknown)"
+if grep -q -a -F -- "$want" "$out/$stem.bin"; then
+  echo "image carries $want"
+else
+  echo "image does not carry $want: it is not a build of this tree" >&2
+  exit 1
+fi
+
 (cd "$out" && sha256sum "$stem"*.bin | tee "$stem.SHA256SUMS")
 echo "flash: esptool --chip $chip --port <PORT> write-flash 0x0 dist/$stem.bin"

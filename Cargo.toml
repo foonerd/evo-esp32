@@ -9,7 +9,7 @@ members = [
     "plugins/org.evoframework.delivery.null",
     "plugins/org.evoframework.source.files",
     "plugins/org.evoframework.playback.symphonia",
-    "distributions/panel",
+    "distributions/face",
     "distributions/host",
 ]
 # Builds only inside a firmware crate's workspace: esp-idf-svc compiles for

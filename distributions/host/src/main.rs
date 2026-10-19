@@ -7,13 +7,14 @@
 //! What a firmware distribution does, done here without a board: the
 //! catalogue compiled in, the plugins admitted, a consumer loop that
 //! reads projections and the happenings stream. The consumer is the
-//! panel: it draws the companion's pages from the projections and, on
-//! the host, writes the last frame as a PNG. The sink paces the decoder
-//! at the sample rate as a DAC would and, if asked, records what it let
-//! out as a WAV, so the run leaves something to listen to.
+//! panel: it draws the player's face from the projections and, on the
+//! host, writes the last frame as a PNG. The sink paces the decoder at
+//! the sample rate as a DAC would and, if asked, records what it let out
+//! as a WAV, so the run leaves something to listen to.
 //!
 //! ```text
 //! evo-esp32-host --dir ~/Music --seconds 5 --panel face.png --wav heard.wav
+//! evo-esp32-host --gallery target/faces      # every rotation, style and theme
 //! ```
 
 mod panel;
@@ -22,6 +23,7 @@ mod sink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use evo_esp32_face::{theme, Style, Theme};
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -54,6 +56,9 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
   --seconds N       how long to run (default 5)
   --panel PATH      write the panel's last frame as a PNG
   --rotation DEG    the panel's rotation, 0, 90, 180 or 270 (default 0)
+  --style NAME      the face's style, disc or card (default disc)
+  --theme NAME      the face's theme: evo-default, night-sky, sunrise, air, liquid
+  --gallery DIR     write a frame for every rotation, style and theme there and exit
   --wav PATH        record what the sink let out as a WAV
   --tone PATH       write a 440 Hz test tone (2 s, 44.1 kHz) there and exit
   --help";
@@ -63,6 +68,9 @@ struct Cli {
     seconds: u64,
     panel: Option<PathBuf>,
     rotation: u16,
+    style: Style,
+    theme: Theme,
+    gallery: Option<PathBuf>,
     wav: Option<PathBuf>,
     tone: Option<PathBuf>,
 }
@@ -73,6 +81,9 @@ fn parse_args() -> Result<Cli, String> {
         seconds: 5,
         panel: None,
         rotation: 0,
+        style: Style::Disc,
+        theme: theme::EVO_DEFAULT,
+        gallery: None,
         wav: None,
         tone: None,
     };
@@ -93,8 +104,26 @@ fn parse_args() -> Result<Cli, String> {
                 })?;
             }
             "--panel" => cli.panel = Some(PathBuf::from(value)),
+            "--gallery" => cli.gallery = Some(PathBuf::from(value)),
             "--wav" => cli.wav = Some(PathBuf::from(value)),
             "--tone" => cli.tone = Some(PathBuf::from(value)),
+            "--style" => {
+                cli.style = Style::named(&value).ok_or_else(|| {
+                    format!("--style must be disc or card, got {value:?}")
+                })?;
+            }
+            "--theme" => {
+                cli.theme = Theme::named(&value).ok_or_else(|| {
+                    format!(
+                        "--theme must be one of {}, got {value:?}",
+                        theme::ALL
+                            .iter()
+                            .map(|t| t.name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+            }
             "--rotation" => {
                 cli.rotation = match value.parse() {
                     Ok(r @ (0 | 90 | 180 | 270)) => r,
@@ -189,6 +218,53 @@ fn first_track(
     }))
 }
 
+/// A frame of the face for every rotation, style and theme, from one
+/// made-up state, written to `dir` as `face-<rotation>-<style>-<theme>.png`:
+/// the review surface for the face, the same code the board draws with.
+fn gallery(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    let pb = playback::State {
+        status: playback::Status::Playing,
+        track: Some(Track {
+            uri: "file:///Music/Dire Straits/Brothers In Arms/02. Money For Nothing.flac".into(),
+            title: "Money For Nothing".into(),
+            artist: Some("Dire Straits".into()),
+            album: Some("Brothers In Arms".into()),
+            duration_ms: Some(506_000),
+        }),
+        position_ms: 119_000,
+        format: Some(playback::Format {
+            codec: "flac".into(),
+            sample_rate: 96_000,
+            bits: 16,
+            channels: 2,
+        }),
+    };
+    let out = delivery::State {
+        sink: "i2s".into(),
+        volume: 40,
+        muted: false,
+    };
+    let view = panel::View::new(&pb, Some(&out), "Card");
+    for rotation in [0u16, 90, 180, 270] {
+        for style in [Style::Disc, Style::Card] {
+            for t in theme::ALL {
+                let mut p = panel::Panel::new(rotation, style, *t);
+                p.draw(&view);
+                let path = dir.join(format!(
+                    "face-{rotation}-{}-{}.png",
+                    style.name(),
+                    t.name
+                ));
+                p.save(&path)?;
+                println!("{}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() {
     let cli = match parse_args() {
         Ok(cli) => cli,
@@ -206,6 +282,14 @@ fn main() {
             std::process::exit(1);
         }
         println!("tone written to {}", path.display());
+        return;
+    }
+
+    if let Some(dir) = &cli.gallery {
+        if let Err(e) = gallery(dir) {
+            eprintln!("gallery: {e}");
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -268,7 +352,7 @@ fn main() {
 
     let mut seen = Seq(0);
     let mut last_line = String::new();
-    let mut panel = panel::Panel::new(cli.rotation);
+    let mut panel = panel::Panel::new(cli.rotation, cli.style, cli.theme);
     // The frame worth keeping is the last one drawn while playing.
     let mut was_playing = false;
     let mut saved = false;
@@ -320,7 +404,7 @@ fn main() {
                 saved = true;
             }
             was_playing = playing;
-            panel.draw(&panel::player_state(&st, output.as_ref()));
+            panel.draw(&panel::View::new(&st, output.as_ref(), "Folder"));
             let line = format!(
                 "playback: {:?} {} ms{}",
                 st.status,

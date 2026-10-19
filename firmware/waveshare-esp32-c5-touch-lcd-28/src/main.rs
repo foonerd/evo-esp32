@@ -37,7 +37,7 @@
 //!    have left, how busy the core is and how the position stands
 //!    against the clock. A card with no music gets `tone.wav` written to
 //!    it first, so the whole path is proven on any card.
-//! 9. The panel as a consumer: the shared face (`evo-esp32-panel`) drawn
+//! 9. The panel as a consumer: the player's face (`evo-esp32-face`) drawn
 //!    from the playback and delivery projections every 40 ms, repainting
 //!    only what moved; the backlight comes on after the first frame.
 
@@ -54,9 +54,10 @@ use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
-use evo_esp32_panel::{player_state, Face, Repaint};
+use evo_esp32_face::touch::{Intent, Tracker};
+use evo_esp32_face::{theme, Face, Hotspot, Repaint, Style, View};
 use evo_esp32_sdk::catalogue::Catalogue;
-use evo_esp32_sdk::contract::audio::playback::{self, Play};
+use evo_esp32_sdk::contract::audio::playback::{self, Correction, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
 use evo_esp32_sdk::contract::audio::{
     delivery, from_value, shelf, to_value, Track,
@@ -66,7 +67,7 @@ use evo_esp32_sdk::plugin::{Plugin, PluginDescription};
 use evo_esp32_sdk::projection::ProjectionKey;
 use evo_esp32_sdk::respondent::{CorrelationId, Request};
 use evo_esp32_sdk::subject::SubjectId;
-use evo_esp32_sdk::warden::{Assignment, CustodyHandle};
+use evo_esp32_sdk::warden::{Assignment, CourseCorrection, CustodyHandle};
 use evo_esp32_sdk::Ticks;
 use evo_esp32_steward::{Config, Steward};
 use log::{info, warn};
@@ -126,9 +127,10 @@ fn main() -> anyhow::Result<()> {
     sys::link_patches();
     EspLogger::initialize_default();
     info!(
-        "{} {} starting",
+        "{} {} starting, {}",
         env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        env!("EVO_BUILD_ID")
     );
 
     let Peripherals {
@@ -275,14 +277,20 @@ fn main() -> anyhow::Result<()> {
     shuffle(&mut tracks);
     info!("{} tracks, shuffled", tracks.len());
     let mut next = 0usize;
-    let mut current = play_next(&mut steward, &tracks, &mut next, now());
+    // The level the listener wants; every track starts at it.
+    let mut wanted = VOLUME_PERCENT;
+    let mut current =
+        play_next(&mut steward, &tracks, &mut next, now(), wanted);
     let mut track_started = Instant::now();
 
     // The output subject's level and mute reach the sink from here.
     let mut level: Option<(u8, bool)> = None;
 
-    // The panel: the shared face, lit after its first frame.
-    let mut face = Face::new(ROTATION);
+    // One finger on the panel, into taps and slides.
+    let mut tracker = Tracker::default();
+
+    // The panel: the player's face, lit after its first frame.
+    let mut face = Face::new(ROTATION, Style::Disc, theme::EVO_DEFAULT);
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
     let mut drawing = Duration::ZERO;
@@ -296,6 +304,102 @@ fn main() -> anyhow::Result<()> {
         let tick_started = Instant::now();
         let due = steward.tick(t);
         busy += tick_started.elapsed();
+        // A report waits while INT is low; a finger that was down is read
+        // until the controller says it lifted.
+        if board.touch_int.is_low() || tracker.down() {
+            match board.touch.report() {
+                Ok(r) => {
+                    let p = face.layout().map_touch(r.x, r.y);
+                    if let Some(intent) =
+                        tracker.sample(face.layout(), r.touching(), p, t.0)
+                    {
+                        match intent {
+                            Intent::Tap(Hotspot::Play) => {
+                                let status = playback_state(&steward)
+                                    .map(|pb| pb.status)
+                                    .unwrap_or_default();
+                                match (current, status) {
+                                    (Some(h), playback::Status::Playing) => {
+                                        sink::expect_gap();
+                                        correct(
+                                            &mut steward,
+                                            h,
+                                            Correction::Pause,
+                                            t,
+                                        )
+                                    }
+                                    (Some(h), playback::Status::Paused) => {
+                                        correct(
+                                            &mut steward,
+                                            h,
+                                            Correction::Resume,
+                                            t,
+                                        )
+                                    }
+                                    _ => {
+                                        // Nothing in custody: start again.
+                                        if next >= tracks.len() {
+                                            next = 0;
+                                        }
+                                        sink::expect_gap();
+                                        current = play_next(
+                                            &mut steward,
+                                            &tracks,
+                                            &mut next,
+                                            t,
+                                            wanted,
+                                        );
+                                        track_started = Instant::now();
+                                    }
+                                }
+                            }
+                            Intent::Tap(Hotspot::Next) => {
+                                if next >= tracks.len() {
+                                    next = 0;
+                                }
+                                skip(&mut steward, &mut current, t);
+                            }
+                            Intent::Tap(Hotspot::Previous) => {
+                                // `next` is one past the playing track.
+                                next = next.saturating_sub(2);
+                                skip(&mut steward, &mut current, t);
+                            }
+                            Intent::Slide(Hotspot::Volume(f)) => {
+                                let want = (f * 100.0).round() as u8;
+                                if want != wanted {
+                                    wanted = want;
+                                    set_volume(&mut steward, wanted, t);
+                                }
+                            }
+                            Intent::Commit(Hotspot::Seek(f)) => {
+                                let duration = playback_state(&steward)
+                                    .and_then(|pb| pb.track)
+                                    .and_then(|tr| tr.duration_ms);
+                                match (current, duration) {
+                                    (Some(h), Some(d)) => correct(
+                                        &mut steward,
+                                        h,
+                                        Correction::Seek {
+                                            position_ms: (f as f64 * d as f64)
+                                                as u64,
+                                        },
+                                        t,
+                                    ),
+                                    _ => info!("seek: nothing to seek in"),
+                                }
+                            }
+                            Intent::Tap(Hotspot::Nav(i)) => {
+                                info!("nav {i}: not yet")
+                            }
+                            Intent::Tap(_)
+                            | Intent::Slide(_)
+                            | Intent::Commit(_) => {}
+                        }
+                    }
+                }
+                Err(e) => log::debug!("touch: {e:?}"),
+            }
+        }
         if last_face.elapsed() >= FACE_TICK {
             last_face = Instant::now();
             let output = output_state(&steward);
@@ -327,7 +431,7 @@ fn main() -> anyhow::Result<()> {
                     current = None;
                 }
             }
-            let state = player_state(&pb, output.as_ref());
+            let state = View::new(&pb, output.as_ref(), "Card");
             match face.refresh(&mut board.panel, &state) {
                 Ok(Repaint::Full) => full_frames += 1,
                 Ok(_) => {}
@@ -357,8 +461,13 @@ fn main() -> anyhow::Result<()> {
             }
             if kind.contains("custody_released") {
                 if next < tracks.len() {
-                    current =
-                        play_next(&mut steward, &tracks, &mut next, now());
+                    current = play_next(
+                        &mut steward,
+                        &tracks,
+                        &mut next,
+                        now(),
+                        wanted,
+                    );
                     track_started = Instant::now();
                 } else if next == tracks.len() {
                     info!(
@@ -597,14 +706,64 @@ fn play_next(
     tracks: &[Track],
     next: &mut usize,
     now: Ticks,
+    level: u8,
 ) -> Option<CustodyHandle> {
     while let Some(track) = tracks.get(*next) {
         *next += 1;
-        if let Some(handle) = play(steward, track, now) {
+        if let Some(handle) = play(steward, track, now, level) {
             return Some(handle);
         }
     }
     None
+}
+
+/// Pause, resume or seek the track in custody.
+fn correct(
+    steward: &mut Steward,
+    handle: CustodyHandle,
+    correction: Correction,
+    now: Ticks,
+) {
+    info!("touch: {correction:?}");
+    if let Err(e) = steward.correct(
+        handle,
+        CourseCorrection {
+            instruction: to_value(&correction),
+        },
+        now,
+    ) {
+        warn!("correct {}: {e:?}", handle.0);
+    }
+}
+
+/// Let go of the track in custody; `custody_released` then plays the
+/// one `next` names. With nothing in custody the loop's handler does not
+/// run, so the caller has already pointed `next` where it wants to go.
+fn skip(
+    steward: &mut Steward,
+    current: &mut Option<CustodyHandle>,
+    now: Ticks,
+) {
+    if let Some(h) = current.take() {
+        info!("touch: skip, releasing custody {}", h.0);
+        if let Err(e) = steward.release(h, now) {
+            warn!("release {}: {e:?}", h.0);
+        }
+    }
+}
+
+/// Ask the output for `level`, 0 to 100.
+fn set_volume(steward: &mut Steward, level: u8, now: Ticks) {
+    let _ = steward.request(
+        &Request {
+            cid: CorrelationId(2),
+            shelf: shelf::delivery_output(),
+            verb: delivery::VOLUME.into(),
+            subject: None,
+            args: to_value(&delivery::Volume { level }),
+        },
+        now,
+    );
 }
 
 /// Give the decoder custody of `track` from its start, at the volume;
@@ -613,6 +772,7 @@ fn play(
     steward: &mut Steward,
     track: &Track,
     now: Ticks,
+    level: u8,
 ) -> Option<CustodyHandle> {
     let taken = match steward.assign(
         &shelf::playback_decode(),
@@ -634,18 +794,7 @@ fn play(
             None
         }
     };
-    let _ = steward.request(
-        &Request {
-            cid: CorrelationId(2),
-            shelf: shelf::delivery_output(),
-            verb: delivery::VOLUME.into(),
-            subject: None,
-            args: to_value(&delivery::Volume {
-                level: VOLUME_PERCENT,
-            }),
-        },
-        now,
-    );
+    set_volume(steward, level, now);
     taken
 }
 

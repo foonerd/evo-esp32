@@ -28,7 +28,7 @@ log = "0.4"
 anyhow = "1"
 # The fabric, by path: this crate is a workspace of its own for the ESP
 # target, but the code it runs is this repository's.
-evo-esp32-panel = { path = "../../distributions/panel" }
+evo-esp32-face = { path = "../../distributions/face" }
 evo-esp32-platform-esp-idf = { path = "../../platform/esp-idf" }
 evo-esp32-sdk = { path = "../../sdk" }
 evo-esp32-steward = { path = "../../steward" }
