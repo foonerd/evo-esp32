@@ -35,8 +35,8 @@
 //!    every happening but a position update goes to the log, and a
 //!    heartbeat every ten seconds says what the heap and the main stack
 //!    have left, how busy the core is and how the position stands
-//!    against the clock. A card with no music gets `tone.wav` written to
-//!    it first, so the whole path is proven on any card.
+//!    against the clock. A card with no music runs the face all the
+//!    same, saying so.
 //! 9. The panel as a consumer: the player's face (`evo-esp32-face`) drawn
 //!    from the playback and delivery projections every 40 ms, repainting
 //!    only what moved; the backlight comes on after the first frame.
@@ -258,19 +258,7 @@ fn main() -> anyhow::Result<()> {
     let mut tracks =
         list_tracks(&mut steward, now()).map_err(|e| anyhow::anyhow!(e))?;
     if tracks.is_empty() {
-        // A card with no music gets a tone to play, so the path from the
-        // card through the decoder to the sink is proven on any card.
-        let path = format!("{MUSIC}/tone.wav");
-        match write_tone_wav(&path) {
-            Ok(bytes) => info!("no audio file on the card; wrote {path} ({bytes} bytes)"),
-            Err(e) => warn!("no audio file on the card and {path} could not be written: {e}"),
-        }
-        tracks =
-            list_tracks(&mut steward, now()).map_err(|e| anyhow::anyhow!(e))?;
-        if tracks.is_empty() {
-            warn!("still nothing to play");
-            idle();
-        }
+        warn!("no audio file on the card; the face says so");
     }
     // Each track once, shuffled so a bench run meets every format and
     // rate on the card early; then the fabric idles.
@@ -796,34 +784,6 @@ fn play(
     };
     set_volume(steward, level, now);
     taken
-}
-
-/// Two seconds of the self-test tone as a 44.1 kHz 16-bit stereo WAV at
-/// `path`; the bytes written.
-fn write_tone_wav(path: &str) -> std::io::Result<usize> {
-    use std::io::Write;
-    let mut pcm = tone_bytes();
-    pcm.extend_from_within(..); // the half-second tone, four times
-    pcm.extend_from_within(..);
-    let data_len = pcm.len() as u32;
-    let mut f = std::fs::File::create(path)?;
-    let mut header = Vec::with_capacity(44);
-    header.extend_from_slice(b"RIFF");
-    header.extend_from_slice(&(36 + data_len).to_le_bytes());
-    header.extend_from_slice(b"WAVEfmt ");
-    header.extend_from_slice(&16u32.to_le_bytes());
-    header.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    header.extend_from_slice(&2u16.to_le_bytes()); // channels
-    header.extend_from_slice(&RATE.to_le_bytes());
-    header.extend_from_slice(&(RATE * 4).to_le_bytes()); // bytes per second
-    header.extend_from_slice(&4u16.to_le_bytes()); // block align
-    header.extend_from_slice(&16u16.to_le_bytes()); // bits
-    header.extend_from_slice(b"data");
-    header.extend_from_slice(&data_len.to_le_bytes());
-    f.write_all(&header)?;
-    f.write_all(&pcm)?;
-    f.flush()?;
-    Ok(header.len() + pcm.len())
 }
 
 /// Nothing to do; stay up so the log stays readable.

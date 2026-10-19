@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the empty-card tone is
+  retired. The firmware no longer writes `tone.wav` to a card with no
+  music (it stayed on the card once music arrived and came round in the
+  shuffle as a honk); such a card runs the face, which says "Nothing
+  playing", and answers touch. The half-second self-test at boot stays.
+  A `tone.wav` an earlier build left on a card is the card owner's to
+  remove; the firmware does not delete files from a card.
 - `distributions/face`: touch. `touch::Tracker` turns the panel's reports
   into intents against the layout: a tap (under 800 ms, under 12 px of
   travel) on a button is `Intent::Tap`; a finger on the volume strip or
