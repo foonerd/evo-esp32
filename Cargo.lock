@@ -326,6 +326,7 @@ version = "0.1.0"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
+ "log",
  "serde_json",
  "symphonia",
 ]

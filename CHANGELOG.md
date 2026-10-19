@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `distributions/face`: a drag on the library scrolls. The finger's
+  travel arrives in small steps; it now accumulates until a row's worth
+  is in, instead of each step being rounded to no rows.
+- `plugins/org.evoframework.playback.symphonia`: a stream that is lost
+  mid-decode is logged with the decoder's reason before custody is
+  released; until now the reason went only into the track's title.
 - `firmware/waveshare-esp32-c5-touch-lcd-28`: the boot tone is retired.
   Half a second of 1 kHz went straight to the I2S channel at boot as the
   bring-up's self-test, past the sink's level, so it played at 30% of

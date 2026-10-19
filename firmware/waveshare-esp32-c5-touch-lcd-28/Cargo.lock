@@ -1241,6 +1241,7 @@ name = "org-evoframework-playback-symphonia"
 version = "0.1.0"
 dependencies = [
  "evo-esp32-sdk",
+ "log",
  "symphonia",
 ]
 

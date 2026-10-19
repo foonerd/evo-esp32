@@ -368,6 +368,7 @@ impl Warden for PlaybackSymphonia {
                 Err(e) => {
                     // The stream is lost. Say so in the state and let the
                     // steward release custody.
+                    log::warn!("decode: {e}; releasing");
                     h.state.status = Status::Stopped;
                     if let Some(t) = h.state.track.as_mut() {
                         t.title = format!("{} ({e})", t.title);

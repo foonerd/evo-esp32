@@ -227,6 +227,8 @@ pub struct Face {
     page: u32,
     /// The rows changed (a scroll) since they were last painted.
     rows_due: bool,
+    /// Finger travel on the list not yet a whole row, pixels.
+    scroll_rest: i32,
 }
 
 /// A full frame is painted in stages, one per `refresh`, so the caller's
@@ -262,6 +264,7 @@ impl Face {
             about: About::default(),
             page: 0,
             rows_due: false,
+            scroll_rest: 0,
         }
     }
 
@@ -280,6 +283,7 @@ impl Face {
     pub fn set_library(&mut self, library: Library) {
         self.library = library;
         self.page = self.page.wrapping_add(1);
+        self.scroll_rest = 0;
     }
 
     /// The library as shown.
@@ -288,10 +292,18 @@ impl Face {
     }
 
     /// Scroll the library by `pixels` of finger travel (positive is the
-    /// finger moving down, which brings earlier rows into view).
+    /// finger moving down, which brings earlier rows into view). Travel
+    /// accumulates across calls: a drag comes in small steps, and the
+    /// rows move once a whole row's worth is in.
     pub fn scroll_library(&mut self, pixels: i32) {
-        let rows = -pixels / self.layout.page.row;
-        if rows != 0 && self.library.scroll(rows, self.layout.page.rows()) {
+        let row = self.layout.page.row;
+        self.scroll_rest += pixels;
+        let rows = self.scroll_rest / row;
+        if rows == 0 {
+            return;
+        }
+        self.scroll_rest -= rows * row;
+        if self.library.scroll(-rows, self.layout.page.rows()) {
             self.rows_due = true;
         }
     }
@@ -1534,8 +1546,16 @@ mod tests {
         assert_eq!(face.hit(page.bar_play), Some(Hotspot::BarPlay));
         assert_eq!(face.hit(face.layout().nav_item(0)), Some(Hotspot::Nav(0)));
         assert_eq!(face.hit(page.back.center()), Some(Hotspot::Back));
-        // A scroll of two rows repaints the rows alone.
-        face.scroll_library(-2 * page.row);
+        // A drag comes in steps; the rows move once a row's worth is in,
+        // and the repaint is the rows alone.
+        face.scroll_library(-10);
+        face.scroll_library(-10);
+        assert_eq!(face.library().first, 0);
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
+        face.scroll_library(-10);
+        assert_eq!(face.library().first, 1);
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Rows));
+        face.scroll_library(-page.row);
         assert_eq!(face.library().first, 2);
         assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Rows));
         // The position moving is nothing here.
