@@ -17,6 +17,9 @@ pub struct Entry {
     pub folder: bool,
     /// The track's URI, to tell the one in hand; folders have none.
     pub uri: Option<String>,
+    /// False for a track this player cannot play (its rate is above
+    /// the board's ceiling): shown greyed, a tap does nothing.
+    pub playable: bool,
 }
 
 /// A folder of the source, as listed.
@@ -81,6 +84,7 @@ mod tests {
                     name: alloc::format!("{i}"),
                     folder: false,
                     uri: None,
+                    playable: true,
                 })
                 .collect(),
             first: 0,

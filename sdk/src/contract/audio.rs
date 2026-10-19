@@ -113,6 +113,11 @@ pub struct Track {
     /// Length in milliseconds, where known. Streams have none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Frames per second, where the source read it from the file's
+    /// header; a distribution with a rate ceiling passes such a track
+    /// over without opening it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
 }
 
 /// The subject kind a source announces a track under.
@@ -355,6 +360,7 @@ mod tests {
             artist: None,
             album: None,
             duration_ms: Some(1000),
+            sample_rate: None,
         };
         let v = to_value(&t);
         // Value maps sort their keys; the unknown fields are absent.

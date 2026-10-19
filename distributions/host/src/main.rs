@@ -234,6 +234,7 @@ fn gallery(dir: &std::path::Path) -> Result<(), String> {
             artist: Some("Dire Straits".into()),
             album: Some("Brothers In Arms".into()),
             duration_ms: Some(506_000),
+            sample_rate: None,
         }),
         position_ms: 119_000,
         format: Some(playback::Format {
@@ -305,6 +306,7 @@ fn sample_library() -> Library {
                 name: t.to_string(),
                 folder: false,
                 uri: Some(format!("{album}/{t}.flac")),
+                playable: !t.starts_with("07"),
             })
             .collect(),
         first: 0,

@@ -103,12 +103,15 @@ impl SourceFiles {
             if kind.is_dir() {
                 folders.push((name.clone(), rel));
             } else if is_audio(&name) {
+                let (sample_rate, duration_ms) =
+                    header_facts(&entry.path()).unwrap_or_default();
                 tracks.push(Track {
                     uri: format!("file://{}", entry.path().display()),
                     title: title_of(&name),
                     artist: None,
                     album: None,
-                    duration_ms: None,
+                    duration_ms,
+                    sample_rate,
                 });
             }
         }
@@ -135,6 +138,56 @@ impl SourceFiles {
             entries,
         })
     }
+}
+
+/// The sample rate and the length a file's header states, read from its
+/// first bytes: a FLAC's STREAMINFO (the first metadata block, 34 bytes
+/// after the marker), a WAV's `fmt ` chunk. Other formats, or a header
+/// that is not where it should be, give nothing; the decoder finds out
+/// later. One small read a file, so a listing can say what a player
+/// with a rate ceiling cannot play without opening anything.
+pub fn header_facts(path: &Path) -> Option<(Option<u32>, Option<u64>)> {
+    use std::io::Read;
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mut head = [0u8; 64];
+    let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+    let head = &head[..n];
+    match ext.as_str() {
+        "flac" => flac_streaminfo(head),
+        "wav" => wav_fmt(head),
+        _ => None,
+    }
+}
+
+/// `(sample rate, duration)` from a FLAC file's first 42 bytes.
+fn flac_streaminfo(head: &[u8]) -> Option<(Option<u32>, Option<u64>)> {
+    if head.len() < 42 || &head[..4] != b"fLaC" || head[4] & 0x7f != 0 {
+        return None;
+    }
+    let info = &head[8..42];
+    // 20 bits of rate, 3 of channels - 1, 5 of bits - 1, 36 of samples.
+    let rate = (u32::from(info[10]) << 12)
+        | (u32::from(info[11]) << 4)
+        | (u32::from(info[12]) >> 4);
+    let samples = (u64::from(info[13] & 0x0f) << 32)
+        | (u64::from(info[14]) << 24)
+        | (u64::from(info[15]) << 16)
+        | (u64::from(info[16]) << 8)
+        | u64::from(info[17]);
+    if rate == 0 {
+        return None;
+    }
+    let duration = (samples > 0).then(|| samples * 1000 / u64::from(rate));
+    Some((Some(rate), duration))
+}
+
+/// `(sample rate, None)` from a WAV whose `fmt ` chunk is the first.
+fn wav_fmt(head: &[u8]) -> Option<(Option<u32>, Option<u64>)> {
+    if head.len() < 28 || &head[..4] != b"RIFF" || &head[8..16] != b"WAVEfmt " {
+        return None;
+    }
+    let rate = u32::from_le_bytes([head[24], head[25], head[26], head[27]]);
+    (rate > 0).then_some((Some(rate), None))
 }
 
 /// True for a file name whose extension is in [`AUDIO_EXTENSIONS`].
@@ -261,6 +314,37 @@ mod tests {
             Ticks(0),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_header_peek_reads_flac_and_wav_rates() {
+        // A FLAC marker, a STREAMINFO block header, and the 34 bytes:
+        // min/max block 4096, min/max frame 0, then rate 192000 (20 bits),
+        // 2 channels, 24 bits, 19 200 000 samples (100 s).
+        let mut flac = b"fLaC\x00\x00\x00\x22".to_vec();
+        flac.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0]);
+        let rate: u32 = 192_000;
+        let samples: u64 = 19_200_000;
+        flac.push((rate >> 12) as u8);
+        flac.push((rate >> 4) as u8);
+        flac.push((((rate & 0xf) as u8) << 4) | (1 << 1) | ((24 - 1) >> 4));
+        flac.push(
+            ((((24 - 1) & 0xf) as u8) << 4) | ((samples >> 32) as u8 & 0xf),
+        );
+        flac.extend_from_slice(&(samples as u32).to_be_bytes());
+        flac.extend_from_slice(&[0u8; 16]); // MD5
+        assert_eq!(
+            flac_streaminfo(&flac),
+            Some((Some(192_000), Some(100_000)))
+        );
+        let mut wav =
+            b"RIFF\x00\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00"
+                .to_vec();
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&[0u8; 8]);
+        assert_eq!(wav_fmt(&wav), Some((Some(44_100), None)));
+        assert_eq!(flac_streaminfo(b"fLaC"), None, "too short");
+        assert_eq!(wav_fmt(b"RIFF....WAVELIST"), None, "fmt not first");
     }
 
     #[test]

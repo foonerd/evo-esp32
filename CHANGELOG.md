@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The rate ceiling is known before a track is opened. `sdk`: `Track`
+  gains `sample_rate`, where the source read it. `plugins/org.evoframework.source.files`:
+  a listing reads each FLAC's STREAMINFO (rate and length) and each
+  WAV's `fmt ` chunk from the file's first 64 bytes. `firmware`: a track
+  above the ceiling is passed over unopened (no custody taken, no face
+  flicker), and the library greys such rows; a tap on one does nothing.
+  An all-192 kHz album tapped in the library used to march through
+  every track in silence, 1.8 s apiece.
 - The Library and Settings screens behind the navigation. `distributions/face`:
   `Screen` (Now Playing, Library, Settings), `library::{Library, Entry,
   About, Fact}`; a list page is a header with a back chevron below the

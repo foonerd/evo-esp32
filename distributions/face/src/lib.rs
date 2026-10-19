@@ -610,14 +610,26 @@ impl Face {
             draw::rounded(target, tab, 1, t.muted_fg, t.background)?;
             draw::rounded(target, body, 2, t.muted_fg, t.background)?;
         } else {
-            let colour = if playing { t.accent } else { t.muted_fg };
+            let colour = if playing {
+                t.accent
+            } else if entry.playable {
+                t.muted_fg
+            } else {
+                t.border
+            };
             draw::icon_note(target, c, 6, colour, t.background)?;
         }
         let name = Rectangle::new(
             Point::new(x + 34, y + (h - 15) / 2),
             Size::new(slot.size.width.saturating_sub(34 + 10), 15),
         );
-        let colour = if playing { t.accent } else { t.foreground };
+        let colour = if playing {
+            t.accent
+        } else if entry.playable {
+            t.foreground
+        } else {
+            mix(t.muted_fg, t.background, 6)
+        };
         text::BODY.line(
             target,
             &entry.name,
@@ -1190,6 +1202,7 @@ mod tests {
                 artist: Some("Dire Straits".into()),
                 album: Some("Brothers In Arms".into()),
                 duration_ms: Some(506_000),
+                sample_rate: None,
             }),
             position_ms: 119_000,
             format: Some(playback::Format {
@@ -1499,6 +1512,7 @@ mod tests {
                 name: alloc::format!("Track {i}"),
                 folder: i == 0,
                 uri: (i > 0).then(|| alloc::format!("file:///t{i}.flac")),
+                playable: true,
             })
             .collect();
         face.set_screen(Screen::Library);

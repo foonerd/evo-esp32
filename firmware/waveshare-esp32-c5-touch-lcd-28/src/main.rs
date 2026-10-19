@@ -428,6 +428,13 @@ fn main() -> anyhow::Result<()> {
                                 else {
                                     continue;
                                 };
+                                if !entry.playable {
+                                    info!(
+                                        "library: {:?} is above the ceiling",
+                                        entry.name
+                                    );
+                                    continue;
+                                }
                                 if entry.folder {
                                     let path = browse
                                         .folder_path(&entry.name)
@@ -835,11 +842,25 @@ fn play_next(
 ) -> Option<CustodyHandle> {
     while let Some(track) = tracks.get(*next) {
         *next += 1;
+        if !within_ceiling(track) {
+            info!(
+                "{:?} is {} Hz, above this board's ceiling of {RATE_CEILING} Hz; passed over unopened",
+                track.title,
+                track.sample_rate.unwrap_or(0)
+            );
+            continue;
+        }
         if let Some(handle) = play(steward, track, now, level) {
             return Some(handle);
         }
     }
     None
+}
+
+/// Whether the source's listing says the track's rate is one this board
+/// plays; a track whose rate the listing does not know is tried.
+fn within_ceiling(track: &Track) -> bool {
+    track.sample_rate.is_none_or(|rate| rate <= RATE_CEILING)
 }
 
 /// Pause, resume or seek the track in custody.
@@ -1014,6 +1035,7 @@ impl Browse {
                         name: name.clone(),
                         folder: true,
                         uri: None,
+                        playable: true,
                     });
                     self.folders.push((name, path));
                 }
@@ -1022,6 +1044,7 @@ impl Browse {
                         name: t.title.clone(),
                         folder: false,
                         uri: Some(t.uri.clone()),
+                        playable: within_ceiling(&t),
                     });
                     self.tracks.push(t);
                 }

@@ -590,6 +590,7 @@ pub fn file_track(path: &Path) -> Track {
         artist: None,
         album: None,
         duration_ms: None,
+        sample_rate: None,
     }
 }
 

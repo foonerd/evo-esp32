@@ -258,6 +258,7 @@ mod tests {
             artist: None,
             album: None,
             duration_ms: ms,
+            sample_rate: None,
         }
     }
 
