@@ -20,13 +20,10 @@
 //!    (J8.8), data GPIO11 (J6 TXD; the console is on USB). An ES9018K2M
 //!    answering on J5's I2C is brought up; a HAT without one needs
 //!    nothing said to it. The speaker and the HAT play the same frames.
-//! 6. Half a second of 1 kHz through the sink: the boot's self-test,
-//!    and the proof the clock is right before a decoder is asked for
-//!    frames.
-//! 7. The card mounted at `/sdcard` (before the panel, so it is read
+//! 6. The card mounted at `/sdcard` (before the panel, so it is read
 //!    first). Without one there is nothing to play and the firmware says
 //!    so and idles.
-//! 8. The fabric, as the host distribution builds it: the catalogue
+//! 7. The fabric, as the host distribution builds it: the catalogue
 //!    compiled in and checked against the plugins, the steward, the files
 //!    source over the card, the Symphonia decoder into the I2S sink, the
 //!    null output. Every track on the card is played once, shuffled;
@@ -37,7 +34,7 @@
 //!    have left, how busy the core is and how the position stands
 //!    against the clock. A card with no music runs the face all the
 //!    same, saying so.
-//! 9. The panel as a consumer: the player's face (`evo-esp32-face`) drawn
+//! 8. The panel as a consumer: the player's face (`evo-esp32-face`) drawn
 //!    from the playback and delivery projections every 40 ms, repainting
 //!    only what moved; a full frame comes in stages with a decoder tick
 //!    between each, so a track change does not starve the DMA ring; the
@@ -93,12 +90,6 @@ const RATE: u32 = 44_100;
 /// FLAC decodes at 0.4 of real time on the C5 with the core saturated,
 /// and the ES8311 has no 192 kHz setting; 96 kHz plays at 1.0.
 const RATE_CEILING: u32 = 96_000;
-/// The self-test tone.
-const TONE_HZ: f32 = 1000.0;
-const TONE: Duration = Duration::from_millis(500);
-/// Tone amplitude as a fraction of full scale; the amplifier is small
-/// and the speaker smaller.
-const AMPLITUDE: f32 = 0.3;
 /// Playback volume, percent on the house curve, applied in the sink.
 const VOLUME_PERCENT: u8 = 40;
 /// The board's hardware gain the codec driver takes off, in half-dB
@@ -202,7 +193,7 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("es8311 volume: {e:?}"))?;
     info!("es8311: open, {RATE} Hz 16-bit, started, at its 100% ({half_db} half-dB); the level is the sink's");
 
-    let mut sink = I2sSink::new(
+    let sink = I2sSink::new(
         i2s0,
         pins.gpio24,
         pins.gpio26,
@@ -242,12 +233,6 @@ fn main() -> anyhow::Result<()> {
     let volume = sink.volume();
     volume.set(VOLUME_PERCENT, false);
     let started = Instant::now();
-    sink.tone_blocking(&tone_bytes())?;
-    info!(
-        "self-test: {} ms of tone written in {} ms",
-        TONE.as_millis(),
-        started.elapsed().as_millis()
-    );
 
     let now = || Ticks(started.elapsed().as_millis() as u64);
     let mut steward = bring_up(sink, now()).map_err(|e| anyhow::anyhow!(e))?;
@@ -972,30 +957,6 @@ fn mirror(gpio: u8, signal: u32) {
         );
     }
 }
-
-/// `TONE` of `TONE_HZ` at `RATE`, 16-bit stereo interleaved, little-endian.
-/// One exact cycle of the tone, tiled: 441 samples at 44.1 kHz is ten
-/// periods of 1 kHz. The C5 has no FPU; 88 200 software sines took eight
-/// seconds and tripped the idle task's watchdog on the first bench run.
-fn tone_bytes() -> Vec<u8> {
-    let frames = (RATE as u64 * TONE.as_millis() as u64 / 1000) as usize;
-    let cycle = (RATE / 100) as usize;
-    let step = core::f32::consts::TAU * TONE_HZ / RATE as f32;
-    let table: Vec<[u8; 2]> = (0..cycle)
-        .map(|i| {
-            (((i as f32 * step).sin() * AMPLITUDE * i16::MAX as f32) as i16)
-                .to_le_bytes()
-        })
-        .collect();
-    let mut out = Vec::with_capacity(frames * 4);
-    for i in 0..frames {
-        let s = table[i % cycle];
-        out.extend_from_slice(&s);
-        out.extend_from_slice(&s);
-    }
-    out
-}
-
 /// The library page's state: the folder in view, the folders above it,
 /// and the folder's tracks in the source's order.
 #[derive(Default)]

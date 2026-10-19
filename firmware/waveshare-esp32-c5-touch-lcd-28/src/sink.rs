@@ -203,11 +203,6 @@ impl<F: RateFollower> I2sSink<F> {
         }
         n
     }
-
-    /// Play a blocking tone through the channel; the boot's self-test.
-    pub fn tone_blocking(&mut self, bytes: &[u8]) -> Result<(), sys::EspError> {
-        self.driver().write_all(bytes, sys::TickType_t::MAX)
-    }
 }
 
 fn open(

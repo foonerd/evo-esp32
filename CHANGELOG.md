@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the boot tone is retired.
+  Half a second of 1 kHz went straight to the I2S channel at boot as the
+  bring-up's self-test, past the sink's level, so it played at 30% of
+  full scale whatever the volume: the "deafening tone" at every start.
+  The path it proved is proven by the music now.
 - The rate ceiling is known before a track is opened. `sdk`: `Track`
   gains `sample_rate`, where the source read it. `plugins/org.evoframework.source.files`:
   a listing reads each FLAC's STREAMINFO (rate and length) and each
