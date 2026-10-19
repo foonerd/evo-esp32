@@ -30,6 +30,8 @@
 //!    compiled in and checked against the plugins, the steward, the files
 //!    source over the card, the Symphonia decoder into the I2S sink, the
 //!    null output. Every track on the card is played once, shuffled;
+//!    a track whose stream turns out to be above the chip's rate ceiling
+//!    is passed over as soon as the decoder reports its format;
 //!    every happening but a position update goes to the log, and a
 //!    heartbeat every ten seconds says what the heap and the main stack
 //!    have left, how busy the core is and how the position stands
@@ -64,7 +66,7 @@ use evo_esp32_sdk::plugin::{Plugin, PluginDescription};
 use evo_esp32_sdk::projection::ProjectionKey;
 use evo_esp32_sdk::respondent::{CorrelationId, Request};
 use evo_esp32_sdk::subject::SubjectId;
-use evo_esp32_sdk::warden::Assignment;
+use evo_esp32_sdk::warden::{Assignment, CustodyHandle};
 use evo_esp32_sdk::Ticks;
 use evo_esp32_steward::{Config, Steward};
 use log::{info, warn};
@@ -81,6 +83,10 @@ mod generated {
 
 /// The rate the sink opens at; a stream at another rate reopens it.
 const RATE: u32 = 44_100;
+/// The highest stream rate this board plays. Measured: 192 kHz/24-bit
+/// FLAC decodes at 0.4 of real time on the C5 with the core saturated,
+/// and the ES8311 has no 192 kHz setting; 96 kHz plays at 1.0.
+const RATE_CEILING: u32 = 96_000;
 /// The self-test tone.
 const TONE_HZ: f32 = 1000.0;
 const TONE: Duration = Duration::from_millis(500);
@@ -269,7 +275,7 @@ fn main() -> anyhow::Result<()> {
     shuffle(&mut tracks);
     info!("{} tracks, shuffled", tracks.len());
     let mut next = 0usize;
-    play_next(&mut steward, &tracks, &mut next, now());
+    let mut current = play_next(&mut steward, &tracks, &mut next, now());
     let mut track_started = Instant::now();
 
     // The output subject's level and mute reach the sink from here.
@@ -305,10 +311,23 @@ fn main() -> anyhow::Result<()> {
                     level = Some(now_level);
                 }
             }
-            let state = player_state(
-                &playback_state(&steward).unwrap_or_default(),
-                output.as_ref(),
-            );
+            let pb = playback_state(&steward).unwrap_or_default();
+            // The chip's ceiling is the distribution's to enforce: the
+            // decoder would play it, badly.
+            if let (Some(handle), Some(f)) = (current, pb.format.as_ref()) {
+                if f.sample_rate > RATE_CEILING {
+                    warn!(
+                        "{:?} is {} Hz, above this board's ceiling of {RATE_CEILING} Hz; passed over",
+                        pb.track.as_ref().map(|t| t.title.as_str()).unwrap_or("?"),
+                        f.sample_rate
+                    );
+                    if let Err(e) = steward.release(handle, t) {
+                        warn!("release {}: {e:?}", handle.0);
+                    }
+                    current = None;
+                }
+            }
+            let state = player_state(&pb, output.as_ref());
             match face.refresh(&mut board.panel, &state) {
                 Ok(Repaint::Full) => full_frames += 1,
                 Ok(_) => {}
@@ -338,13 +357,15 @@ fn main() -> anyhow::Result<()> {
             }
             if kind.contains("custody_released") {
                 if next < tracks.len() {
-                    play_next(&mut steward, &tracks, &mut next, now());
+                    current =
+                        play_next(&mut steward, &tracks, &mut next, now());
                     track_started = Instant::now();
                 } else if next == tracks.len() {
                     info!(
                         "all {} tracks played; the fabric idles",
                         tracks.len()
                     );
+                    current = None;
                     next += 1;
                 }
             }
@@ -569,24 +590,30 @@ fn report_playback(steward: &Steward, elapsed: Duration) {
 
 /// Play the track at `*next`, or the first after it the decoder takes;
 /// a refused track (a codec nobody stocks, an unreadable file) is logged
-/// and passed over, so one bad file does not end the run.
+/// and passed over, so one bad file does not end the run. The custody
+/// taken, if any.
 fn play_next(
     steward: &mut Steward,
     tracks: &[Track],
     next: &mut usize,
     now: Ticks,
-) {
+) -> Option<CustodyHandle> {
     while let Some(track) = tracks.get(*next) {
         *next += 1;
-        if play(steward, track, now) {
-            return;
+        if let Some(handle) = play(steward, track, now) {
+            return Some(handle);
         }
     }
+    None
 }
 
 /// Give the decoder custody of `track` from its start, at the volume;
-/// whether it took it.
-fn play(steward: &mut Steward, track: &Track, now: Ticks) -> bool {
+/// the custody if it took it.
+fn play(
+    steward: &mut Steward,
+    track: &Track,
+    now: Ticks,
+) -> Option<CustodyHandle> {
     let taken = match steward.assign(
         &shelf::playback_decode(),
         Assignment {
@@ -600,11 +627,11 @@ fn play(steward: &mut Steward, track: &Track, now: Ticks) -> bool {
     ) {
         Ok(handle) => {
             info!("playing {:?} under custody {}", track.title, handle.0);
-            true
+            Some(handle)
         }
         Err(e) => {
             warn!("assign {:?}: {e:?}", track.title);
-            false
+            None
         }
     };
     let _ = steward.request(
