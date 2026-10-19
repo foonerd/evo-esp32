@@ -21,6 +21,11 @@
 //! Exact on a constant bit rate; on a variable one the landing is off
 //! by the stream's drift from the mean, a few seconds at worst.
 //!
+//! The stream's own tags (ID3v2 on MP3, Vorbis comments on FLAC, the
+//! INFO list on WAV) name the track: the title replaces the one the
+//! source gave (a file's stem, usually), artist and album fill in where
+//! the source had none; the container's duration likewise.
+//!
 //! FLAC, MP3, WAV and raw PCM, the codecs a card of music holds. The
 //! decoder is pure Rust; what it costs on the target is the measurement
 //! this plugin exists to make, with the panel and Wi-Fi up beside it.
@@ -57,7 +62,7 @@ use symphonia::core::formats::{
     FormatOptions, FormatReader, SeekMode, SeekTo, TrackType,
 };
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataOptions, StandardTag};
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 /// The plugin's name, as the catalogue and the steward know it.
@@ -228,6 +233,16 @@ impl Warden for PlaybackSymphonia {
         let (mut stream, format) = open(&track.uri, &self.codecs)?;
         if track.duration_ms.is_none() {
             track.duration_ms = duration_ms(&stream);
+        }
+        let tags = tags(&mut stream);
+        if let Some(title) = tags.title {
+            track.title = title;
+        }
+        if track.artist.is_none() {
+            track.artist = tags.artist;
+        }
+        if track.album.is_none() {
+            track.album = tags.album;
         }
         let (base_ms, skip) = if play.start_ms > 0 {
             seek(&mut stream, play.start_ms, format.sample_rate)?
@@ -445,6 +460,41 @@ fn file_path(uri: &str) -> Result<PathBuf, CustodyError> {
         .ok_or_else(|| CustodyError(format!("not a file URI: {uri}")))
 }
 
+/// What the stream's tags call the track.
+#[derive(Debug, Default)]
+struct Tags {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+/// The standard tags the reader found ahead of the audio: the latest
+/// revision, which the probe fills from an ID3v2 tag, a FLAC's Vorbis
+/// comments or a WAV's INFO list. Empty values count as absent; the
+/// album artist stands in for an artist the tags lack.
+fn tags(stream: &mut Stream) -> Tags {
+    let mut out = Tags::default();
+    let mut album_artist = None;
+    let mut metadata = stream.reader.metadata();
+    let Some(revision) = metadata.skip_to_latest() else {
+        return out;
+    };
+    let text = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+    for tag in &revision.media.tags {
+        match &tag.std {
+            Some(StandardTag::TrackTitle(s)) => out.title = text(s),
+            Some(StandardTag::Artist(s)) => out.artist = text(s),
+            Some(StandardTag::AlbumArtist(s)) => album_artist = text(s),
+            Some(StandardTag::Album(s)) => out.album = text(s),
+            _ => {}
+        }
+    }
+    if out.artist.is_none() {
+        out.artist = album_artist;
+    }
+    out
+}
+
 /// The track's length in milliseconds, where the container says.
 fn duration_ms(stream: &Stream) -> Option<u64> {
     let track = stream
@@ -609,6 +659,15 @@ mod tests {
     /// left, its negative on the right, so content can be checked. Each
     /// call gets its own file: the tests run in parallel.
     fn wav(frames: usize) -> PathBuf {
+        wav_with(frames, &[])
+    }
+
+    /// [`wav`] behind an ID3v2.3 tag of `(frame id, text)` pairs, the
+    /// way a tagged MP3 begins: the probe reads the tag, then the
+    /// container, and the tags reach the reader as they do for an MP3.
+    /// (A WAV's own INFO list would be the natural fixture, but
+    /// symphonia-format-riff 0.6.1 drops the log it parses it into.)
+    fn wav_with(frames: usize, tags: &[(&[u8; 4], &str)]) -> PathBuf {
         static N: std::sync::atomic::AtomicUsize =
             std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -618,7 +677,28 @@ mod tests {
             data.extend_from_slice(&s.to_le_bytes());
             data.extend_from_slice(&(-s).to_le_bytes());
         }
-        let mut b = Vec::new();
+        let mut id3 = Vec::new();
+        if !tags.is_empty() {
+            let mut frames_ = Vec::new();
+            for (id, text) in tags {
+                frames_.extend_from_slice(*id);
+                frames_
+                    .extend_from_slice(&(text.len() as u32 + 1).to_be_bytes());
+                frames_.extend_from_slice(&[0, 0]); // flags
+                frames_.push(0); // ISO-8859-1
+                frames_.extend_from_slice(text.as_bytes());
+            }
+            let size = frames_.len() as u32;
+            id3.extend_from_slice(b"ID3\x03\x00\x00");
+            id3.extend_from_slice(&[
+                ((size >> 21) & 0x7f) as u8,
+                ((size >> 14) & 0x7f) as u8,
+                ((size >> 7) & 0x7f) as u8,
+                (size & 0x7f) as u8,
+            ]);
+            id3.extend_from_slice(&frames_);
+        }
+        let mut b = id3;
         b.extend_from_slice(b"RIFF");
         b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
         b.extend_from_slice(b"WAVEfmt ");
@@ -709,6 +789,31 @@ mod tests {
         assert_eq!(tape.frames[0..4], [0, 0, 7, -7]);
         assert_eq!(tape.stops, 1);
         assert_eq!(state(&s).status, Status::Stopped, "released at the end");
+    }
+
+    #[test]
+    fn the_streams_tags_name_the_track() {
+        let path = wav_with(
+            800,
+            &[
+                (b"TIT2", "The Show Must Go On"),
+                (b"TPE1", "Queen"),
+                (b"TALB", "Greatest Hits III"),
+            ],
+        );
+        let (mut s, _tape) = rig(usize::MAX);
+        play(&mut s, file_track(&path), 0).unwrap();
+        let track = state(&s).track.unwrap();
+        assert_eq!(track.title, "The Show Must Go On");
+        assert_eq!(track.artist.as_deref(), Some("Queen"));
+        assert_eq!(track.album.as_deref(), Some("Greatest Hits III"));
+
+        // No tags: the source's title stands, and nothing is invented.
+        let (mut s, _tape) = rig(usize::MAX);
+        play(&mut s, file_track(&wav(800)), 0).unwrap();
+        let track = state(&s).track.unwrap();
+        assert_eq!(track.title, "ramp");
+        assert_eq!((track.artist, track.album), (None, None));
     }
 
     #[test]

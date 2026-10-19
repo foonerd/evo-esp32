@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `plugins/org.evoframework.playback.symphonia`: ID3 tags are read. The
+  crate was built without Symphonia's `id3v2` and `id3v1` readers, so the
+  probe scanned every tagged MP3 from byte 0 for a frame sync; the
+  UTF-16 byte-order marks inside an ID3v2 text frame (`FF FE`) parse as
+  MPEG headers, and in two Queen files one of them held up as a Layer I
+  frame, so the track was declared MP1 and refused ("unsupported audio
+  codec"); every other MP3 paid a junk scan and lost its Xing header
+  ("estimating duration from bitrate"). With the readers on, the tag is
+  parsed and the stream starts at its first frame.
+- `plugins/org.evoframework.playback.symphonia`: the stream's tags name
+  the track. The title from the tags replaces the one the source gave (a
+  file's stem); artist and album fill in where the source had none, the
+  album artist standing in for a missing artist. ID3v2 on MP3, Vorbis
+  comments on FLAC. (A WAV's INFO list is parsed by Symphonia's reader
+  and then dropped before it reaches the caller, in
+  symphonia-format-riff 0.6.1; not ours to fix.) The face shows the
+  three lines as tagged: "Las Palabras De Amor", not "08 - Las Palabras
+  De Amor".
 - `plugins/org.evoframework.playback.symphonia`: MPEG audio (MP1, MP2,
   MP3) is seeked coarsely. Symphonia's accurate seek walks every frame
   from the start (or the current position, forward) to the target, which
