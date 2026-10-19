@@ -1,0 +1,22 @@
+[package]
+name = "evo-esp32-panel"
+description = "The panel as a consumer of the fabric: the playback and delivery projections mapped to the companion's player state and drawn as its resting face on any RGB565 draw target, repainting only what changed; shared by the host distribution and the firmware."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The companion's pages, by commit until its next tag (MIT; the dependency
+# runs this way only, never the reverse).
+companion-core = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ccc5d413030fcc2032853b1f400032c38fd9e498" }
+embedded-graphics = "0.8"
+evo-esp32-sdk = { path = "../../sdk" }
+
+[dev-dependencies]
+embedded-graphics-simulator = { version = "0.8", default-features = false }
