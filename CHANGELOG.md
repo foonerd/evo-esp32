@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `firmware/waveshare-esp32-c5-touch-lcd-28`: the build id. `build.rs`
+  stamps `git describe` into the binary, the boot log's first line names
+  it (`build:<describe>`), and `scripts/image.sh` refuses to call an image
+  good unless it carries the id of the tree it is run in. Two bench runs
+  on 19 October flashed a stale image; this closes that class.
 - `distributions/face` (`evo-esp32-face`) replaces `distributions/panel`:
   the player's own face instead of the companion's remote-control pages.
   Now Playing from the playback and delivery projections, in the evo

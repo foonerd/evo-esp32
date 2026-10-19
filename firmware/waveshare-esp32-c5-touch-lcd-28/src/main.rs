@@ -126,9 +126,10 @@ fn main() -> anyhow::Result<()> {
     sys::link_patches();
     EspLogger::initialize_default();
     info!(
-        "{} {} starting",
+        "{} {} starting, {}",
         env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION")
+        env!("CARGO_PKG_VERSION"),
+        env!("EVO_BUILD_ID")
     );
 
     let Peripherals {
