@@ -34,6 +34,11 @@ impl Panel {
         let Ok(_) = self.face.refresh_whole(&mut self.display, view);
     }
 
+    /// The face itself, to set its screen, library, facts or art.
+    pub fn face_mut(&mut self) -> &mut Face {
+        &mut self.face
+    }
+
     /// Write what is drawn to `path` as a PNG at panel resolution.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.display

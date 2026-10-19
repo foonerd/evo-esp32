@@ -45,6 +45,77 @@ impl Style {
     }
 }
 
+/// The pages the navigation switches between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Screen {
+    /// The track in hand.
+    #[default]
+    NowPlaying,
+    /// The source's folders and tracks.
+    Library,
+    /// What this player is.
+    Settings,
+}
+
+impl Screen {
+    /// The navigation item that stands for the screen.
+    pub fn nav_index(self) -> u8 {
+        match self {
+            Screen::NowPlaying => 0,
+            Screen::Library => 1,
+            Screen::Settings => 2,
+        }
+    }
+
+    /// The screen the `i`th navigation item stands for.
+    pub fn from_nav(i: u8) -> Screen {
+        match i {
+            1 => Screen::Library,
+            2 => Screen::Settings,
+            _ => Screen::NowPlaying,
+        }
+    }
+}
+
+/// A list page (the library, the settings): a header with a back
+/// chevron, rows, and at the foot a bar with the track in hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    /// The header's text area.
+    pub header: Rectangle,
+    /// Where the back chevron sits and is hit.
+    pub back: Rectangle,
+    /// The rows' area.
+    pub list: Rectangle,
+    /// One row's height.
+    pub row: i32,
+    /// The now-playing bar.
+    pub bar: Rectangle,
+    /// Its thumbnail square.
+    pub bar_art: Rectangle,
+    /// Its title line.
+    pub bar_title: Rectangle,
+    /// Its play/pause button's centre and radius.
+    pub bar_play: Point,
+    /// The button's radius.
+    pub bar_play_r: u32,
+}
+
+impl Page {
+    /// How many whole rows the list shows.
+    pub fn rows(&self) -> usize {
+        (self.list.size.height as i32 / self.row).max(0) as usize
+    }
+
+    /// The `i`th visible row's rectangle.
+    pub fn row_rect(&self, i: usize) -> Rectangle {
+        Rectangle::new(
+            self.list.top_left + Point::new(0, self.row * i as i32),
+            Size::new(self.list.size.width, self.row as u32),
+        )
+    }
+}
+
 /// Which way the navigation runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavAxis {
@@ -113,6 +184,8 @@ pub struct Layout {
     pub nav: Rectangle,
     /// Bar or rail.
     pub nav_axis: NavAxis,
+    /// The list pages' regions.
+    pub page: Page,
 }
 
 /// Height of the bottom bar, width of the side rail.
@@ -168,6 +241,7 @@ impl Layout {
                 },
                 nav: r(0, h - NAV as i32, w, NAV as i32),
                 nav_axis: NavAxis::Bar,
+                page: Self::page(r(0, 0, w, h - NAV as i32)),
             };
         match style {
             Style::Disc => common(
@@ -246,6 +320,33 @@ impl Layout {
             },
             nav: r(0, 0, NAV as i32, h),
             nav_axis: NavAxis::Rail,
+            page: Self::page(r(NAV as i32, 0, w - NAV as i32, h)),
+        }
+    }
+
+    /// A list page inside `area` (the frame less the navigation): the
+    /// header, as many rows as fit, the now-playing bar at the foot.
+    fn page(area: Rectangle) -> Page {
+        let (x0, y0) = (area.top_left.x, area.top_left.y);
+        let (w, h) = (area.size.width as i32, area.size.height as i32);
+        let r = |x: i32, y: i32, cw: i32, ch: i32| {
+            Rectangle::new(Point::new(x, y), Size::new(cw as u32, ch as u32))
+        };
+        let header_h = 30;
+        let bar_h = 44;
+        let row = 28;
+        let list_h = (h - header_h - bar_h) / row * row;
+        let bar_y = y0 + h - bar_h;
+        Page {
+            header: r(x0 + 34, y0 + 7, w - 34 - 10, 18),
+            back: r(x0, y0, 34, header_h),
+            list: r(x0, y0 + header_h, w, list_h),
+            row,
+            bar: r(x0, bar_y, w, bar_h),
+            bar_art: r(x0 + 8, bar_y + 8, 28, 28),
+            bar_title: r(x0 + 44, bar_y + 14, w - 44 - 52, 16),
+            bar_play: Point::new(x0 + w - 26, bar_y + bar_h / 2),
+            bar_play_r: 14,
         }
     }
 
@@ -301,7 +402,59 @@ impl Layout {
         }
     }
 
-    /// What is under `p`, for a touch.
+    /// What is under `p` on `screen`, for a touch; `rows` is how many
+    /// rows a list page has filled.
+    pub fn hit_on(
+        &self,
+        screen: Screen,
+        rows: usize,
+        p: Point,
+    ) -> Option<Hotspot> {
+        match screen {
+            Screen::NowPlaying => self.hit(p),
+            Screen::Library | Screen::Settings => self.hit_page(rows, p),
+        }
+    }
+
+    /// What is under `p` on a list page with `rows` rows filled.
+    fn hit_page(&self, rows: usize, p: Point) -> Option<Hotspot> {
+        if let Some(nav) = self.hit_nav(p) {
+            return Some(nav);
+        }
+        let page = &self.page;
+        if page.back.contains(p) {
+            return Some(Hotspot::Back);
+        }
+        if page.bar.contains(p) {
+            let (dx, dy) = (p.x - page.bar_play.x, p.y - page.bar_play.y);
+            if dx * dx + dy * dy <= (page.bar_play_r as i32 + 8).pow(2) {
+                return Some(Hotspot::BarPlay);
+            }
+            return Some(Hotspot::Bar);
+        }
+        if page.list.contains(p) {
+            let i = ((p.y - page.list.top_left.y) / page.row) as usize;
+            return Some(if i < rows {
+                Hotspot::Row(i as u8)
+            } else {
+                Hotspot::List
+            });
+        }
+        None
+    }
+
+    fn hit_nav(&self, p: Point) -> Option<Hotspot> {
+        if !self.nav.contains(p) {
+            return None;
+        }
+        let i = (0..3).min_by_key(|&i| {
+            let c = self.nav_item(i);
+            (p.x - c.x).abs() + (p.y - c.y).abs()
+        })?;
+        Some(Hotspot::Nav(i as u8))
+    }
+
+    /// What is under `p` on Now Playing, for a touch.
     pub fn hit(&self, p: Point) -> Option<Hotspot> {
         let t = &self.transport;
         let within = |c: Point, r: u32| {
@@ -333,12 +486,8 @@ impl Layout {
         if let Some(f) = self.seek.and_then(along) {
             return Some(Hotspot::Seek(f));
         }
-        if self.nav.contains(p) {
-            let i = (0..3).min_by_key(|&i| {
-                let c = self.nav_item(i);
-                (p.x - c.x).abs() + (p.y - c.y).abs()
-            })?;
-            return Some(Hotspot::Nav(i as u8));
+        if let Some(nav) = self.hit_nav(p) {
+            return Some(nav);
         }
         if let Some((inner, outer)) = self.ring_radii() {
             let c = self.art_centre();
@@ -394,6 +543,16 @@ pub enum Hotspot {
     Nav(u8),
     /// The art.
     Art,
+    /// A list page's back chevron.
+    Back,
+    /// The `i`th visible row of a list page.
+    Row(u8),
+    /// The list's empty part, below the rows.
+    List,
+    /// The now-playing bar's play/pause button.
+    BarPlay,
+    /// The rest of the now-playing bar.
+    Bar,
 }
 
 #[cfg(test)]

@@ -14,6 +14,12 @@
 //! format, style, theme) and otherwise only what moved: the second's
 //! worth of progress (the ring's new arc, the strip, the two times), or
 //! the volume slider.
+//!
+//! Three screens behind the navigation ([`Screen`]): Now Playing, the
+//! Library (the source's folder in view, a row a track, a bar with the
+//! track in hand at the foot) and Settings (what the player is). The
+//! distribution owns what the list pages show ([`library`]) and what a
+//! tap on them does; the face draws and reports the tap.
 
 #![no_std]
 
@@ -22,6 +28,7 @@ extern crate alloc;
 pub mod art;
 pub mod draw;
 pub mod layout;
+pub mod library;
 pub mod text;
 pub mod theme;
 pub mod touch;
@@ -34,7 +41,8 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::{DrawTarget, Point, Size};
 use embedded_graphics::primitives::Rectangle;
 use evo_esp32_sdk::contract::audio::{delivery, playback};
-pub use layout::{Hotspot, Layout, Slider, Style};
+pub use layout::{Hotspot, Layout, Screen, Slider, Style};
+pub use library::{About, Entry, Fact, Library};
 use text::Align;
 use theme::mix;
 pub use theme::Theme;
@@ -56,6 +64,9 @@ pub enum Status {
 pub struct View {
     /// Where playback stands.
     pub status: Status,
+    /// The track's URI, to tell it apart in a list; empty when nothing
+    /// is in custody.
+    pub uri: String,
     /// The track's title; empty when nothing is in custody.
     pub title: String,
     /// Its artist, or empty.
@@ -96,6 +107,7 @@ impl View {
                 playback::Status::Playing => Status::Playing,
                 playback::Status::Paused => Status::Paused,
             },
+            uri: track.map(|t| t.uri.clone()).unwrap_or_default(),
             title: track.map(|t| t.title.clone()).unwrap_or_default(),
             artist: track.and_then(|t| t.artist.clone()).unwrap_or_default(),
             album: track.and_then(|t| t.album.clone()).unwrap_or_default(),
@@ -156,6 +168,10 @@ pub enum Repaint {
     Transport,
     /// The art: a picture arrived, or went.
     Art,
+    /// A list page's rows: scrolled, or the track in hand changed.
+    Rows,
+    /// A list page's now-playing bar.
+    Bar,
     /// One stage of a full frame; call again soon for the next.
     Partial,
     /// The whole face: a scene change, or the first frame, complete.
@@ -165,6 +181,9 @@ pub enum Repaint {
 /// The scene: everything on the face but the position and the volume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Scene {
+    screen: Screen,
+    /// Which listing (or facts) a list page shows; bumped on each set.
+    page: u32,
     status: Status,
     title: String,
     artist: String,
@@ -173,6 +192,17 @@ struct Scene {
     duration_ms: Option<u64>,
     style: Style,
     theme: &'static str,
+}
+
+impl Scene {
+    /// True when only the track in hand (its status, names, format)
+    /// differs from `other`: the screen, the page, style and theme hold.
+    fn same_but_track(&self, other: &Scene) -> bool {
+        self.screen == other.screen
+            && self.page == other.page
+            && self.style == other.style
+            && self.theme == other.theme
+    }
 }
 
 /// Now Playing, repainted in place as the view moves.
@@ -190,12 +220,24 @@ pub struct Face {
     art: Option<Art>,
     /// The art changed since it was last painted.
     art_due: bool,
+    screen: Screen,
+    library: Library,
+    about: About,
+    /// Bumped when the library or the facts are set.
+    page: u32,
+    /// The rows changed (a scroll) since they were last painted.
+    rows_due: bool,
 }
 
 /// A full frame is painted in stages, one per `refresh`, so the caller's
 /// loop (the decoder's tick, on a board) runs between them: no stage
 /// holds the loop as long as a whole frame would.
 const STAGES: u8 = 10;
+/// A list page's stages: the ground, the header, the rows in two halves,
+/// the bar, the navigation.
+const PAGE_STAGES: u8 = 6;
+/// The now-playing bar's thumbnail side.
+const THUMB: u32 = 28;
 
 /// The card's corner radius: evo-ui's `--radius`, 0.75 rem.
 const RADIUS: i32 = 12;
@@ -215,6 +257,63 @@ impl Face {
             stage: None,
             art: None,
             art_due: false,
+            screen: Screen::NowPlaying,
+            library: Library::default(),
+            about: About::default(),
+            page: 0,
+            rows_due: false,
+        }
+    }
+
+    /// The screen in front.
+    pub fn screen(&self) -> Screen {
+        self.screen
+    }
+
+    /// Bring `screen` to the front; the next refresh paints it whole.
+    pub fn set_screen(&mut self, screen: Screen) {
+        self.screen = screen;
+    }
+
+    /// The library's folder in view, from its first row; the next refresh
+    /// paints the page whole if it is in front.
+    pub fn set_library(&mut self, library: Library) {
+        self.library = library;
+        self.page = self.page.wrapping_add(1);
+    }
+
+    /// The library as shown.
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// Scroll the library by `pixels` of finger travel (positive is the
+    /// finger moving down, which brings earlier rows into view).
+    pub fn scroll_library(&mut self, pixels: i32) {
+        let rows = -pixels / self.layout.page.row;
+        if rows != 0 && self.library.scroll(rows, self.layout.page.rows()) {
+            self.rows_due = true;
+        }
+    }
+
+    /// The settings page's facts.
+    pub fn set_about(&mut self, about: About) {
+        self.about = about;
+        self.page = self.page.wrapping_add(1);
+    }
+
+    /// What is under `p` on the screen in front, for a touch.
+    pub fn hit(&self, p: Point) -> Option<Hotspot> {
+        self.layout.hit_on(self.screen, self.rows_filled(), p)
+    }
+
+    /// How many rows the list page in front has filled.
+    fn rows_filled(&self) -> usize {
+        let shown = self.layout.page.rows();
+        match self.screen {
+            Screen::Library => self.library.visible(shown).len(),
+            Screen::Settings => self.about.facts.len().min(shown),
+            Screen::NowPlaying => 0,
         }
     }
 
@@ -268,6 +367,8 @@ impl Face {
         D: DrawTarget<Color = Rgb565>,
     {
         let scene = Scene {
+            screen: self.screen,
+            page: self.page,
             status: view.status,
             title: view.title.clone(),
             artist: view.artist.clone(),
@@ -279,36 +380,71 @@ impl Face {
         };
         let second = Some(view.position_ms / 1000);
         let level = Some((view.volume, view.muted));
+        let on_page = self.screen != Screen::NowPlaying;
         if let Some(was) = self.scene.as_ref().filter(|was| **was != scene) {
-            // Only the status moved: the play button, not the face.
-            let only_status = Scene {
-                status: scene.status,
-                ..was.clone()
-            } == scene;
-            if only_status {
-                self.paint_transport(target, view)?;
-                self.scene = Some(scene);
-                return Ok(Repaint::Transport);
+            if was.same_but_track(&scene) {
+                if on_page {
+                    // The track in hand changed: the bar, and the rows
+                    // for the highlight.
+                    self.paint_now_bar(target, view)?;
+                    self.paint_rows(target, view)?;
+                    self.scene = Some(scene);
+                    return Ok(Repaint::Bar);
+                }
+                // Only the status moved: the play button, not the face.
+                let only_status = Scene {
+                    status: scene.status,
+                    ..was.clone()
+                } == scene;
+                if only_status {
+                    self.paint_transport(target, view)?;
+                    self.scene = Some(scene);
+                    return Ok(Repaint::Transport);
+                }
             }
         }
         if self.scene.as_ref() != Some(&scene) {
             self.scene = Some(scene);
             self.stage = Some(0);
         }
+        let stages = if on_page { PAGE_STAGES } else { STAGES };
         if let Some(stage) = self.stage {
-            self.paint_stage(target, view, stage)?;
-            if stage + 1 < STAGES {
+            if on_page {
+                self.paint_page_stage(target, view, stage)?;
+            } else {
+                self.paint_stage(target, view, stage)?;
+            }
+            if stage + 1 < stages {
                 self.stage = Some(stage + 1);
                 return Ok(Repaint::Partial);
             }
             self.stage = None;
             self.art_due = false;
+            self.rows_due = false;
             return Ok(Repaint::Full);
         }
         if self.art_due {
-            self.paint_art(target)?;
             self.art_due = false;
+            if on_page {
+                self.paint_now_bar(target, view)?;
+                return Ok(Repaint::Bar);
+            }
+            self.paint_art(target)?;
             return Ok(Repaint::Art);
+        }
+        if self.rows_due {
+            self.rows_due = false;
+            if on_page {
+                self.paint_rows(target, view)?;
+                return Ok(Repaint::Rows);
+            }
+        }
+        if on_page {
+            // The position and the level are not on a list page; remember
+            // them so a return to Now Playing starts from the truth.
+            self.second = second;
+            self.level = level;
+            return Ok(Repaint::None);
         }
         if second != self.second {
             self.paint_progress(target, view)?;
@@ -338,6 +474,249 @@ impl Face {
             if painted != Repaint::Partial {
                 return Ok(painted);
             }
+        }
+    }
+
+    /// One stage of a list page: the ground, the header, the rows in two
+    /// halves, the bar, the navigation.
+    fn paint_page_stage<D>(
+        &mut self,
+        target: &mut D,
+        view: &View,
+        stage: u8,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let t = self.theme;
+        match stage {
+            0 => target.clear(t.background),
+            1 => self.paint_header(target),
+            2 => self.paint_rows_from(target, view, 0, 2),
+            3 => self.paint_rows_from(target, view, 1, 2),
+            4 => self.paint_now_bar(target, view),
+            _ => self.paint_nav(target),
+        }
+    }
+
+    /// The page's title and, below the root, the back chevron.
+    fn paint_header<D>(&self, target: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let (l, t) = (self.layout.page, self.theme);
+        let (name, back) = match self.screen {
+            Screen::Library => {
+                (self.library.name.as_str(), !self.library.path.is_empty())
+            }
+            _ => ("Settings", false),
+        };
+        let chevron = Rectangle::new(
+            Point::new(l.back.top_left.x + 10, l.header.top_left.y - 1),
+            Size::new(16, 20),
+        );
+        text::TITLE.line(
+            target,
+            if back { "\u{2039}" } else { "" },
+            chevron,
+            Align::Centre,
+            t.accent,
+            t.background,
+        )?;
+        text::TITLE.line(
+            target,
+            name,
+            l.header,
+            Align::Left,
+            t.foreground,
+            t.background,
+        )
+    }
+
+    /// Every row slot of the page in front: the entries in view, the
+    /// rest cleared.
+    fn paint_rows<D>(&self, target: &mut D, view: &View) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        self.paint_rows_from(target, view, 0, 1)
+    }
+
+    /// Row slots `part` of `parts` (slot `i` belongs to part `i % parts`).
+    fn paint_rows_from<D>(
+        &self,
+        target: &mut D,
+        view: &View,
+        part: usize,
+        parts: usize,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let (l, t) = (self.layout.page, self.theme);
+        let shown = l.rows();
+        let hairline = mix(t.background, t.border, 8);
+        for i in (0..shown).filter(|i| i % parts == part) {
+            let slot = l.row_rect(i);
+            match self.screen {
+                Screen::Library => match self.library.visible(shown).get(i) {
+                    Some(entry) => {
+                        let playing = entry.uri.is_some()
+                            && entry.uri.as_deref() == Some(view.uri.as_str())
+                            && view.status != Status::Stopped;
+                        self.paint_entry(target, slot, entry, playing)?;
+                    }
+                    None => target.fill_solid(&slot, t.background)?,
+                },
+                _ => match self.about.facts.get(i) {
+                    Some(fact) => self.paint_fact(target, slot, fact)?,
+                    None => target.fill_solid(&slot, t.background)?,
+                },
+            }
+            let foot = Rectangle::new(
+                Point::new(slot.top_left.x + 12, slot.top_left.y + l.row - 1),
+                Size::new(slot.size.width.saturating_sub(24), 1),
+            );
+            target.fill_solid(&foot, hairline)?;
+        }
+        Ok(())
+    }
+
+    /// A library row: a folder or a note, then the name; the track in
+    /// hand in the accent.
+    fn paint_entry<D>(
+        &self,
+        target: &mut D,
+        slot: Rectangle,
+        entry: &Entry,
+        playing: bool,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let t = self.theme;
+        let (x, y) = (slot.top_left.x, slot.top_left.y);
+        let h = slot.size.height as i32;
+        let glyph =
+            Rectangle::new(Point::new(x + 10, y + 7), Size::new(16, 14));
+        target.fill_solid(&glyph, t.background)?;
+        let c = glyph.center();
+        if entry.folder {
+            // A folder: a tab over a body.
+            let tab =
+                Rectangle::new(Point::new(c.x - 7, c.y - 6), Size::new(6, 3));
+            let body =
+                Rectangle::new(Point::new(c.x - 7, c.y - 4), Size::new(14, 10));
+            draw::rounded(target, tab, 1, t.muted_fg, t.background)?;
+            draw::rounded(target, body, 2, t.muted_fg, t.background)?;
+        } else {
+            let colour = if playing { t.accent } else { t.muted_fg };
+            draw::icon_note(target, c, 6, colour, t.background)?;
+        }
+        let name = Rectangle::new(
+            Point::new(x + 34, y + (h - 15) / 2),
+            Size::new(slot.size.width.saturating_sub(34 + 10), 15),
+        );
+        let colour = if playing { t.accent } else { t.foreground };
+        text::BODY.line(
+            target,
+            &entry.name,
+            name,
+            Align::Left,
+            colour,
+            t.background,
+        )
+    }
+
+    /// A settings row: the fact's name at the left, its value at the
+    /// right.
+    fn paint_fact<D>(
+        &self,
+        target: &mut D,
+        slot: Rectangle,
+        fact: &Fact,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let t = self.theme;
+        let (x, y) = (slot.top_left.x, slot.top_left.y);
+        let (w, h) = (slot.size.width as i32, slot.size.height as i32);
+        let name_w = (w - 24) * 2 / 5;
+        let name = Rectangle::new(
+            Point::new(x + 12, y + (h - 13) / 2),
+            Size::new(name_w as u32, 13),
+        );
+        let value = Rectangle::new(
+            Point::new(x + 12 + name_w + 6, y + (h - 13) / 2),
+            Size::new((w - 24 - name_w - 6).max(0) as u32, 13),
+        );
+        text::SMALL.line(
+            target,
+            &fact.name,
+            name,
+            Align::Left,
+            t.muted_fg,
+            t.background,
+        )?;
+        text::SMALL.line(
+            target,
+            &fact.value,
+            value,
+            Align::Right,
+            t.foreground,
+            t.background,
+        )
+    }
+
+    /// The now-playing bar at a page's foot: the art's thumbnail (or a
+    /// small disc), the title, play or pause.
+    fn paint_now_bar<D>(
+        &self,
+        target: &mut D,
+        view: &View,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let (l, t) = (self.layout.page, self.theme);
+        target.fill_solid(&l.bar, t.card)?;
+        let top =
+            Rectangle::new(l.bar.top_left, Size::new(l.bar.size.width, 1));
+        target.fill_solid(&top, t.border)?;
+        let thumb = self
+            .art
+            .as_ref()
+            .and_then(|a| art::fit(a.size, a.size, &a.pixels, THUMB));
+        match thumb {
+            Some(thumb) => {
+                draw::art_card(target, l.bar_art, 4, &thumb, t.card)?
+            }
+            None => {
+                let c = l.bar_art.center();
+                let r = l.bar_art.size.width as i32 / 2;
+                draw::disc(target, c, r, t.secondary, t.card)?;
+                draw::icon_note(target, c, r * 5 / 8, t.muted_fg, t.secondary)?;
+            }
+        }
+        let (title, colour) = if view.title.is_empty() {
+            ("Nothing playing", t.muted_fg)
+        } else {
+            (view.title.as_str(), t.foreground)
+        };
+        text::BODY.line(
+            target,
+            title,
+            l.bar_title,
+            Align::Left,
+            colour,
+            t.card,
+        )?;
+        let (c, r) = (l.bar_play, l.bar_play_r as i32);
+        draw::disc(target, c, r, t.accent, t.card)?;
+        match view.status {
+            Status::Playing => draw::icon_pause(target, c, r / 2, t.accent_fg),
+            _ => draw::icon_play(target, c, r / 2, t.accent_fg, t.accent),
         }
     }
 
@@ -540,7 +919,7 @@ impl Face {
         target.fill_solid(&hairline, t.border)?;
         for i in 0..3 {
             let c = l.nav_item(i);
-            let active = i == 0;
+            let active = i == usize::from(self.screen.nav_index());
             let colour = if active { t.accent } else { t.muted_fg };
             let under = if active {
                 let pill_colour = mix(t.card, t.accent, 4);
@@ -1106,6 +1485,67 @@ mod tests {
             face.set_art(None);
             assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
         }
+    }
+
+    #[test]
+    fn the_library_page_paints_in_stages_and_repaints_rows_and_bar() {
+        use alloc::string::ToString;
+        let mut face = Face::new(0, Style::Disc, theme::EVO_DEFAULT);
+        let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+        let view = View::new(&playing(), Some(&out()), "Card");
+        face.refresh_whole(&mut display, &view).unwrap();
+        let entries: alloc::vec::Vec<Entry> = (0..12)
+            .map(|i| Entry {
+                name: alloc::format!("Track {i}"),
+                folder: i == 0,
+                uri: (i > 0).then(|| alloc::format!("file:///t{i}.flac")),
+            })
+            .collect();
+        face.set_screen(Screen::Library);
+        face.set_library(Library {
+            path: "Album".to_string(),
+            name: "Album".to_string(),
+            entries,
+            first: 0,
+        });
+        for _ in 1..PAGE_STAGES {
+            assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Partial));
+        }
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Full));
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
+        let page = face.layout().page;
+        assert_eq!(face.rows_filled(), page.rows());
+        // A touch lands on rows, the bar's button and the nav.
+        assert_eq!(face.hit(page.row_rect(1).center()), Some(Hotspot::Row(1)));
+        assert_eq!(face.hit(page.bar_play), Some(Hotspot::BarPlay));
+        assert_eq!(face.hit(face.layout().nav_item(0)), Some(Hotspot::Nav(0)));
+        assert_eq!(face.hit(page.back.center()), Some(Hotspot::Back));
+        // A scroll of two rows repaints the rows alone.
+        face.scroll_library(-2 * page.row);
+        assert_eq!(face.library().first, 2);
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Rows));
+        // The position moving is nothing here.
+        let moved = View {
+            position_ms: 125_000,
+            ..view.clone()
+        };
+        assert_eq!(face.refresh(&mut display, &moved), Ok(Repaint::None));
+        // Another track in hand: the bar and the rows.
+        let other = View {
+            uri: "file:///t3.flac".to_string(),
+            title: "Track 3".to_string(),
+            ..moved
+        };
+        assert_eq!(face.refresh(&mut display, &other), Ok(Repaint::Bar));
+        // Back to Now Playing: a whole frame in its ten stages.
+        face.set_screen(Screen::NowPlaying);
+        for _ in 1..STAGES {
+            assert_eq!(
+                face.refresh(&mut display, &other),
+                Ok(Repaint::Partial)
+            );
+        }
+        assert_eq!(face.refresh(&mut display, &other), Ok(Repaint::Full));
     }
 
     #[test]

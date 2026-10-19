@@ -10,10 +10,13 @@
 //! even when it drifts off the bar, reporting the fraction live
 //! ([`Intent::Slide`]) and once more on the lift ([`Intent::Commit`]):
 //! the volume follows the finger, the seek is applied when it lets go.
+//! A press on a list that travels further than a tap up or down is a
+//! scroll, reported as the finger's vertical travel since the last
+//! sample ([`Intent::Scroll`]); its lift is no tap.
 
 use embedded_graphics::prelude::Point;
 
-use crate::layout::{Hotspot, Layout};
+use crate::layout::Hotspot;
 
 /// The longest press that is still a tap, milliseconds.
 pub const TAP_MS: u64 = 800;
@@ -29,6 +32,9 @@ pub enum Intent {
     Slide(Hotspot),
     /// The finger left a slider, here.
     Commit(Hotspot),
+    /// The finger moved on a list: pixels down since the last sample
+    /// (negative is up).
+    Scroll(i32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +45,10 @@ struct Down {
     hotspot: Option<Hotspot>,
     /// The slider's last fraction, while on one.
     fraction: Option<f32>,
+    /// Where the finger was at the last sample.
+    last: Point,
+    /// The press became a scroll; the lift is no tap.
+    scrolling: bool,
 }
 
 /// One finger's state between samples.
@@ -55,10 +65,11 @@ impl Tracker {
     }
 
     /// The next sample: whether a finger is down, where (in the layout's
-    /// frame, from [`Layout::map_touch`]), and when.
+    /// frame, from [`crate::Layout::map_touch`]), and when; `hit` says what is
+    /// under a point on the screen in front ([`crate::Face::hit`]).
     pub fn sample(
         &mut self,
-        layout: &Layout,
+        hit: impl Fn(Point) -> Option<Hotspot>,
         touching: bool,
         p: Point,
         now_ms: u64,
@@ -66,18 +77,37 @@ impl Tracker {
         match (self.down, touching) {
             (None, false) => None,
             (None, true) => {
-                let hotspot = layout.hit(p);
+                let hotspot = hit(p);
                 self.down = Some(Down {
                     at_ms: now_ms,
                     start: p,
                     hotspot,
                     fraction: slider_fraction(hotspot),
+                    last: p,
+                    scrolling: false,
                 });
                 None
             }
             (Some(mut d), true) => {
-                let kind = d.hotspot.filter(is_slider)?;
-                let now = layout.hit(p).filter(|h| same_slider(h, &kind));
+                let dy = p.y - d.last.y;
+                d.last = p;
+                if d.hotspot.is_some_and(|h| is_list(&h)) {
+                    if !d.scrolling && (p.y - d.start.y).abs() > TAP_TRAVEL {
+                        d.scrolling = true;
+                        // The travel so far counts, not only this step.
+                        let dy = p.y - d.start.y;
+                        self.down = Some(d);
+                        return Some(Intent::Scroll(dy));
+                    }
+                    self.down = Some(d);
+                    return (d.scrolling && dy != 0)
+                        .then_some(Intent::Scroll(dy));
+                }
+                let Some(kind) = d.hotspot.filter(is_slider) else {
+                    self.down = Some(d);
+                    return None;
+                };
+                let now = hit(p).filter(|h| same_slider(h, &kind));
                 let f = slider_fraction(now).or(d.fraction)?;
                 let moved =
                     d.fraction.is_none_or(|was| (was - f).abs() >= 0.005);
@@ -93,6 +123,9 @@ impl Tracker {
                         .fraction
                         .map(|f| Intent::Commit(with_fraction(hotspot, f)));
                 }
+                if d.scrolling {
+                    return None;
+                }
                 let travel =
                     (p.x - d.start.x).abs().max((p.y - d.start.y).abs());
                 (now_ms.saturating_sub(d.at_ms) <= TAP_MS
@@ -101,6 +134,10 @@ impl Tracker {
             }
         }
     }
+}
+
+fn is_list(h: &Hotspot) -> bool {
+    matches!(h, Hotspot::Row(_) | Hotspot::List)
 }
 
 fn is_slider(h: &Hotspot) -> bool {
@@ -133,10 +170,45 @@ fn with_fraction(kind: Hotspot, f: f32) -> Hotspot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::Style;
+    use crate::layout::{Layout, Screen, Style};
 
     fn layout() -> Layout {
         Layout::new(0, Style::Disc)
+    }
+
+    #[test]
+    fn a_drag_on_the_list_scrolls_and_its_lift_is_no_tap() {
+        let l = layout();
+        // Five rows filled of the seven the page holds.
+        let hit = |p| l.hit_on(Screen::Library, 5, p);
+        let mut t = Tracker::default();
+        let row = l.page.row_rect(2).center();
+        assert_eq!(t.sample(hit, true, row, 0), None);
+        // Within a tap's travel: nothing yet.
+        assert_eq!(t.sample(hit, true, row + Point::new(0, 5), 20), None);
+        // Past it: a scroll of the whole travel so far, then the steps.
+        assert_eq!(
+            t.sample(hit, true, row + Point::new(0, -20), 40),
+            Some(Intent::Scroll(-20))
+        );
+        assert_eq!(
+            t.sample(hit, true, row + Point::new(0, -31), 60),
+            Some(Intent::Scroll(-11))
+        );
+        assert_eq!(t.sample(hit, false, row + Point::new(0, -31), 80), None);
+        // A plain tap on a row names it.
+        assert_eq!(t.sample(hit, true, row, 100), None);
+        assert_eq!(
+            t.sample(hit, false, row, 150),
+            Some(Intent::Tap(Hotspot::Row(2)))
+        );
+        // Below the filled rows: the list, which a tap does nothing with.
+        let empty = l.page.row_rect(6).center();
+        t.sample(hit, true, empty, 200);
+        assert_eq!(
+            t.sample(hit, false, empty, 250),
+            Some(Intent::Tap(Hotspot::List))
+        );
     }
 
     #[test]
@@ -144,11 +216,14 @@ mod tests {
         let l = layout();
         let mut t = Tracker::default();
         let play = l.transport.play;
-        assert_eq!(t.sample(&l, true, play, 0), None);
+        assert_eq!(t.sample(|p| l.hit(p), true, play, 0), None);
         assert!(t.down());
-        assert_eq!(t.sample(&l, true, play + Point::new(3, -2), 100), None);
         assert_eq!(
-            t.sample(&l, false, play + Point::new(3, -2), 200),
+            t.sample(|p| l.hit(p), true, play + Point::new(3, -2), 100),
+            None
+        );
+        assert_eq!(
+            t.sample(|p| l.hit(p), false, play + Point::new(3, -2), 200),
             Some(Intent::Tap(Hotspot::Play))
         );
         assert!(!t.down());
@@ -159,11 +234,16 @@ mod tests {
         let l = layout();
         let mut t = Tracker::default();
         let play = l.transport.play;
-        t.sample(&l, true, play, 0);
-        assert_eq!(t.sample(&l, false, play, TAP_MS + 1), None);
-        t.sample(&l, true, play, 0);
+        t.sample(|p| l.hit(p), true, play, 0);
+        assert_eq!(t.sample(|p| l.hit(p), false, play, TAP_MS + 1), None);
+        t.sample(|p| l.hit(p), true, play, 0);
         assert_eq!(
-            t.sample(&l, false, play + Point::new(TAP_TRAVEL + 1, 0), 50),
+            t.sample(
+                |p| l.hit(p),
+                false,
+                play + Point::new(TAP_TRAVEL + 1, 0),
+                50
+            ),
             None
         );
     }
@@ -180,17 +260,20 @@ mod tests {
                 y,
             )
         };
-        assert_eq!(t.sample(&l, true, at(0.25), 0), None);
+        assert_eq!(t.sample(|p| l.hit(p), true, at(0.25), 0), None);
         let Some(Intent::Slide(Hotspot::Volume(f))) =
-            t.sample(&l, true, at(0.5), 40)
+            t.sample(|p| l.hit(p), true, at(0.5), 40)
         else {
             panic!("a slide")
         };
         assert!((f - 0.5).abs() < 0.02, "{f}");
         // Off the bar's touch zone: the last fraction holds, nothing new.
-        assert_eq!(t.sample(&l, true, Point::new(at(0.5).x, y - 60), 80), None);
+        assert_eq!(
+            t.sample(|p| l.hit(p), true, Point::new(at(0.5).x, y - 60), 80),
+            None
+        );
         let Some(Intent::Commit(Hotspot::Volume(f))) =
-            t.sample(&l, false, at(0.5), 120)
+            t.sample(|p| l.hit(p), false, at(0.5), 120)
         else {
             panic!("a commit")
         };
@@ -206,15 +289,15 @@ mod tests {
         let r = (inner + outer) / 2;
         let mut t = Tracker::default();
         // Twelve o'clock, then three o'clock: a quarter turn.
-        t.sample(&l, true, c + Point::new(0, -r), 0);
+        t.sample(|p| l.hit(p), true, c + Point::new(0, -r), 0);
         let Some(Intent::Slide(Hotspot::Seek(f))) =
-            t.sample(&l, true, c + Point::new(r, 0), 50)
+            t.sample(|p| l.hit(p), true, c + Point::new(r, 0), 50)
         else {
             panic!("a slide on the ring")
         };
         assert!((f - 0.25).abs() < 0.02, "{f}");
         let Some(Intent::Commit(Hotspot::Seek(f))) =
-            t.sample(&l, false, c + Point::new(r, 0), 100)
+            t.sample(|p| l.hit(p), false, c + Point::new(r, 0), 100)
         else {
             panic!("a commit")
         };

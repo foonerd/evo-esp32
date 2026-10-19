@@ -23,7 +23,9 @@ mod sink;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use evo_esp32_face::{theme, Style, Theme};
+use evo_esp32_face::{
+    theme, About, Entry as Row, Fact, Library, Screen, Style, Theme,
+};
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -261,8 +263,70 @@ fn gallery(dir: &std::path::Path) -> Result<(), String> {
                 println!("{}", path.display());
             }
         }
+        // The list pages, in the default theme: an album open in the
+        // library with the track in hand among its rows, and the facts.
+        let mut p =
+            panel::Panel::new(rotation, Style::Disc, theme::EVO_DEFAULT);
+        p.face_mut().set_screen(Screen::Library);
+        p.face_mut().set_library(sample_library());
+        p.draw(&view);
+        let path = dir.join(format!("library-{rotation}.png"));
+        p.save(&path)?;
+        println!("{}", path.display());
+        p.face_mut().set_screen(Screen::Settings);
+        p.face_mut().set_about(sample_about());
+        p.draw(&view);
+        let path = dir.join(format!("settings-{rotation}.png"));
+        p.save(&path)?;
+        println!("{}", path.display());
     }
     Ok(())
+}
+
+fn sample_library() -> Library {
+    let album = "file:///Music/Dire Straits/Brothers In Arms";
+    let tracks = [
+        "01. So Far Away",
+        "02. Money For Nothing",
+        "03. Walk Of Life",
+        "04. Your Latest Trick",
+        "05. Why Worry",
+        "06. Ride Across The River",
+        "07. The Man's Too Strong",
+        "08. One World",
+        "09. Brothers In Arms",
+    ];
+    Library {
+        path: "Dire Straits/Brothers In Arms".into(),
+        name: "Brothers In Arms".into(),
+        entries: tracks
+            .iter()
+            .map(|t| Row {
+                name: t.to_string(),
+                folder: false,
+                uri: Some(format!("{album}/{t}.flac")),
+            })
+            .collect(),
+        first: 0,
+    }
+}
+
+fn sample_about() -> About {
+    let fact = |name: &str, value: &str| Fact {
+        name: name.into(),
+        value: value.into(),
+    };
+    About {
+        facts: vec![
+            fact("Player", "evo-esp32 0.1.0"),
+            fact("Build", "a7fd9d9"),
+            fact("Board", "Waveshare ESP32-C5 2.8"),
+            fact("Theme", "Evo Default"),
+            fact("Style", "disc"),
+            fact("Rotation", "0"),
+            fact("Card", "29 GB, 54 tracks"),
+        ],
+    }
 }
 
 fn main() {

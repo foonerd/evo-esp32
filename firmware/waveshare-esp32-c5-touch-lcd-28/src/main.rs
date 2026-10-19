@@ -58,7 +58,9 @@ use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
 use evo_esp32_face::touch::{Intent, Tracker};
-use evo_esp32_face::{theme, Face, Hotspot, Repaint, Style, View};
+use evo_esp32_face::{
+    theme, About, Face, Fact, Hotspot, Library, Repaint, Screen, Style, View,
+};
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Correction, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -156,6 +158,7 @@ fn main() -> anyhow::Result<()> {
             idle();
         }
     };
+    let card_mb = _card.capacity >> 20;
 
     // The board in the vendor BSP's order: expander (amplifier enabled on
     // EXIO3), panel, touch. The backlight waits for the first frame.
@@ -280,6 +283,10 @@ fn main() -> anyhow::Result<()> {
     // One finger on the panel, into taps and slides.
     let mut tracker = Tracker::default();
 
+    // The library page: the folder in view, the way back to the root, and
+    // the folder's tracks in the source's order, which a tap plays from.
+    let mut browse = Browse::default();
+
     // The panel: the player's face, lit after its first frame. A full
     // frame comes in stages, one per pass of the loop, so the decoder
     // ticks between them and the DMA ring is fed; `painting` keeps the
@@ -311,10 +318,10 @@ fn main() -> anyhow::Result<()> {
                 Ok(r) => {
                     let p = face.layout().map_touch(r.x, r.y);
                     if let Some(intent) =
-                        tracker.sample(face.layout(), r.touching(), p, t.0)
+                        tracker.sample(|p| face.hit(p), r.touching(), p, t.0)
                     {
                         match intent {
-                            Intent::Tap(Hotspot::Play) => {
+                            Intent::Tap(Hotspot::Play | Hotspot::BarPlay) => {
                                 let status = playback_state(&steward)
                                     .map(|pb| pb.status)
                                     .unwrap_or_default();
@@ -389,8 +396,86 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Intent::Tap(Hotspot::Nav(i)) => {
-                                info!("nav {i}: not yet")
+                                let screen = Screen::from_nav(i);
+                                match screen {
+                                    Screen::Library if !browse.loaded => {
+                                        browse.open(
+                                            &mut steward,
+                                            &mut face,
+                                            "",
+                                            t,
+                                        );
+                                    }
+                                    Screen::Settings => face.set_about(facts(
+                                        &face,
+                                        card_mb,
+                                        tracks.len(),
+                                    )),
+                                    _ => {}
+                                }
+                                face.set_screen(screen);
                             }
+                            Intent::Tap(Hotspot::Row(i)) => {
+                                if face.screen() != Screen::Library {
+                                    continue;
+                                }
+                                let shown = face.layout().page.rows();
+                                let Some(entry) = face
+                                    .library()
+                                    .visible(shown)
+                                    .get(usize::from(i))
+                                    .cloned()
+                                else {
+                                    continue;
+                                };
+                                if entry.folder {
+                                    let path = browse
+                                        .folder_path(&entry.name)
+                                        .unwrap_or_default();
+                                    browse
+                                        .trail
+                                        .push(face.library().path.clone());
+                                    browse.open(
+                                        &mut steward,
+                                        &mut face,
+                                        &path,
+                                        t,
+                                    );
+                                } else if let Some(at) =
+                                    browse.tracks.iter().position(|tr| {
+                                        Some(&tr.uri) == entry.uri.as_ref()
+                                    })
+                                {
+                                    // The folder becomes the queue, from
+                                    // the tapped track on.
+                                    tracks = browse.tracks.clone();
+                                    next = at;
+                                    if current.is_some() {
+                                        skip(&mut steward, &mut current, t);
+                                    } else {
+                                        sink::expect_gap();
+                                        current = play_next(
+                                            &mut steward,
+                                            &tracks,
+                                            &mut next,
+                                            t,
+                                            wanted,
+                                        );
+                                        track_started = Instant::now();
+                                    }
+                                }
+                            }
+                            Intent::Tap(Hotspot::Back) => {
+                                if let Some(parent) = browse.trail.pop() {
+                                    browse.open(
+                                        &mut steward,
+                                        &mut face,
+                                        &parent,
+                                        t,
+                                    );
+                                }
+                            }
+                            Intent::Scroll(dy) => face.scroll_library(dy),
                             Intent::Tap(_)
                             | Intent::Slide(_)
                             | Intent::Commit(_) => {}
@@ -888,4 +973,106 @@ fn tone_bytes() -> Vec<u8> {
         out.extend_from_slice(&s);
     }
     out
+}
+
+/// The library page's state: the folder in view, the folders above it,
+/// and the folder's tracks in the source's order.
+#[derive(Default)]
+struct Browse {
+    loaded: bool,
+    /// The paths of the folders opened to reach the one in view.
+    trail: Vec<String>,
+    /// The folder in view's subfolders, name to path.
+    folders: Vec<(String, String)>,
+    /// The folder in view's tracks, in order.
+    tracks: Vec<Track>,
+}
+
+impl Browse {
+    /// List `path` from the source and show it on the face.
+    fn open(
+        &mut self,
+        steward: &mut Steward,
+        face: &mut Face,
+        path: &str,
+        now: Ticks,
+    ) {
+        let listing = match list_folder(steward, path, now) {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("library: {e}");
+                return;
+            }
+        };
+        self.folders.clear();
+        self.tracks.clear();
+        let mut entries = Vec::with_capacity(listing.entries.len());
+        for e in listing.entries {
+            match e {
+                Entry::Folder { name, path } => {
+                    entries.push(evo_esp32_face::Entry {
+                        name: name.clone(),
+                        folder: true,
+                        uri: None,
+                    });
+                    self.folders.push((name, path));
+                }
+                Entry::Track(t) => {
+                    entries.push(evo_esp32_face::Entry {
+                        name: t.title.clone(),
+                        folder: false,
+                        uri: Some(t.uri.clone()),
+                    });
+                    self.tracks.push(t);
+                }
+            }
+        }
+        let name = path
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or("Card")
+            .to_string();
+        face.set_library(Library {
+            path: path.to_string(),
+            name,
+            entries,
+            first: 0,
+        });
+        self.loaded = true;
+    }
+
+    /// The source's path of the subfolder called `name`.
+    fn folder_path(&self, name: &str) -> Option<String> {
+        self.folders
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, p)| p.clone())
+    }
+}
+
+/// What the settings page says about this player.
+fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
+    let fact = |name: &str, value: String| Fact {
+        name: name.to_string(),
+        value,
+    };
+    About {
+        facts: vec![
+            fact("Player", format!("evo-esp32 {}", env!("CARGO_PKG_VERSION"))),
+            fact(
+                "Build",
+                env!("EVO_BUILD_ID")
+                    .trim_start_matches("build:")
+                    .to_string(),
+            ),
+            fact("Board", "Waveshare ESP32-C5 2.8".to_string()),
+            fact("Theme", face.theme().name.to_string()),
+            fact("Style", face.layout().style.name().to_string()),
+            fact("Rotation", format!("{}", face.layout().rotation)),
+            fact(
+                "Card",
+                format!("{:.0} GB, {tracks} tracks", card_mb as f64 / 1024.0),
+            ),
+        ],
+    }
 }

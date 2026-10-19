@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The Library and Settings screens behind the navigation. `distributions/face`:
+  `Screen` (Now Playing, Library, Settings), `library::{Library, Entry,
+  About, Fact}`; a list page is a header with a back chevron below the
+  root, rows (a folder glyph or a note, the name; the track in hand in
+  the accent), and a bar at the foot with the art's thumbnail, the title
+  and play/pause. Painted in six stages; a scroll repaints the rows, a
+  change of the track in hand the bar and the rows. `Face::hit` tells a
+  touch apart per screen (`Hotspot::{Back, Row, List, BarPlay, Bar}`);
+  `touch::Tracker` takes the hit function and turns a press on the list
+  that travels up or down into `Intent::Scroll`. The navigation shows the
+  screen in front. The host gallery renders both pages per rotation; the
+  Now Playing frames are unchanged. `firmware/waveshare-esp32-c5-touch-lcd-28`:
+  the list icon opens the card's root as the source lists it; a folder
+  row opens the folder (the chevron goes back); a track row makes the
+  folder the queue from that track on; the bar's button pauses and
+  resumes; the gear shows the player's facts (version, build, board,
+  theme, style, rotation, card).
 - Album art. `distributions/face`: `art::Art` (a square of RGB565 at the
   art area's size) and `art::fit` (centre crop, box-filter scale, integer
   arithmetic); `Face::set_art` shows or drops a picture with a repaint of

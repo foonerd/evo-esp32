@@ -29,7 +29,7 @@ fn charset() -> Vec<char> {
         .chain(0xA0..0x100)
         .filter_map(char::from_u32)
         .collect();
-    set.extend("–—‘’“”…›♪".chars());
+    set.extend("–—‘’“”…‹›♪".chars());
     set.sort_unstable();
     set
 }
