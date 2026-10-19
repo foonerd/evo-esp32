@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `plugins/org.evoframework.playback.symphonia`: MPEG audio (MP1, MP2,
+  MP3) is seeked coarsely. Symphonia's accurate seek walks every frame
+  from the start (or the current position, forward) to the target, which
+  off the card ran at about 25 times real time: 3-13 s for a tap on the
+  ring. Coarse has the reader estimate the byte position from the time
+  and the stream's length, resync on the next frame and walk the last
+  stretch. Exact on a constant bit rate; on a variable one the landing is
+  off by the stream's drift from its mean rate. Other formats stay
+  accurate (FLAC seeks by its table in 0.3 s). On the host: forward,
+  back and near the end of a 4-minute MP3, each landing on the packet
+  before the target with up to 76 ms to drop.
 - `distributions/face`: a full frame is painted in stages, one per
   `refresh` (`Repaint::Partial` until the last returns `Repaint::Full`;
   `refresh_whole` for a host that wants the frame in one call), so the

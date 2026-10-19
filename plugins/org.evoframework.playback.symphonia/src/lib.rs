@@ -14,7 +14,12 @@
 //! The position a consumer draws is the frames the sink has accepted,
 //! which is as near the ear as the warden can know without the sink's
 //! own clock. Pause holds decoding; resume lets it go; seek asks the
-//! reader for the time, resets the decoder and flushes the sink.
+//! reader for the time, resets the decoder and flushes the sink. An
+//! MPEG audio stream is seeked coarsely (the reader estimates the byte
+//! position from the time and resyncs there): accurate would walk every
+//! frame from the start, which off a card is seconds a minute of audio.
+//! Exact on a constant bit rate; on a variable one the landing is off
+//! by the stream's drift from the mean, a few seconds at worst.
 //!
 //! FLAC, MP3, WAV and raw PCM, the codecs a card of music holds. The
 //! decoder is pure Rust; what it costs on the target is the measurement
@@ -40,6 +45,9 @@ use evo_esp32_sdk::subject::{
 };
 use evo_esp32_sdk::warden::{
     Assignment, CourseCorrection, CustodyError, CustodyHandle, Progress, Warden,
+};
+use symphonia::core::codecs::audio::well_known::{
+    CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3,
 };
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
@@ -75,6 +83,8 @@ struct Stream {
     decoder: Box<dyn AudioDecoder>,
     track_id: u32,
     time_base: Option<TimeBase>,
+    /// Coarse for MPEG audio, whose accurate seek walks the frames.
+    seek_mode: SeekMode,
 }
 
 /// The custody in hand.
@@ -410,11 +420,18 @@ fn open(
             .and_then(|c| u8::try_from(c).ok())
             .ok_or_else(|| CustodyError("no channel count".into()))?,
     };
+    let seek_mode =
+        if [CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3].contains(&params.codec) {
+            SeekMode::Coarse
+        } else {
+            SeekMode::Accurate
+        };
     let stream = Stream {
         track_id: track.id,
         time_base: track.time_base,
         reader,
         decoder,
+        seek_mode,
     };
     Ok((stream, format))
 }
@@ -460,7 +477,7 @@ fn seek(
     let landed = stream
         .reader
         .seek(
-            SeekMode::Accurate,
+            stream.seek_mode,
             SeekTo::Time {
                 time,
                 track_id: Some(stream.track_id),
