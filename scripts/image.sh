@@ -2,12 +2,14 @@
 # Assemble the flashable image for one firmware crate.
 #
 # Usage: scripts/image.sh firmware/<vendor>-<model>     (after cargo build --release there)
-# Needs: python3 with esptool 5.x
+# Needs: python3; esptool 5.x as a python module, on PATH, or in ESP-IDF's python_env
 #
 # Offsets and flash settings come from ESP-IDF's flasher_args.json, so they
 # track the crate's sdkconfig. The app image is built from the Rust ELF; the
 # "libespidf.bin" that flasher_args.json lists is ESP-IDF's placeholder, not
-# this firmware. Output goes to dist/ with a SHA256SUMS.
+# this firmware. Output goes to dist/ with a SHA256SUMS; a run that fails
+# leaves nothing of this crate's previous image behind, so dist/ never
+# holds an image older than the ELF it claims to be.
 
 set -euo pipefail
 
@@ -55,19 +57,36 @@ PY
 out="$root/dist"
 stem="$name-$version"
 mkdir -p "$out"
+rm -f "$out/$stem"*.bin "$out/$stem.SHA256SUMS"
 cp "$build/$boot_file" "$out/$stem-bootloader.bin"
+
+# Tools live in the crate's .embuild unless ESP_IDF_TOOLS_INSTALL_DIR
+# points a build at a shared directory (custom:<path>).
+tools="${ESP_IDF_TOOLS_INSTALL_DIR:-}"
+case "$tools" in
+  custom:*) tools="${tools#custom:}" ;;
+  *) tools="$crate/.embuild" ;;
+esac
+
+# esptool: the python module if python3 has it, else the executable on PATH
+# (a pipx install), else the one in ESP-IDF's own python environment.
+if python3 -c 'import esptool' 2>/dev/null; then
+  esptool=(python3 -m esptool)
+elif command -v esptool >/dev/null; then
+  esptool=(esptool)
+else
+  idf_py=$(find "$tools" -path '*python_env*/bin/python' | head -1)
+  if [ -z "$idf_py" ] || ! "$idf_py" -c 'import esptool' 2>/dev/null; then
+    echo "esptool not found: pip/pipx install esptool, or point ESP_IDF_TOOLS_INSTALL_DIR at the tools" >&2
+    exit 1
+  fi
+  esptool=("$idf_py" -m esptool)
+fi
 
 # esp-idf-sys does not feed a crate's partitions.csv to the ESP-IDF build, so
 # the table in flasher_args.json is ESP-IDF's default. A crate that ships its
 # own partitions.csv gets it generated here with ESP-IDF's own tool.
 if [ -f "$crate/partitions.csv" ]; then
-  # Tools live in the crate's .embuild unless ESP_IDF_TOOLS_INSTALL_DIR
-  # points a build at a shared directory (custom:<path>).
-  tools="${ESP_IDF_TOOLS_INSTALL_DIR:-}"
-  case "$tools" in
-    custom:*) tools="${tools#custom:}" ;;
-    *) tools="$crate/.embuild" ;;
-  esac
   gen=$(find "$tools" -name gen_esp32part.py | head -1)
   [ -n "$gen" ] || { echo "gen_esp32part.py not found under $tools" >&2; exit 1; }
   python3 "$gen" -q "$crate/partitions.csv" "$out/$stem-partition-table.bin"
@@ -75,7 +94,7 @@ else
   cp "$build/$pt_file" "$out/$stem-partition-table.bin"
 fi
 
-python3 -m esptool --chip "$chip" elf2image \
+"${esptool[@]}" --chip "$chip" elf2image \
     --flash-mode "$mode" --flash-freq "$freq" --flash-size "$size" \
     -o "$out/$stem-app.bin" "$elf"
 
@@ -103,7 +122,7 @@ if [ "$app_size" -gt "$app_cap" ]; then
 fi
 echo "app $app_size bytes in a $app_cap byte partition"
 
-python3 -m esptool --chip "$chip" merge-bin -o "$out/$stem.bin" \
+"${esptool[@]}" --chip "$chip" merge-bin -o "$out/$stem.bin" \
     --flash-mode "$mode" --flash-freq "$freq" --flash-size "$size" \
     "$boot_off" "$out/$stem-bootloader.bin" \
     "$pt_off" "$out/$stem-partition-table.bin" \
