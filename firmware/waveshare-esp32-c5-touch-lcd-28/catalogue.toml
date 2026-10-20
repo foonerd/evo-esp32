@@ -30,6 +30,11 @@ name = "receive"
 shape = 1
 description = "The warden that plays what an Evo source-host on the network sends: the device as one room of a multiroom group."
 
+[[racks.shelves]]
+name = "snapcast"
+shape = 1
+description = "The warden that plays what a Snapcast server sends: the device as one client of a snapserver's group."
+
 [[racks]]
 name = "delivery"
 family = "domain"

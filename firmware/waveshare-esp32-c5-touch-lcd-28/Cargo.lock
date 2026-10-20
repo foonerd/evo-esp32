@@ -812,6 +812,7 @@ dependencies = [
  "org-evoframework-delivery-null",
  "org-evoframework-multiroom-receiver",
  "org-evoframework-playback-symphonia",
+ "org-evoframework-snapcast-receiver",
  "org-evoframework-source-files",
  "serde_json",
 ]
@@ -1328,6 +1329,17 @@ version = "0.1.1"
 dependencies = [
  "evo-esp32-sdk",
  "log",
+ "symphonia",
+]
+
+[[package]]
+name = "org-evoframework-snapcast-receiver"
+version = "0.1.1"
+dependencies = [
+ "evo-esp32-sdk",
+ "log",
+ "serde",
+ "serde_json",
  "symphonia",
 ]
 

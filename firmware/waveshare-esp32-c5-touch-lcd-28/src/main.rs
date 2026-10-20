@@ -67,11 +67,13 @@ use evo_esp32_face::{
     theme, About, Face, Fact, Hotspot, Library, Repaint, Screen, Style, Theme,
     View,
 };
-use evo_esp32_platform_esp_idf::mdns::Advertiser;
+use evo_esp32_platform_esp_idf::mdns::{Advertiser, Search};
 use evo_esp32_platform_esp_idf::HttpOpener;
 use evo_esp32_queue::{Queue, Repeat};
 use evo_esp32_sdk::catalogue::Catalogue;
-use evo_esp32_sdk::contract::audio::playback::{self, Correction, Play};
+use evo_esp32_sdk::contract::audio::playback::{
+    self, Correction, Play, Receive,
+};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
 use evo_esp32_sdk::contract::audio::{
     delivery, from_value, shelf, to_value, Track,
@@ -90,6 +92,9 @@ use org_evoframework_multiroom_receiver::{
     Link, MultiroomReceiver, Settings as RoomSettings,
 };
 use org_evoframework_playback_symphonia::{CodecRegistry, PlaybackSymphonia};
+use org_evoframework_snapcast_receiver::{
+    Link as SnapLink, Settings as SnapSettings, SnapcastReceiver,
+};
 use org_evoframework_source_files::SourceFiles;
 use sink::{I2sSink, RateFollower};
 
@@ -122,6 +127,11 @@ const FACE_TICK: Duration = Duration::from_millis(40);
 const ROTATION: u16 = 0;
 /// Backlight, 0 to 100.
 const BACKLIGHT_PERCENT: u8 = 100;
+/// How long one search of the network for a Snapcast server listens.
+const SEARCH_FOR: Duration = Duration::from_secs(3);
+/// How long after a search that found nothing, or a found server that
+/// went away, the next search starts.
+const SEARCH_AGAIN: Duration = Duration::from_secs(30);
 
 /// The codec follows the sink's rate.
 struct Codec(Es8311<RefCellDevice<'static, I2cDriver<'static>>>);
@@ -325,16 +335,32 @@ fn main() -> anyhow::Result<()> {
     let link = Link::new();
     let room_settings =
         RoomSettings::new(device_id.clone(), env!("CARGO_PKG_VERSION"));
-    let mut steward =
-        bring_up(sink::Shared::new(sink), &link, room_settings, now())
-            .map_err(|e| anyhow::anyhow!(e))?;
-    // The room's custody, while a source-host has the sink; whether the
-    // queue plays again after; the connection the listener declined.
-    let mut room: Option<CustodyHandle> = None;
+    let snap_link = SnapLink::new();
+    let snap_settings = SnapSettings::new(
+        mac_text(),
+        hostname.clone(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    let mut steward = bring_up(
+        sink::Shared::new(sink),
+        &link,
+        room_settings,
+        &snap_link,
+        snap_settings,
+        now(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    // The network sources that take the sink from the queue while they
+    // send; whether the queue plays again after.
+    let mut rooms = Rooms::new(link, snap_link);
     let mut resume_after_room = false;
     let mut room_took_the_sink = false;
-    let mut declined_room: Option<u32> = None;
     let mut mdns: Option<Advertiser> = None;
+    // The search for a Snapcast server when the card names none: one at
+    // a time, the next one due at `search_at`.
+    let snapserver = config.settings.snapserver.clone();
+    let mut search: Option<Search> = None;
+    let mut search_at: Option<Instant> = None;
     memory("after the steward");
     info!(
         "steward up with {} plugins: {}",
@@ -471,6 +497,7 @@ fn main() -> anyhow::Result<()> {
     memory("after the art fetcher");
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
+    let mut last_net = Instant::now() - FACE_TICK;
     let mut painting = false;
     let mut frame_started: Option<Instant> = None;
     let mut longest_stage = Duration::ZERO;
@@ -500,7 +527,7 @@ fn main() -> anyhow::Result<()> {
                                 let status = playback_state(&steward)
                                     .map(|pb| pb.status)
                                     .unwrap_or_default();
-                                match (current.or(room), status) {
+                                match (current.or(rooms.handle()), status) {
                                     (Some(h), playback::Status::Playing) => {
                                         correct(
                                             &mut steward,
@@ -539,14 +566,9 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Intent::Tap(Hotspot::Next) => {
-                                take_back(
-                                    &mut steward,
-                                    &mut room,
-                                    &link,
-                                    &mut declined_room,
-                                    &mut resume_after_room,
-                                    t,
-                                );
+                                if rooms.take_back(&mut steward, t) {
+                                    resume_after_room = false;
+                                }
                                 if current.is_some() {
                                     then = Some(Step::Skip);
                                     skip(&mut steward, &mut current, t);
@@ -563,14 +585,9 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Intent::Tap(Hotspot::Previous) => {
-                                take_back(
-                                    &mut steward,
-                                    &mut room,
-                                    &link,
-                                    &mut declined_room,
-                                    &mut resume_after_room,
-                                    t,
-                                );
+                                if rooms.take_back(&mut steward, t) {
+                                    resume_after_room = false;
+                                }
                                 if current.is_some() {
                                     then = Some(Step::Previous);
                                     skip(&mut steward, &mut current, t);
@@ -811,6 +828,180 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => log::debug!("touch: {e:?}"),
             }
         }
+        // The network and the hand-over of the sink keep their cadence
+        // whatever the decoder is doing: a stream from the network must
+        // reach the sink while the card's track is short of lead too.
+        if last_net.elapsed() >= FACE_TICK {
+            last_net = Instant::now();
+            // A network source sending to this device takes the sink from
+            // the queue; it comes back when the source stops.
+            if rooms.custody.is_none() {
+                if let Some((source, r)) = rooms.offer() {
+                    memory("before the room");
+                    if let Some(h) = current.take() {
+                        room_took_the_sink = true;
+                        resume_after_room = true;
+                        if let Err(e) = steward.release(h, t) {
+                            warn!("release {}: {e:?}", h.0);
+                        }
+                    }
+                    match steward.assign(
+                        &source.shelf(),
+                        Assignment {
+                            subject: SubjectId::new(source.subject()),
+                            instruction: to_value(&r),
+                        },
+                        t,
+                    ) {
+                        Ok(h) => {
+                            info!(
+                                "{}: {} from {} has the sink under custody {}",
+                                source.label(),
+                                r.group,
+                                r.leader,
+                                h.0
+                            );
+                            notice = None;
+                            rooms.custody = Some((source, h));
+                        }
+                        Err(e) => {
+                            warn!("{}: assign: {e:?}", source.label());
+                            room_took_the_sink = false;
+                            if resume_after_room {
+                                resume_after_room = false;
+                                current = advance(
+                                    &mut steward,
+                                    &mut queue,
+                                    Step::Current,
+                                    t,
+                                    wanted,
+                                    &mut notice,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(event) = net.as_mut().and_then(|n| n.poll()) {
+                let line = match &event {
+                    net::Event::Up {
+                        ssid,
+                        address,
+                        hostname,
+                        channel,
+                    } => format!(
+                        "wifi: joined '{ssid}' on channel {channel}; hostname {hostname}, address {address}"
+                    ),
+                    net::Event::Down => "wifi: link down; rejoining".to_string(),
+                    net::Event::Failed(why) => format!("wifi: off: {why}"),
+                };
+                config.set_network(line);
+                config.write_status(&status_head);
+                if let net::Event::Up { .. } = &event {
+                    // The link as the driver sees it, for the log: the
+                    // power-save mode (R37) and the signal.
+                    // SAFETY: plain getters on the started driver; the
+                    // record is zeroed and filled by the driver.
+                    unsafe {
+                        let mut ps = sys::wifi_ps_type_t_WIFI_PS_MIN_MODEM;
+                        let got_ps = sys::esp_wifi_get_ps(&mut ps);
+                        let mut ap: sys::wifi_ap_record_t = std::mem::zeroed();
+                        let got_ap = sys::esp_wifi_sta_get_ap_info(&mut ap);
+                        info!(
+                            "wifi: power save {}, rssi {} dBm, channel {}",
+                            if got_ps != sys::ESP_OK {
+                                "unknown".to_string()
+                            } else if ps == sys::wifi_ps_type_t_WIFI_PS_NONE {
+                                "off".to_string()
+                            } else {
+                                format!("mode {ps}")
+                            },
+                            if got_ap == sys::ESP_OK { ap.rssi } else { 0 },
+                            if got_ap == sys::ESP_OK { ap.primary } else { 0 }
+                        );
+                    }
+                    if mdns.is_none() {
+                        mdns = advertise(&hostname, &device_id);
+                    }
+                    // The server the card names is dialled once the
+                    // link is up; with none named, the network is asked.
+                    match &snapserver {
+                        Some(s) => {
+                            info!("snapcast: the card names {s}");
+                            rooms.snap.set_server(Some(s.clone()));
+                        }
+                        None if search.is_none() => {
+                            search_at = Some(Instant::now());
+                        }
+                        None => {}
+                    }
+                }
+                if start_when_up && matches!(event, net::Event::Up { .. }) {
+                    start_when_up = false;
+                    current = advance(
+                        &mut steward,
+                        &mut queue,
+                        Step::Next,
+                        now(),
+                        wanted,
+                        &mut notice,
+                    );
+                    track_started = Instant::now();
+                }
+                if face.screen() == Screen::Settings {
+                    face.set_about(facts(
+                        &face,
+                        card_mb,
+                        card_tracks,
+                        &network_line(&net),
+                        &queue,
+                        &device_id,
+                    ));
+                }
+            }
+            // The search for a Snapcast server: polled, never waited on.
+            if let Some(s) = search.as_mut() {
+                if let Some(found) = s.poll() {
+                    search = None;
+                    let first = found
+                        .iter()
+                        .find_map(|f| f.socket_v4().map(|a| (f, a)));
+                    match first {
+                        Some((f, addr)) => {
+                            info!(
+                                "snapcast: found {:?} on {}.local at {addr}{}",
+                                f.instance,
+                                f.host,
+                                if found.len() > 1 {
+                                    format!(" ({} answered)", found.len())
+                                } else {
+                                    String::new()
+                                }
+                            );
+                            rooms.snap.set_server(Some(addr));
+                        }
+                        None => {
+                            info!(
+                                "snapcast: no server on the network; asking again in {} s",
+                                SEARCH_AGAIN.as_secs()
+                            );
+                            search_at = Some(Instant::now() + SEARCH_AGAIN);
+                        }
+                    }
+                }
+            } else if let (Some(m), Some(at)) = (mdns.as_ref(), search_at) {
+                if Instant::now() >= at {
+                    search_at = None;
+                    match m.search("_snapcast", "_tcp", SEARCH_FOR, 4) {
+                        Ok(s) => search = Some(s),
+                        Err(e) => {
+                            warn!("{e}");
+                            search_at = Some(Instant::now() + SEARCH_AGAIN);
+                        }
+                    }
+                }
+            }
+        }
         // Audio first: a paint stage can take 90 ms, and while the decoder
         // is short of lead the loop decodes instead of painting.
         let audio_short = lead.ms().is_some_and(|ms| ms < LOW_LEAD_MS);
@@ -853,56 +1044,7 @@ fn main() -> anyhow::Result<()> {
                     current = None;
                 }
             }
-            // A source-host sending to this room takes the sink from the
-            // queue; it comes back when the source-host stops.
-            if room.is_none() {
-                if let Some(r) = link.sending() {
-                    let session = link.session();
-                    if declined_room != Some(session.generation) {
-                        memory("before the room");
-                        if let Some(h) = current.take() {
-                            room_took_the_sink = true;
-                            resume_after_room = true;
-                            if let Err(e) = steward.release(h, t) {
-                                warn!("release {}: {e:?}", h.0);
-                            }
-                        }
-                        match steward.assign(
-                            &shelf::playback_receive(),
-                            Assignment {
-                                subject: SubjectId::new("playback/room"),
-                                instruction: to_value(&r),
-                            },
-                            t,
-                        ) {
-                            Ok(h) => {
-                                info!(
-                                    "multiroom: group {} from {} has the sink under custody {}",
-                                    r.group, r.leader, h.0
-                                );
-                                notice = None;
-                                room = Some(h);
-                            }
-                            Err(e) => {
-                                warn!("multiroom: assign: {e:?}");
-                                room_took_the_sink = false;
-                                if resume_after_room {
-                                    resume_after_room = false;
-                                    current = advance(
-                                        &mut steward,
-                                        &mut queue,
-                                        Step::Current,
-                                        t,
-                                        wanted,
-                                        &mut notice,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            let source = if room.is_some() { "Evo room" } else { "Card" };
+            let source = rooms.source().map_or("Card", Source::label);
             let mut state = View::new(&pb, output.as_ref(), source);
             state.shuffle = queue.shuffle();
             state.repeat = queue.repeat();
@@ -916,49 +1058,6 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(found) = art.poll() {
                 face.set_art(found.art);
-            }
-            if let Some(event) = net.as_mut().and_then(|n| n.poll()) {
-                let line = match &event {
-                    net::Event::Up {
-                        ssid,
-                        address,
-                        hostname,
-                        channel,
-                    } => format!(
-                        "wifi: joined '{ssid}' on channel {channel}; hostname {hostname}, address {address}"
-                    ),
-                    net::Event::Down => "wifi: link down; rejoining".to_string(),
-                    net::Event::Failed(why) => format!("wifi: off: {why}"),
-                };
-                config.set_network(line);
-                config.write_status(&status_head);
-                if mdns.is_none() {
-                    if let net::Event::Up { .. } = &event {
-                        mdns = advertise(&hostname, &device_id);
-                    }
-                }
-                if start_when_up && matches!(event, net::Event::Up { .. }) {
-                    start_when_up = false;
-                    current = advance(
-                        &mut steward,
-                        &mut queue,
-                        Step::Next,
-                        now(),
-                        wanted,
-                        &mut notice,
-                    );
-                    track_started = Instant::now();
-                }
-                if face.screen() == Screen::Settings {
-                    face.set_about(facts(
-                        &face,
-                        card_mb,
-                        card_tracks,
-                        &network_line(&net),
-                        &queue,
-                        &device_id,
-                    ));
-                }
             }
             let painted = face.refresh(&mut board.panel, &state);
             let took = last_face.elapsed();
@@ -1019,14 +1118,19 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if let HappeningKind::CustodyReleased { warden, reason } = &h.kind {
-                if warden == org_evoframework_multiroom_receiver::NAME {
-                    // The room is over: the source-host left or went
-                    // quiet. The queue plays again where it was.
-                    room = None;
+                if let Some(source) = Source::of_warden(warden) {
+                    // The source is over: it left or went quiet. The
+                    // queue plays again where it was. A release from the
+                    // source that does not have the sink is stale.
+                    match rooms.source() {
+                        Some(s) if s == source => rooms.custody = None,
+                        Some(_) => continue,
+                        None => {}
+                    }
                     memory("after the room");
                     notice = reason
                         .as_ref()
-                        .map(|why| format!("the room ended: {why}"));
+                        .map(|why| format!("{}: {why}", source.ended()));
                     if resume_after_room {
                         resume_after_room = false;
                         current = advance(
@@ -1112,6 +1216,33 @@ fn main() -> anyhow::Result<()> {
             if let Some(line) = sink::report_dry() {
                 warn!("sink: {line}");
             }
+            let snap = rooms.snap.session();
+            if snap.connected {
+                info!(
+                    "snapcast: {} {:?} {} {} Hz {} ch, buffer {} ms latency {} ms, clock {} us, volume {}{}, {} chunks, {} dropped, {} bad frames",
+                    snap.server.as_deref().unwrap_or("?"),
+                    snap.stream.as_deref().unwrap_or(""),
+                    snap.codec.as_deref().unwrap_or("no codec yet"),
+                    snap.rate,
+                    snap.channels,
+                    snap.buffer_ms,
+                    snap.latency_ms,
+                    snap.diff_us.map_or("?".to_string(), |d| d.to_string()),
+                    snap.volume,
+                    if snap.muted { " muted" } else { "" },
+                    snap.chunks,
+                    snap.dropped,
+                    snap.bad_frames
+                );
+            } else if snapserver.is_none()
+                && rooms.snap.server().is_some()
+                && search.is_none()
+                && search_at.is_none()
+            {
+                // A server found on the network has gone: it may be back
+                // at another address.
+                search_at = Some(Instant::now() + SEARCH_AGAIN);
+            }
         }
         // The idle task must run or its watchdog bites: a short sleep
         // when the fabric wants ticking now or a frame is mid-paint, the
@@ -1151,6 +1282,12 @@ fn descriptions() -> Vec<PluginDescription> {
             Link::new(),
         )
         .describe(),
+        SnapcastReceiver::new(
+            Box::new(Silent),
+            SnapSettings::new("", "", ""),
+            SnapLink::new(),
+        )
+        .describe(),
         DeliveryNull::new().describe(),
     ]
 }
@@ -1169,12 +1306,14 @@ impl evo_esp32_sdk::contract::audio::playback::FrameSink for Silent {
 }
 
 /// Build the fabric: steward, plugins, checked against the catalogue.
-/// The sink is shared between the decoder and the multiroom receiver;
-/// the loop grants one of them custody at a time.
+/// The sink is shared between the decoder and the two network
+/// receivers; the loop grants one of them custody at a time.
 fn bring_up(
     sink: sink::Shared<Codec>,
     link: &Link,
     room: RoomSettings,
+    snap_link: &SnapLink,
+    snap: SnapSettings,
     now: Ticks,
 ) -> Result<Steward, String> {
     let catalogue = catalogue();
@@ -1202,9 +1341,19 @@ fn bring_up(
     steward
         .admit_warden(
             Box::new(MultiroomReceiver::new(
-                Box::new(sink),
+                Box::new(sink.clone()),
                 room,
                 link.clone(),
+            )),
+            now,
+        )
+        .map_err(|e| e.to_string())?;
+    steward
+        .admit_warden(
+            Box::new(SnapcastReceiver::new(
+                Box::new(sink),
+                snap,
+                snap_link.clone(),
             )),
             now,
         )
@@ -1547,13 +1696,8 @@ fn correct(
     }
 }
 
-/// The device's id on the Evo network: a UUID derived from the chip's
-/// factory MAC, so it is the same across boots, cards and flashes (a
-/// full flash blanks NVS; the MAC is in eFuse). Its first digit is `f`:
-/// a group's source-host is elected as the lowest id among the members,
-/// and a device that only receives must never win that, so it sorts
-/// itself last. Version and variant bits are a UUID's.
-fn identity() -> String {
+/// The chip's factory MAC, from eFuse; zeros if it cannot be read.
+fn factory_mac() -> [u8; 6] {
     let mut mac = [0u8; 6];
     // SAFETY: esp_efuse_mac_get_default writes six bytes into the buffer
     // given; no other preconditions.
@@ -1561,6 +1705,27 @@ fn identity() -> String {
     if read != sys::ESP_OK {
         warn!("efuse: no MAC ({read}); the id is the zero MAC's");
     }
+    mac
+}
+
+/// The MAC as `aa:bb:cc:dd:ee:ff`: what a Snapcast server knows a
+/// client by.
+fn mac_text() -> String {
+    factory_mac()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// The device's id on the Evo network: a UUID derived from the chip's
+/// factory MAC, so it is the same across boots, cards and flashes (a
+/// full flash blanks NVS; the MAC is in eFuse). Its first digit is `f`:
+/// a group's source-host is elected as the lowest id among the members,
+/// and a device that only receives must never win that, so it sorts
+/// itself last. Version and variant bits are a UUID's.
+fn identity() -> String {
+    let mac = factory_mac();
     // Sixteen bytes from six: FNV-1a over the MAC under two seeds.
     let mut b = [0u8; 16];
     for (half, seed) in [
@@ -1621,24 +1786,120 @@ fn advertise(hostname: &str, device_id: &str) -> Option<Advertiser> {
     }
 }
 
-/// The listener takes the sink back from the room: the room's custody
-/// ends, the queue does not resume on its own, and this connection is
-/// not granted the sink again (a new one from the source-host is).
-fn take_back(
-    steward: &mut Steward,
-    room: &mut Option<CustodyHandle>,
-    link: &Link,
-    declined: &mut Option<u32>,
-    resume_after_room: &mut bool,
-    now: Ticks,
-) {
-    if let Some(h) = room.take() {
-        info!("touch: the room gives the sink back");
-        *declined = Some(link.session().generation);
-        *resume_after_room = false;
+/// A network source that may take the sink from the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// An Evo source-host sending to this room.
+    Evo,
+    /// A Snapcast server streaming to this client.
+    Snapcast,
+}
+
+impl Source {
+    /// The face's word for where the sound comes from.
+    fn label(self) -> &'static str {
+        match self {
+            Source::Evo => "Evo room",
+            Source::Snapcast => "Snapcast",
+        }
+    }
+
+    /// The notice when the source lets go.
+    fn ended(self) -> &'static str {
+        match self {
+            Source::Evo => "the room ended",
+            Source::Snapcast => "the Snapcast stream ended",
+        }
+    }
+
+    fn shelf(self) -> evo_esp32_sdk::catalogue::ShelfRef {
+        match self {
+            Source::Evo => shelf::playback_receive(),
+            Source::Snapcast => shelf::playback_snapcast(),
+        }
+    }
+
+    fn subject(self) -> &'static str {
+        match self {
+            Source::Evo => "playback/room",
+            Source::Snapcast => "playback/snapcast",
+        }
+    }
+
+    /// The source whose warden `name` is.
+    fn of_warden(name: &str) -> Option<Self> {
+        if name == org_evoframework_multiroom_receiver::NAME {
+            Some(Source::Evo)
+        } else if name == org_evoframework_snapcast_receiver::NAME {
+            Some(Source::Snapcast)
+        } else {
+            None
+        }
+    }
+}
+
+/// The network sources, the custody while one of them has the sink,
+/// and the connection of each the listener declined.
+struct Rooms {
+    evo: Link,
+    snap: SnapLink,
+    custody: Option<(Source, CustodyHandle)>,
+    declined: [Option<u32>; 2],
+}
+
+impl Rooms {
+    fn new(evo: Link, snap: SnapLink) -> Self {
+        Self {
+            evo,
+            snap,
+            custody: None,
+            declined: [None, None],
+        }
+    }
+
+    fn handle(&self) -> Option<CustodyHandle> {
+        self.custody.map(|(_, h)| h)
+    }
+
+    fn source(&self) -> Option<Source> {
+        self.custody.map(|(s, _)| s)
+    }
+
+    fn generation(&self, source: Source) -> u32 {
+        match source {
+            Source::Evo => self.evo.session().generation,
+            Source::Snapcast => self.snap.session().generation,
+        }
+    }
+
+    /// A source that is sending on a connection the listener did not
+    /// decline, with the instruction to assign; the Evo room first.
+    fn offer(&self) -> Option<(Source, Receive)> {
+        let offers = [
+            (Source::Evo, self.evo.sending()),
+            (Source::Snapcast, self.snap.sending()),
+        ];
+        offers.into_iter().find_map(|(source, r)| {
+            let r = r?;
+            (self.declined[source as usize] != Some(self.generation(source)))
+                .then_some((source, r))
+        })
+    }
+
+    /// The listener takes the sink back: the source's custody ends and
+    /// this connection of it is not granted the sink again (a new one
+    /// is). True when there was a custody to end; the caller decides
+    /// whether the queue resumes.
+    fn take_back(&mut self, steward: &mut Steward, now: Ticks) -> bool {
+        let Some((source, h)) = self.custody.take() else {
+            return false;
+        };
+        info!("touch: the {} gives the sink back", source.label());
+        self.declined[source as usize] = Some(self.generation(source));
         if let Err(e) = steward.release(h, now) {
             warn!("release {}: {e:?}", h.0);
         }
+        true
     }
 }
 
