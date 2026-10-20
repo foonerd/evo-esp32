@@ -25,6 +25,11 @@ name = "decode"
 shape = 1
 description = "The warden that plays: custody of a track, position, pause, seek."
 
+[[racks.shelves]]
+name = "receive"
+shape = 1
+description = "The warden that plays what an Evo source-host on the network sends: the device as one room of a multiroom group."
+
 [[racks]]
 name = "delivery"
 family = "domain"

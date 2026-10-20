@@ -1,0 +1,24 @@
+[package]
+name = "org-evoframework-multiroom-receiver"
+description = "Multiroom receiver for evo-esp32: the device as one room of an Evo multiroom group. Listens for the group's source-host on the Evo audio plane (TCP, port 7331), answers its sync probes, takes its PCM frames (the bin1 binary form, or the JSON envelope of an older source-host) and plays them on the distribution's sink at their presentation time, under a custody the distribution grants when a source-host is sending."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# A reference warden — Apache 2.0 so a device's receiver can copy it.
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+# An older source-host sends frames as JSON with the PCM in base64.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+log = "0.4"
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }

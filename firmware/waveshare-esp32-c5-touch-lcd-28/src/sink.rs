@@ -32,7 +32,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering,
 };
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -672,5 +672,54 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
 
     fn held(&self) -> usize {
         self.reservoir.readable() / FRAME_BYTES
+    }
+}
+
+/// One sink held by two wardens: the decoder's and the multiroom
+/// receiver's. Only one has custody at a time, and both run on the
+/// loop's thread, so the lock is never contended; it is the type's
+/// way of saying the sink is shared. Whoever `start`s it owns it.
+pub struct Shared<F>(Arc<Mutex<I2sSink<F>>>);
+
+impl<F> Shared<F> {
+    /// Wrap `sink` for sharing.
+    pub fn new(sink: I2sSink<F>) -> Self {
+        Self(Arc::new(Mutex::new(sink)))
+    }
+}
+
+impl<F> Clone for Shared<F> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<F: RateFollower> FrameSink for Shared<F> {
+    fn start(&mut self, format: &Format) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .start(format);
+    }
+    fn write(&mut self, interleaved: &[i16]) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write(interleaved)
+    }
+    fn flush(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).flush();
+    }
+    fn stop(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).stop();
+    }
+    fn pause(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).pause();
+    }
+    fn resume(&mut self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).resume();
+    }
+    fn held(&self) -> usize {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).held()
     }
 }

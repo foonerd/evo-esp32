@@ -31,6 +31,13 @@ remote_component = { name = "espressif/esp_audio_codec", version = "2.6.2" }
 bindings_header = "bindings.h"
 bindings_module = "esp_audio_codec"
 
+# Espressif's mDNS responder (esp-protocols), Apache-2.0 at this version;
+# `esp_idf_svc::mdns` is built when it is present. Answers for the
+# device's `.local` name and advertises the services a distribution
+# offers (the Evo audio plane's `_evo._tcp`).
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/mdns", version = "1.11.3" }
+
 # Espressif's JPEG decoder component: TJpgDec (ChaN), Apache-2.0, in ROM
 # on the C5; decodes at 1/1, 1/2, 1/4 or 1/8 in a few kilobytes of work
 # area. Bindings land in `esp_idf_svc::sys::esp_jpeg`.

@@ -25,10 +25,14 @@
 //! [`http`]: `http://` and `https://` streams over ESP-IDF's HTTP client
 //! and certificate bundle, as the playback plugin's [`StreamOpener`]
 //! (`evo_esp32_sdk::contract::audio::playback::StreamOpener`).
+//!
+//! [`mdns`]: the device's `.local` name and the services it advertises
+//! (the Evo audio plane's `_evo._tcp`), on Espressif's mDNS responder.
 
 pub mod aac;
 pub mod http;
 pub mod jpeg;
+pub mod mdns;
 pub mod mp3;
 pub mod png;
 

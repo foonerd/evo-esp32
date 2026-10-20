@@ -40,6 +40,7 @@ org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.
 # task's stack); Espressif's decodes, registered by the platform crate.
 org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia", default-features = false, features = ["flac", "mp3", "pcm", "vorbis", "aac"] }
 org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }
+org-evoframework-multiroom-receiver = { path = "../../plugins/org.evoframework.multiroom.receiver" }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 
 [build-dependencies]

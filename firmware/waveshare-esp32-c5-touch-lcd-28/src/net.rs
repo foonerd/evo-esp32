@@ -109,6 +109,7 @@ impl Net {
     /// of what the network costs this board.
     pub fn start(
         modem: Modem<'static>,
+        nvs: EspDefaultNvsPartition,
         ssid: String,
         password: String,
         hostname: Option<String>,
@@ -127,7 +128,7 @@ impl Net {
             .name("net".into())
             .stack_size(STACK)
             .spawn(move || {
-                work(modem, &ssid, &password, hostname.as_deref(), &tx)
+                work(modem, nvs, &ssid, &password, hostname.as_deref(), &tx)
             });
         before
             .unwrap_or_default()
@@ -171,6 +172,7 @@ impl Net {
 
 fn work(
     modem: Modem<'static>,
+    nvs: EspDefaultNvsPartition,
     ssid: &str,
     password: &str,
     hostname: Option<&str>,
@@ -180,8 +182,6 @@ fn work(
     let started = (|| -> Result<(WifiNet<'static>, NvsStore), String> {
         let sys_loop = EspSystemEventLoop::take()
             .map_err(|e| format!("event loop: {e}"))?;
-        let nvs =
-            EspDefaultNvsPartition::take().map_err(|e| format!("nvs: {e}"))?;
         let store = NvsStore::open(nvs.clone(), NAMESPACE)
             .map_err(|e| format!("nvs: {e}"))?;
         let mut net = WifiNet::start(modem, sys_loop, nvs, hostname)

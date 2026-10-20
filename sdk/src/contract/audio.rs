@@ -60,6 +60,8 @@ pub mod shelf {
     pub const RADIO: &str = "radio";
     /// `playback/decode`.
     pub const DECODE: &str = "decode";
+    /// `playback/receive`.
+    pub const RECEIVE: &str = "receive";
     /// `delivery/output`.
     pub const OUTPUT: &str = "output";
     /// `metadata/tags`.
@@ -81,6 +83,10 @@ pub mod shelf {
     /// `playback/decode` as a reference.
     pub fn playback_decode() -> ShelfRef {
         ShelfRef::new(PLAYBACK, DECODE)
+    }
+    /// `playback/receive` as a reference.
+    pub fn playback_receive() -> ShelfRef {
+        ShelfRef::new(PLAYBACK, RECEIVE)
     }
     /// `delivery/output` as a reference.
     pub fn delivery_output() -> ShelfRef {
@@ -231,6 +237,18 @@ pub mod playback {
         /// Where to start, milliseconds.
         #[serde(default)]
         pub start_ms: u64,
+    }
+
+    /// The instruction of an assignment on `playback/receive`: play the
+    /// frames an Evo source-host on the network is sending this device
+    /// as a member of `group`, until it stops. The warden on that shelf
+    /// has the connection already; the custody is the sink's hand-over.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Receive {
+        /// The group the frames belong to, as the source-host names it.
+        pub group: String,
+        /// The source-host's device id.
+        pub leader: String,
     }
 
     /// A [`CourseCorrection`](crate::warden::CourseCorrection)'s instruction.

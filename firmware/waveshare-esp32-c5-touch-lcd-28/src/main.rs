@@ -60,12 +60,14 @@ use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys;
 use evo_esp32_face::touch::{Intent, Tracker};
 use evo_esp32_face::{
     theme, About, Face, Fact, Hotspot, Library, Repaint, Screen, Style, Theme,
     View,
 };
+use evo_esp32_platform_esp_idf::mdns::Advertiser;
 use evo_esp32_platform_esp_idf::HttpOpener;
 use evo_esp32_queue::{Queue, Repeat};
 use evo_esp32_sdk::catalogue::Catalogue;
@@ -74,7 +76,7 @@ use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
 use evo_esp32_sdk::contract::audio::{
     delivery, from_value, shelf, to_value, Track,
 };
-use evo_esp32_sdk::happening::Seq;
+use evo_esp32_sdk::happening::{HappeningKind, Seq};
 use evo_esp32_sdk::plugin::{Plugin, PluginDescription};
 use evo_esp32_sdk::projection::ProjectionKey;
 use evo_esp32_sdk::respondent::{CorrelationId, Request};
@@ -84,6 +86,9 @@ use evo_esp32_sdk::Ticks;
 use evo_esp32_steward::{Config, Steward};
 use log::{info, warn};
 use org_evoframework_delivery_null::DeliveryNull;
+use org_evoframework_multiroom_receiver::{
+    Link, MultiroomReceiver, Settings as RoomSettings,
+};
 use org_evoframework_playback_symphonia::{CodecRegistry, PlaybackSymphonia};
 use org_evoframework_source_files::SourceFiles;
 use sink::{I2sSink, RateFollower};
@@ -152,8 +157,13 @@ fn main() -> anyhow::Result<()> {
     // their stacks in PSRAM: they write no flash, and internal SRAM is
     // what the Wi-Fi driver and the DMA rings live on. A thread that
     // does write flash (`net.rs`) asks for internal itself.
+    // Threads the plugins spawn get PSRAM stacks, and so do the threads
+    // those spawn (the open thread's fetcher, the listener's connection):
+    // ESP-IDF applies a thread's configuration to its children only when
+    // told to inherit.
     ThreadSpawnConfiguration {
         stack_alloc_caps: MallocCap::Spiram | MallocCap::Cap8bit,
+        inherit: true,
         ..Default::default()
     }
     .set()?;
@@ -233,6 +243,20 @@ fn main() -> anyhow::Result<()> {
     info!("i2s0: master, Philips 16-bit stereo, BCLK GPIO24, WS GPIO25, DOUT GPIO26");
     memory("after the DMA ring");
 
+    // The TCP/IP stack before anything binds a socket: the multiroom
+    // receiver listens from the moment it is loaded, and the network
+    // thread brings the driver up at its own pace.
+    esp_idf_svc::netif::NetifStack::initialize()?;
+    // The device's identity on the Evo network, from the chip itself.
+    let nvs = EspDefaultNvsPartition::take()?;
+    let device_id = identity();
+    info!("evo: device id {device_id}");
+    let hostname = config
+        .settings
+        .name
+        .clone()
+        .unwrap_or_else(|| DEFAULT_NAME.to_string());
+
     // The network, on its own thread, after the ring has its memory: the
     // music does not wait for the search, and the ring is not short for
     // the driver. Its line in the status and in Settings follows the link.
@@ -240,13 +264,13 @@ fn main() -> anyhow::Result<()> {
         Some(ssid) => {
             let password =
                 config.settings.wifi_password.clone().unwrap_or_default();
-            let hostname = config
-                .settings
-                .name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_NAME.to_string());
-            match net::Net::start(modem, ssid.clone(), password, Some(hostname))
-            {
+            match net::Net::start(
+                modem,
+                nvs,
+                ssid.clone(),
+                password,
+                Some(hostname.clone()),
+            ) {
                 Ok(net) => {
                     config.set_network(format!("wifi: joining '{ssid}'"));
                     Some(net)
@@ -298,7 +322,19 @@ fn main() -> anyhow::Result<()> {
     let started = Instant::now();
 
     let now = || Ticks(started.elapsed().as_millis() as u64);
-    let mut steward = bring_up(sink, now()).map_err(|e| anyhow::anyhow!(e))?;
+    let link = Link::new();
+    let room_settings =
+        RoomSettings::new(device_id.clone(), env!("CARGO_PKG_VERSION"));
+    let mut steward =
+        bring_up(sink::Shared::new(sink), &link, room_settings, now())
+            .map_err(|e| anyhow::anyhow!(e))?;
+    // The room's custody, while a source-host has the sink; whether the
+    // queue plays again after; the connection the listener declined.
+    let mut room: Option<CustodyHandle> = None;
+    let mut resume_after_room = false;
+    let mut room_took_the_sink = false;
+    let mut declined_room: Option<u32> = None;
+    let mut mdns: Option<Advertiser> = None;
     memory("after the steward");
     info!(
         "steward up with {} plugins: {}",
@@ -388,6 +424,8 @@ fn main() -> anyhow::Result<()> {
         )
     };
     let mut track_started = Instant::now();
+    // A station being reached; memory is logged when it is up.
+    let mut opening = false;
     // What the release of custody should play: set before a skip that is
     // not "the next one".
     let mut then: Option<Step> = None;
@@ -462,7 +500,7 @@ fn main() -> anyhow::Result<()> {
                                 let status = playback_state(&steward)
                                     .map(|pb| pb.status)
                                     .unwrap_or_default();
-                                match (current, status) {
+                                match (current.or(room), status) {
                                     (Some(h), playback::Status::Playing) => {
                                         correct(
                                             &mut steward,
@@ -479,6 +517,9 @@ fn main() -> anyhow::Result<()> {
                                             t,
                                         )
                                     }
+                                    // Still being reached: nothing to
+                                    // hold yet; next and previous move on.
+                                    (Some(_), playback::Status::Opening) => {}
                                     _ => {
                                         // Nothing in custody: the item in
                                         // hand again (a held station), or
@@ -498,6 +539,14 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Intent::Tap(Hotspot::Next) => {
+                                take_back(
+                                    &mut steward,
+                                    &mut room,
+                                    &link,
+                                    &mut declined_room,
+                                    &mut resume_after_room,
+                                    t,
+                                );
                                 if current.is_some() {
                                     then = Some(Step::Skip);
                                     skip(&mut steward, &mut current, t);
@@ -514,6 +563,14 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Intent::Tap(Hotspot::Previous) => {
+                                take_back(
+                                    &mut steward,
+                                    &mut room,
+                                    &link,
+                                    &mut declined_room,
+                                    &mut resume_after_room,
+                                    t,
+                                );
                                 if current.is_some() {
                                     then = Some(Step::Previous);
                                     skip(&mut steward, &mut current, t);
@@ -570,6 +627,7 @@ fn main() -> anyhow::Result<()> {
                                         card_tracks,
                                         &network_line(&net),
                                         &queue,
+                                        &device_id,
                                     )),
                                     _ => {}
                                 }
@@ -649,6 +707,7 @@ fn main() -> anyhow::Result<()> {
                                         card_tracks,
                                         &network_line(&net),
                                         &queue,
+                                        &device_id,
                                     ));
                                     continue;
                                 }
@@ -771,6 +830,14 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let pb = playback_state(&steward).unwrap_or_default();
+            match pb.status {
+                playback::Status::Opening => opening = true,
+                playback::Status::Playing if opening => {
+                    opening = false;
+                    memory("with the station open");
+                }
+                _ => opening = false,
+            }
             // The chip's ceiling is the distribution's to enforce: the
             // decoder would play it, badly.
             if let (Some(handle), Some(f)) = (current, pb.format.as_ref()) {
@@ -786,7 +853,57 @@ fn main() -> anyhow::Result<()> {
                     current = None;
                 }
             }
-            let mut state = View::new(&pb, output.as_ref(), "Card");
+            // A source-host sending to this room takes the sink from the
+            // queue; it comes back when the source-host stops.
+            if room.is_none() {
+                if let Some(r) = link.sending() {
+                    let session = link.session();
+                    if declined_room != Some(session.generation) {
+                        memory("before the room");
+                        if let Some(h) = current.take() {
+                            room_took_the_sink = true;
+                            resume_after_room = true;
+                            if let Err(e) = steward.release(h, t) {
+                                warn!("release {}: {e:?}", h.0);
+                            }
+                        }
+                        match steward.assign(
+                            &shelf::playback_receive(),
+                            Assignment {
+                                subject: SubjectId::new("playback/room"),
+                                instruction: to_value(&r),
+                            },
+                            t,
+                        ) {
+                            Ok(h) => {
+                                info!(
+                                    "multiroom: group {} from {} has the sink under custody {}",
+                                    r.group, r.leader, h.0
+                                );
+                                notice = None;
+                                room = Some(h);
+                            }
+                            Err(e) => {
+                                warn!("multiroom: assign: {e:?}");
+                                room_took_the_sink = false;
+                                if resume_after_room {
+                                    resume_after_room = false;
+                                    current = advance(
+                                        &mut steward,
+                                        &mut queue,
+                                        Step::Current,
+                                        t,
+                                        wanted,
+                                        &mut notice,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let source = if room.is_some() { "Evo room" } else { "Card" };
+            let mut state = View::new(&pb, output.as_ref(), source);
             state.shuffle = queue.shuffle();
             state.repeat = queue.repeat();
             if current.is_none() {
@@ -815,6 +932,11 @@ fn main() -> anyhow::Result<()> {
                 };
                 config.set_network(line);
                 config.write_status(&status_head);
+                if mdns.is_none() {
+                    if let net::Event::Up { .. } = &event {
+                        mdns = advertise(&hostname, &device_id);
+                    }
+                }
                 if start_when_up && matches!(event, net::Event::Up { .. }) {
                     start_when_up = false;
                     current = advance(
@@ -834,6 +956,7 @@ fn main() -> anyhow::Result<()> {
                         card_tracks,
                         &network_line(&net),
                         &queue,
+                        &device_id,
                     ));
                 }
             }
@@ -895,22 +1018,54 @@ fn main() -> anyhow::Result<()> {
                         .unwrap_or_default()
                 );
             }
-            if kind.contains("custody_released") {
+            if let HappeningKind::CustodyReleased { warden, reason } = &h.kind {
+                if warden == org_evoframework_multiroom_receiver::NAME {
+                    // The room is over: the source-host left or went
+                    // quiet. The queue plays again where it was.
+                    room = None;
+                    memory("after the room");
+                    notice = reason
+                        .as_ref()
+                        .map(|why| format!("the room ended: {why}"));
+                    if resume_after_room {
+                        resume_after_room = false;
+                        current = advance(
+                            &mut steward,
+                            &mut queue,
+                            Step::Current,
+                            now(),
+                            wanted,
+                            &mut notice,
+                        );
+                        track_started = Instant::now();
+                    }
+                    continue;
+                }
+                if room_took_the_sink {
+                    // The decoder let go for the room; nothing moves on.
+                    room_took_the_sink = false;
+                    continue;
+                }
                 // A station that ends on its own (the fetcher gave up on
-                // the connection) is held with the reason, not followed
-                // by the next station unasked; Play tries it again. A
-                // file's end, and anything the listener let go of, moves
-                // on.
+                // the connection) or could not be reached is held with
+                // the reason, not followed by the next station unasked;
+                // Play tries it again. A file's end, a file that failed,
+                // and anything the listener let go of, moves on.
                 let on_its_own = current.is_some();
                 let ended_station =
                     on_its_own && queue.current().is_some_and(is_stream);
                 if ended_station {
                     let title = queue.current().map(|t| t.title.clone());
                     let title = title.unwrap_or_default();
-                    warn!("{title:?}: the stream ended");
-                    notice = Some(format!("{title}: the stream ended"));
+                    let why =
+                        reason.as_deref().map_or("the stream ended", plain);
+                    warn!("{title:?}: {why} ({reason:?})");
+                    notice = Some(format!("{title}: {why}"));
                     current = None;
                 } else {
+                    if let Some(why) = reason {
+                        warn!("the track failed: {why}; moving on");
+                    }
                     let step = then.take().unwrap_or(if on_its_own {
                         Step::Next
                     } else {
@@ -990,6 +1145,12 @@ fn descriptions() -> Vec<PluginDescription> {
     vec![
         SourceFiles::new(MUSIC).describe(),
         PlaybackSymphonia::new(Box::new(Silent)).describe(),
+        MultiroomReceiver::new(
+            Box::new(Silent),
+            RoomSettings::new("", ""),
+            Link::new(),
+        )
+        .describe(),
         DeliveryNull::new().describe(),
     ]
 }
@@ -1008,7 +1169,14 @@ impl evo_esp32_sdk::contract::audio::playback::FrameSink for Silent {
 }
 
 /// Build the fabric: steward, plugins, checked against the catalogue.
-fn bring_up(sink: I2sSink<Codec>, now: Ticks) -> Result<Steward, String> {
+/// The sink is shared between the decoder and the multiroom receiver;
+/// the loop grants one of them custody at a time.
+fn bring_up(
+    sink: sink::Shared<Codec>,
+    link: &Link,
+    room: RoomSettings,
+    now: Ticks,
+) -> Result<Steward, String> {
     let catalogue = catalogue();
     let report = evo_esp32_catalogue::check(&catalogue, &descriptions());
     if !report.is_clean() {
@@ -1022,9 +1190,22 @@ fn bring_up(sink: I2sSink<Codec>, now: Ticks) -> Result<Steward, String> {
     steward
         .admit_warden(
             Box::new(
-                PlaybackSymphonia::with_codecs(Box::new(sink), codecs())
-                    .with_opener(Box::new(HttpOpener)),
+                PlaybackSymphonia::with_codecs(
+                    Box::new(sink.clone()),
+                    codecs(),
+                )
+                .with_opener(Box::new(HttpOpener)),
             ),
+            now,
+        )
+        .map_err(|e| e.to_string())?;
+    steward
+        .admit_warden(
+            Box::new(MultiroomReceiver::new(
+                Box::new(sink),
+                room,
+                link.clone(),
+            )),
             now,
         )
         .map_err(|e| e.to_string())?;
@@ -1100,15 +1281,23 @@ fn list_folder(
     }
 }
 
-/// The playback projection's state, if a warden has published one.
+/// The playback projection's state: the decoder's (`playback/now`) or
+/// the room's (`playback/room`), whichever is not stopped; the
+/// decoder's when both are.
 fn playback_state(steward: &Steward) -> Option<playback::State> {
-    steward
+    let states: Vec<playback::State> = steward
         .projection(ProjectionKey::Rack {
             name: shelf::PLAYBACK.into(),
         })
         .subjects
-        .first()
-        .and_then(|s| from_value(&s.state).ok())
+        .iter()
+        .filter_map(|s| from_value(&s.state).ok())
+        .collect();
+    states
+        .iter()
+        .find(|s| s.status != playback::Status::Stopped)
+        .or(states.first())
+        .cloned()
 }
 
 /// The output's state, if the delivery plugin has published one.
@@ -1210,9 +1399,6 @@ fn advance(
         }
         match play(steward, &track, now, level) {
             Ok(handle) => {
-                if is_stream(&track) {
-                    memory("with the station open");
-                }
                 *notice = None;
                 return Some(handle);
             }
@@ -1304,7 +1490,11 @@ fn starting_point(
 
 /// A refusal's reason in the listener's words, for the status strip.
 fn plain(why: &str) -> &'static str {
-    if why.contains("HTTP_CONNECT") || why.contains("getaddrinfo") {
+    if why.contains("stalled") {
+        "the stream stalled"
+    } else if why.contains("end of stream") || why.contains("Eof") {
+        "the stream ended"
+    } else if why.contains("HTTP_CONNECT") || why.contains("getaddrinfo") {
         "could not connect"
     } else if why.contains("HTTP 404") {
         "not found (404)"
@@ -1354,6 +1544,101 @@ fn correct(
         now,
     ) {
         warn!("correct {}: {e:?}", handle.0);
+    }
+}
+
+/// The device's id on the Evo network: a UUID derived from the chip's
+/// factory MAC, so it is the same across boots, cards and flashes (a
+/// full flash blanks NVS; the MAC is in eFuse). Its first digit is `f`:
+/// a group's source-host is elected as the lowest id among the members,
+/// and a device that only receives must never win that, so it sorts
+/// itself last. Version and variant bits are a UUID's.
+fn identity() -> String {
+    let mut mac = [0u8; 6];
+    // SAFETY: esp_efuse_mac_get_default writes six bytes into the buffer
+    // given; no other preconditions.
+    let read = unsafe { sys::esp_efuse_mac_get_default(mac.as_mut_ptr()) };
+    if read != sys::ESP_OK {
+        warn!("efuse: no MAC ({read}); the id is the zero MAC's");
+    }
+    // Sixteen bytes from six: FNV-1a over the MAC under two seeds.
+    let mut b = [0u8; 16];
+    for (half, seed) in [
+        (0usize, 0xcbf2_9ce4_8422_2325u64),
+        (8, 0x8422_2325_cbf2_9ce4),
+    ] {
+        let mut h = seed;
+        for byte in mac {
+            h ^= u64::from(byte);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        b[half..half + 8].copy_from_slice(&h.to_be_bytes());
+    }
+    b[0] |= 0xf0;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// Advertise the device on the local network: `hostname.local`, and
+/// the Evo audio plane's service with the id a source-host looks for.
+fn advertise(hostname: &str, device_id: &str) -> Option<Advertiser> {
+    let started = Advertiser::start(hostname, hostname).and_then(|mut m| {
+        m.add_service(
+            "_evo",
+            "_tcp",
+            org_evoframework_multiroom_receiver::CONTROL_PORT,
+            &[
+                ("id", device_id),
+                ("name", hostname),
+                ("vendor", "evo-esp32"),
+                ("version", env!("CARGO_PKG_VERSION")),
+                ("caps", "multi-room"),
+            ],
+        )?;
+        Ok(m)
+    });
+    match started {
+        Ok(m) => {
+            info!(
+                "mdns: {hostname}.local, _evo._tcp on port {} as {device_id}",
+                org_evoframework_multiroom_receiver::CONTROL_PORT
+            );
+            Some(m)
+        }
+        Err(e) => {
+            warn!("mdns: {e}; the device is not discoverable");
+            None
+        }
+    }
+}
+
+/// The listener takes the sink back from the room: the room's custody
+/// ends, the queue does not resume on its own, and this connection is
+/// not granted the sink again (a new one from the source-host is).
+fn take_back(
+    steward: &mut Steward,
+    room: &mut Option<CustodyHandle>,
+    link: &Link,
+    declined: &mut Option<u32>,
+    resume_after_room: &mut bool,
+    now: Ticks,
+) {
+    if let Some(h) = room.take() {
+        info!("touch: the room gives the sink back");
+        *declined = Some(link.session().generation);
+        *resume_after_room = false;
+        if let Err(e) = steward.release(h, now) {
+            warn!("release {}: {e:?}", h.0);
+        }
     }
 }
 
@@ -1566,6 +1851,7 @@ fn facts(
     tracks: usize,
     network: &str,
     queue: &Queue<Track>,
+    device_id: &str,
 ) -> About {
     let fact = |name: &str, value: String| Fact {
         name: name.to_string(),
@@ -1594,6 +1880,7 @@ fn facts(
                 "Card",
                 format!("{:.0} GB, {tracks} tracks", card_mb as f64 / 1024.0),
             ),
+            fact("Evo id", device_id.to_string()),
         ],
         first: 0,
     }

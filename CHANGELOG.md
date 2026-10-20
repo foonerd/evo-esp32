@@ -6,6 +6,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The device as a room of an Evo multiroom group.
+  `plugins/org.evoframework.multiroom.receiver` stocks the new
+  `playback/receive` shelf: a listener on the Evo audio plane (TCP
+  7331) from load, the handshake offering the plane's `bin1` frame
+  format, sync probes every five seconds, frames queued with their
+  arrival time (`bin1`, or an older source-host's JSON envelope decoded
+  the same), and a warden that plays them 200 ms behind their stamp,
+  anchored on the first frame's arrival as the Linux receiver does. The
+  SDK gains the shelf, the `Receive` instruction, and the firmware a
+  shared sink: the loop grants it to the decoder or the room, releases
+  the queue when a source-host sends, resumes it when the room ends,
+  and gives it back on Next or Previous (that connection is then not
+  granted again). `platform/esp-idf` gains `mdns` (Espressif's
+  responder, task and records in PSRAM): `evo-player.local` and the
+  `_evo._tcp` service with the device's id, derived from the chip's
+  MAC so it survives reflashes, first digit `f` so the plane's election
+  never makes a receiver the source-host. The face shows the room; the
+  `Evo id` row at the bottom of Settings shows the id a group adds.
+  Bench: a stand-in source-host (`scripts/bench-source.py`) streamed
+  25 s of `bin1` frames; four probes answered, the sink took the PCM,
+  the queue resumed at the goodbye; about 4.5 KB of internal SRAM at
+  idle for the listener and the announcement.
 - A network stream is reached on a thread of its own. `take_custody`
   returns at once with the new `Status::Opening` ("connecting" on the
   face); the thread connects, buffers and probes (32 KB stack, in

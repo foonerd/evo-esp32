@@ -321,6 +321,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "org-evoframework-multiroom-receiver"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "org-evoframework-playback-sim"
 version = "0.1.0"
 dependencies = [
