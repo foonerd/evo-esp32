@@ -280,6 +280,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let volume = sink.volume();
+    let lead = sink.lead();
     let start_level = config.settings.volume.unwrap_or(VOLUME_PERCENT);
     volume.set(start_level, false);
     let started = Instant::now();
@@ -386,7 +387,6 @@ fn main() -> anyhow::Result<()> {
                                     .unwrap_or_default();
                                 match (current, status) {
                                     (Some(h), playback::Status::Playing) => {
-                                        sink::expect_gap();
                                         correct(
                                             &mut steward,
                                             h,
@@ -407,7 +407,6 @@ fn main() -> anyhow::Result<()> {
                                         if next >= tracks.len() {
                                             next = 0;
                                         }
-                                        sink::expect_gap();
                                         current = play_next(
                                             &mut steward,
                                             &tracks,
@@ -567,7 +566,6 @@ fn main() -> anyhow::Result<()> {
                                     if current.is_some() {
                                         skip(&mut steward, &mut current, t);
                                     } else {
-                                        sink::expect_gap();
                                         current = play_next(
                                             &mut steward,
                                             &tracks,
@@ -599,7 +597,10 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => log::debug!("touch: {e:?}"),
             }
         }
-        if painting || last_face.elapsed() >= FACE_TICK {
+        // Audio first: a paint stage can take 90 ms, and while the decoder
+        // is short of lead the loop decodes instead of painting.
+        let audio_short = lead.ms().is_some_and(|ms| ms < LOW_LEAD_MS);
+        if !audio_short && (painting || last_face.elapsed() >= FACE_TICK) {
             last_face = Instant::now();
             let output = output_state(&steward);
             if let Some(out) = &output {
@@ -1183,6 +1184,11 @@ impl Browse {
 /// What the settings page says about this player.
 /// The hostname when `name` is not set: the template's.
 const DEFAULT_NAME: &str = "evo-player";
+
+/// Below this much decoded audio in hand, the loop paints nothing and
+/// decodes: a track's start, a slow passage at 96 kHz. A paint stage is
+/// up to 90 ms, and the DMA ring stands behind the reservoir.
+const LOW_LEAD_MS: u32 = 120;
 
 /// A line of internal SRAM left at a point of the boot: what the DMA
 /// rings, the stacks and the Wi-Fi driver compete for.

@@ -252,6 +252,13 @@ pub mod playback {
     /// it takes what it has room for and says how much, and the decoder
     /// keeps the rest for its next tick. That is how a tick stays bounded
     /// and how the sink's clock, not the decoder's, paces playback.
+    ///
+    /// A sink may hold frames it has taken for a while before they are
+    /// heard (a board's sink runs the decoder ahead of its DMA so that a
+    /// busy moment elsewhere does not starve it). It says how many through
+    /// [`held`](Self::held), so the position the decoder publishes is the
+    /// one being heard; and it is told of a pause so the held frames wait
+    /// rather than play on.
     pub trait FrameSink {
         /// The stream's format from here on. Before the first write of a
         /// stream and again whenever it changes.
@@ -265,6 +272,15 @@ pub mod playback {
         /// Nothing more follows for this stream. The sink lets its tail
         /// out and may stop its clock.
         fn stop(&mut self);
+        /// The listener paused: what is held waits, silence goes out.
+        fn pause(&mut self) {}
+        /// The listener resumed: what is held plays on from where it was.
+        fn resume(&mut self) {}
+        /// Frames taken but not yet heard. A sink that plays what it takes
+        /// at once says zero.
+        fn held(&self) -> usize {
+            0
+        }
     }
 }
 

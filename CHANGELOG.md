@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The reservoir. `firmware/waveshare-esp32-c5-touch-lcd-28/src/sink.rs`:
+  the decoder runs ahead of the ear into a 600 ms ring of decoded audio
+  in PSRAM, and a feeder task at the top priority (above the Wi-Fi
+  driver) carries it, scaled by the volume, into a DMA ring now sized
+  only to outlast a stall of the chip (80 ms, 16 to 32 KB of SRAM in
+  place of 45 to 65). Anything that holds the core for hundreds of
+  milliseconds (the join's key exchange, a slow packet, a full repaint)
+  no longer reaches the ear: measured on the board with a 96 kHz FLAC
+  as the first track, the hinted join with its SAE exchange landing on
+  it and the first frame painting, no dry spell; the same through a
+  full 14 s search. A pause stops the feeder within the DMA ring (70
+  ms, was up to 230) and what is held waits; a seek drops what is held
+  and is not primed; a stream into an empty reservoir gathers 250 ms
+  first (the whole lead at the first start after boot, when no one is
+  waiting), one following another's tail starts at once; a rate change
+  drains the tail, then the feeder remakes the channel. The dry
+  detector moves to the feeder and counts only what the DMA ring could
+  not cover. The loop puts audio first: below 120 ms of lead it decodes
+  instead of painting, which at a 96 kHz boot lights the panel about a
+  second later. A decode tick is bounded to 50 ms of audio so the loop
+  reads the touch often. `sdk`: `FrameSink` gains `pause`, `resume` and
+  `held` with defaults; `plugins/org.evoframework.playback.symphonia`
+  pauses the sink and publishes the position being heard (what it
+  wrote, less what the sink holds). Internal SRAM free at 96 kHz with
+  the network up: 82 KB (was 58).
 - Wi-Fi. `firmware/waveshare-esp32-c5-touch-lcd-28`: with `wifi_ssid` in
   `evoconfig.txt` the player joins the network on a thread of its own
   (`net.rs`), through the companion's `WifiNet::join`: a network seen

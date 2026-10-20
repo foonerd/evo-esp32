@@ -73,8 +73,11 @@ const PAUSED_IDLE_MS: u32 = 250;
 /// How long to wait when the sink took nothing.
 const SINK_FULL_IDLE_MS: u32 = 20;
 /// The most audio one tick decodes, in milliseconds. Past this the
-/// warden yields even if the sink would take more.
-const TICK_BUDGET_MS: u64 = 200;
+/// warden yields even if the sink would take more: a sink that runs the
+/// decoder ahead of the ear would otherwise take whole ticks of the
+/// loop that also reads the touch and paints, and a tick is at least
+/// one packet (a FLAC block is up to 93 ms of audio at 44.1 kHz).
+const TICK_BUDGET_MS: u64 = 50;
 
 static STOCKS: [Stocking; 1] = [Stocking {
     rack: shelf::PLAYBACK,
@@ -114,12 +117,15 @@ struct InHand {
 }
 
 impl InHand {
-    fn position_ms(&self) -> u64 {
+    /// The position being heard: what the sink took, less what it still
+    /// holds.
+    fn position_ms(&self, held: usize) -> u64 {
         let rate = self.state.format.as_ref().map_or(0, |f| f.sample_rate);
         if rate == 0 {
             return self.base_ms;
         }
-        self.base_ms + self.frames_out * 1000 / u64::from(rate)
+        let heard = self.frames_out.saturating_sub(held as u64);
+        self.base_ms + heard * 1000 / u64::from(rate)
     }
 
     fn channels(&self) -> usize {
@@ -178,7 +184,7 @@ impl PlaybackSymphonia {
     fn publish_in_hand(&self, ctx: &mut dyn Context) {
         if let Some(h) = &self.in_hand {
             let mut state = h.state.clone();
-            state.position_ms = h.position_ms();
+            state.position_ms = h.position_ms(self.sink.held());
             self.publish(ctx, &state);
         }
     }
@@ -284,8 +290,14 @@ impl Warden for PlaybackSymphonia {
         let c: Correction = from_value(&correction.instruction)
             .map_err(|e| CustodyError(format!("correction: {e}")))?;
         match c {
-            Correction::Pause => h.state.status = Status::Paused,
-            Correction::Resume => h.state.status = Status::Playing,
+            Correction::Pause => {
+                h.state.status = Status::Paused;
+                self.sink.pause();
+            }
+            Correction::Resume => {
+                h.state.status = Status::Playing;
+                self.sink.resume();
+            }
             Correction::Seek { position_ms } => {
                 let cap = h.state.track.as_ref().and_then(|t| t.duration_ms);
                 let target = cap.map_or(position_ms, |d| position_ms.min(d));
