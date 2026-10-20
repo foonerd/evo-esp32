@@ -85,6 +85,10 @@ make a panel a player.
 
 Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop; `distributions/face` is that consumer, reading the fabric's state as a `View` and drawing it; the host writes it as a PNG, the firmware to the board's panel. Frames are not values either: the decoder writes to a `FrameSink` the distribution owns (`sdk::contract::audio::playback::FrameSink`), as evo-device-audio's decoder writes to the operating system's audio stack and not to the fabric; on a board that sink is the I2S peripheral, on the host a clock and a file. The companion is a dependency by commit until its first tag, and the dependency runs that way only. Next: the output plugin owning the codec's volume and mute instead of the null one; the panel as a consumer on the board's display; a DAC driver per HAT the fleet has.
 
+## Install
+
+No toolchain. The [latest release](https://github.com/foonerd/evo-esp32/releases/latest) carries the flashable image for the Waveshare ESP32-C5-Touch-LCD-2.8 and the card folder, with the install steps in its notes: one `esptool` command from Windows, macOS or Linux, one text file on a microSD card with your music. Every setting and where the controls are: [Configuration](https://github.com/foonerd/evo-esp32/wiki/Configuration) on the wiki. To build it yourself, see [Build](#build).
+
 ## Build
 
 The host workspace builds on stable Rust, pinned by `rust-toolchain.toml`.

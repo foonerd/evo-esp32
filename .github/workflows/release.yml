@@ -1,0 +1,170 @@
+# Publish a firmware release on a v* tag.
+#
+# Built in CI rather than on a workstation, so the published image is
+# reproducible from the tag. The toolchain steps are ci.yml's; the full
+# check runs first, then the image, then the release with the install
+# instructions as its body. The tag must equal the firmware crate's
+# version, so a release is never named one thing and built as another.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# A tag publishes the release and marks it the latest. A manual run
+# (workflow_dispatch) builds the same artefacts and files them as a
+# draft release, named by the version and the commit, for inspection:
+# publish it or delete it from the Releases page; no tag is spent.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FIRMWARE: firmware/waveshare-esp32-c5-touch-lcd-28
+  STEM: evo-esp32-waveshare-esp32-c5-touch-lcd-28
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Firmware version
+        id: version
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' "$FIRMWARE/Cargo.toml" | head -1)
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "firmware version $ver"
+      - name: Tag matches the firmware version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [ "$GITHUB_REF_NAME" != "v${{ steps.version.outputs.version }}" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the firmware version v${{ steps.version.outputs.version }}" >&2
+            exit 1
+          fi
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            cmake ninja-build ccache libudev-dev libffi-dev libssl-dev \
+            flex bison gperf python3 python3-pip python3-venv dfu-util libusb-1.0-0 shellcheck zip
+          pip install --break-system-packages esptool==5.6.0
+      - name: Rust toolchains
+        run: |
+          rustup toolchain install && rustup target add riscv32imac-unknown-none-elf
+          (cd "$FIRMWARE" && rustup toolchain install)
+          rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          workspaces: |
+            .
+            firmware/waveshare-esp32-c5-touch-lcd-28
+          cache-bin: false
+          save-if: false
+      - name: ESP-IDF cache
+        uses: actions/cache@v6
+        with:
+          path: firmware/waveshare-esp32-c5-touch-lcd-28/.embuild
+          key: embuild-${{ runner.os }}-${{ hashFiles('firmware/waveshare-esp32-c5-touch-lcd-28/.cargo/config.toml', 'firmware/waveshare-esp32-c5-touch-lcd-28/Cargo.lock') }}
+      - name: ldproxy
+        # The runner has no default toolchain; name the host's so cargo does
+        # not warn about the repository's toolchain file overriding one.
+        run: cargo +1.98.1 install --locked --version 0.3.5 ldproxy
+      - name: Check
+        run: scripts/check.sh
+      - name: Image
+        run: scripts/image.sh "$FIRMWARE"
+      - name: Gather
+        # What a user needs and nothing else: the one image, the card
+        # folder as a zip, their checksums. The parts stay in the CI
+        # artefact of ci.yml.
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          mkdir -p release
+          cp "dist/$STEM-$ver.bin" release/
+          ( cd sdcard && zip -qr "../release/evo-esp32-sdcard-$ver.zip" . )
+          ( cd release && sha256sum ./* > SHA256SUMS )
+          ls -l release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: release/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release
+          path: release
+      - name: Release notes
+        run: |
+          cat > notes.md <<EOF
+          evo-esp32 ${VERSION} for the Waveshare ESP32-C5-Touch-LCD-2.8: a standalone music player, the evo fabric on a microcontroller.
+
+          **Files.** Two matter: \`${STEM}-${VERSION}.bin\`, the firmware, and \`evo-esp32-sdcard-${VERSION}.zip\`, the card folder (the settings file and a list of radio stations). \`SHA256SUMS\` is for checking the download; the "Source code" archives are the code, not something to flash.
+
+          ## Install
+
+          1. **esptool 5** on your computer. With Python: \`pip install esptool\` (Windows: \`py -m pip install esptool\`). Without Python: the standalone \`esptool\` binary for Windows, macOS or Linux from [esptool's releases](https://github.com/espressif/esptool/releases).
+          2. **Plug the board in** over its USB-C port. It appears as a serial port with no driver to install: Windows \`COM3\` or similar (Device Manager, Ports), macOS \`/dev/cu.usbmodem…\`, Linux \`/dev/ttyACM0\` (your user in the \`dialout\` group, or \`sudo\`).
+          3. **Flash**, with your port in place of \`PORT\`:
+
+                 esptool --chip esp32c5 --port PORT write-flash 0x0 ${STEM}-${VERSION}.bin
+
+             esptool verifies the write by itself. If it cannot connect, hold the board's BOOT button while plugging it in, then run the command again.
+          4. **The card.** A FAT32 microSD card (32 GB or less works as sold). Unzip the card folder onto its root: \`evoconfig.txt\` (open it in any text editor and fill in your Wi-Fi name and password) and \`Radio/\`, the stations. Put your music in folders of your own anywhere on the card: FLAC, WAV and MP3, 44.1 to 96 kHz, with \`cover.jpg\` in an album's folder for its picture. Insert the card.
+          5. **Power on.** The music starts within a few seconds; the network joins behind it (its address is in Settings). Tap the Library tab for the card's folders and \`Radio\`; a tap on a station plays it. \`evostatus.txt\` on the card says what the player read and whether it joined.
+
+          Every setting, the Settings page, where the controls are in each style, and internet radio (your own \`.m3u\`/\`.pls\` files, station logos): [Configuration](https://github.com/${GITHUB_REPOSITORY}/wiki/Configuration). What the board can and cannot play: [Hardware](https://github.com/${GITHUB_REPOSITORY}/wiki/Hardware).
+
+          **Updating** is the same flash command with the new file. A full flash clears the device's stored network hint; the card keeps your settings, so leave it in.
+
+          ## Known in this release
+
+          - AAC streams are not decoded on this board (most Bauer stations); the BBC's live streams are HLS and not played. MP3, FLAC and Ogg Vorbis from the air play.
+          - 176.4 and 192 kHz files are beyond the chip and are greyed in the library.
+          - The on-board codec is mono through its speaker and headphone output; stereo is a DAC board on the header (see [Audio out](https://github.com/${GITHUB_REPOSITORY}/wiki/Audio-out)).
+          - No over-the-air update yet: every update is this flash.
+
+          The changes in full: [CHANGELOG](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md).
+
+          ---
+
+          ### Support this project
+
+          evo-esp32 is designed, built and maintained by one developer in his own time. If it has earned a place on your shelf, you can support its development:
+
+          - GitHub Sponsors: https://github.com/sponsors/foonerd
+          - Ko-fi: https://ko-fi.com/justanerd
+
+          evo-esp32 is provided as-is: the fabric and this firmware under the Business Source License 1.1 (converting to Apache 2.0 four years after each release), the SDK others implement against under Apache 2.0. Sponsorship is a thank-you, not a purchase: it buys no priority, no features and no support agreement.
+          EOF
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
+          body_path: notes.md
+          make_latest: true
+      - name: File a draft
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: v${{ env.VERSION }} (draft from ${{ github.sha }})
+          target_commitish: ${{ github.sha }}
+          draft: true
+          files: release/*
+          fail_on_unmatched_files: true
+          body_path: notes.md

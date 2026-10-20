@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-20
+
+The first release: the player on the Waveshare ESP32-C5-Touch-LCD-2.8, flashable from the GitHub release, built there from the tag (`.github/workflows/release.yml`; a manual run files a draft). `.github/FUNDING.yml`.
+
 - Radio, from the second bench. The ticker is gone: a tap on the text
   block of Now Playing raises a details sheet, a card over the middle
   with the whole title, artist, station and format wrapped and centred;
