@@ -4,6 +4,10 @@
 //! evo-esp32 on ESP-IDF: what every Espressif firmware distribution
 //! shares.
 //!
+//! [`aac`]: Espressif's AAC decoder, AAC-Plus included, behind the same
+//! registry; Symphonia's own is built on the stack and overflows the
+//! board's decoding task, and decodes the core alone.
+//!
 //! [`mp3`]: Espressif's fixed-point MP3 decoder behind Symphonia's codec
 //! registry. On a chip without an FPU (the ESP32-C5) Symphonia's own,
 //! floating-point, decoder reaches about half of real time; Espressif's
@@ -22,6 +26,7 @@
 //! and certificate bundle, as the playback plugin's [`StreamOpener`]
 //! (`evo_esp32_sdk::contract::audio::playback::StreamOpener`).
 
+pub mod aac;
 pub mod http;
 pub mod jpeg;
 pub mod mp3;

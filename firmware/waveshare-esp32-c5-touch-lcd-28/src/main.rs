@@ -975,6 +975,7 @@ fn main() -> anyhow::Result<()> {
 fn codecs() -> CodecRegistry {
     let mut registry = org_evoframework_playback_symphonia::default_codecs();
     evo_esp32_platform_esp_idf::mp3::register(&mut registry);
+    evo_esp32_platform_esp_idf::aac::register(&mut registry);
     registry
 }
 
@@ -1337,18 +1338,6 @@ fn is_stream(track: &Track) -> bool {
     track.uri.starts_with("http://") || track.uri.starts_with("https://")
 }
 
-/// A stream whose address says it is AAC, which this board does not
-/// decode (the decoder wants more stack than the main task has; see the
-/// README). One whose address says nothing is tried.
-fn aac_stream(track: &Track) -> bool {
-    is_stream(track)
-        && track
-            .uri
-            .split(['?', '#'])
-            .next()
-            .is_some_and(|path| path.to_ascii_lowercase().ends_with(".aac"))
-}
-
 /// Pause, resume or seek the track in custody.
 fn correct(
     steward: &mut Steward,
@@ -1506,7 +1495,7 @@ impl Browse {
                         name: t.title.clone(),
                         folder: false,
                         uri: Some(t.uri.clone()),
-                        playable: within_ceiling(&t) && !aac_stream(&t),
+                        playable: within_ceiling(&t),
                     });
                     self.tracks.push(t);
                 }
@@ -1548,13 +1537,19 @@ const LOW_LEAD_MS: u32 = 120;
 /// rings, the stacks and the Wi-Fi driver compete for.
 fn memory(when: &str) {
     // SAFETY: plain getters with no preconditions.
-    let (free, largest) = unsafe {
+    let (free, largest, psram, psram_largest) = unsafe {
         (
             sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL),
             sys::heap_caps_get_largest_free_block(sys::MALLOC_CAP_INTERNAL),
+            sys::heap_caps_get_free_size(sys::MALLOC_CAP_SPIRAM),
+            sys::heap_caps_get_largest_free_block(sys::MALLOC_CAP_SPIRAM),
         )
     };
-    info!("memory: internal {free} B free, largest block {largest} B, {when}");
+    info!(
+        "memory: internal {free} B free, largest block {largest} B; PSRAM {} KB free, largest {} KB, {when}",
+        psram / 1024,
+        psram_largest / 1024
+    );
 }
 
 /// What the Wi-Fi row says.

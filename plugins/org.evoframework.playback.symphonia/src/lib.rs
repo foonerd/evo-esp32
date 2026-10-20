@@ -152,10 +152,24 @@ impl InHand {
 pub use symphonia::core::codecs::registry::CodecRegistry;
 
 /// The codecs Symphonia ships, as this crate enables them: the registry a
-/// distribution starts from before preferring one of its own.
+/// distribution starts from before preferring one of its own. Symphonia's
+/// AAC decoder comes only with the `aac-symphonia` feature: `aac` alone
+/// brings the ADTS demuxer and the stream's refusal logic, for a
+/// distribution that decodes AAC with a decoder of its own.
 pub fn default_codecs() -> CodecRegistry {
     let mut registry = CodecRegistry::new();
-    symphonia::default::register_enabled_codecs(&mut registry);
+    #[cfg(feature = "flac")]
+    registry
+        .register_audio_decoder::<symphonia::default::codecs::FlacDecoder>();
+    #[cfg(feature = "mp3")]
+    registry.register_audio_decoder::<symphonia::default::codecs::MpaDecoder>();
+    #[cfg(feature = "pcm")]
+    registry.register_audio_decoder::<symphonia::default::codecs::PcmDecoder>();
+    #[cfg(feature = "vorbis")]
+    registry
+        .register_audio_decoder::<symphonia::default::codecs::VorbisDecoder>();
+    #[cfg(feature = "aac-symphonia")]
+    registry.register_audio_decoder::<symphonia::default::codecs::AacDecoder>();
     registry
 }
 
@@ -426,7 +440,27 @@ impl Warden for PlaybackSymphonia {
                 break Progress::Idle(BUFFERING_IDLE_MS);
             }
             match next_frames(&mut h.stream, &mut h.pending) {
-                Ok(Some(frames)) => {
+                Ok(Some((frames, rate, channels))) => {
+                    // The decoder has the last word on the format: when
+                    // it differs from what the sink was started with,
+                    // the sink is started again and the state says so.
+                    let differs = h.state.format.as_ref().is_some_and(|f| {
+                        f.sample_rate != rate || f.channels != channels
+                    });
+                    if differs {
+                        let played = h.position_ms(0);
+                        if let Some(f) = h.state.format.as_mut() {
+                            log::info!(
+                                "format: the decoder gives {rate} Hz {channels} ch, the container said {} Hz {} ch; following the decoder",
+                                f.sample_rate, f.channels
+                            );
+                            f.sample_rate = rate;
+                            f.channels = channels;
+                            self.sink.start(f);
+                        }
+                        h.base_ms = played;
+                        h.frames_out = 0;
+                    }
                     decoded_frames += frames;
                     h.taken = 0;
                     if h.skip > 0 {
@@ -690,10 +724,14 @@ fn seek(
 /// Decode the next packet of the track into `out` as interleaved i16.
 /// `Ok(Some(frames))` for frames appended, `Ok(None)` at the end of the
 /// stream; malformed packets are skipped, not errors.
+/// The next packet's frames into `out`: how many, and the rate and
+/// channel count they came out at, which may differ from the
+/// container's word (an AAC-Plus stream decodes at twice the header's
+/// rate; an MP3's first frame may correct the probe).
 fn next_frames(
     stream: &mut Stream,
     out: &mut Vec<i16>,
-) -> Result<Option<u64>, SymphoniaError> {
+) -> Result<Option<(u64, u32, u8)>, SymphoniaError> {
     loop {
         let packet = match stream.reader.next_packet() {
             Ok(Some(p)) => p,
@@ -711,8 +749,11 @@ fn next_frames(
         match stream.decoder.decode(&packet) {
             Ok(buf) => {
                 let frames = buf.frames() as u64;
+                let spec = buf.spec();
+                let rate = spec.rate();
+                let channels = spec.channels().count().clamp(1, 255) as u8;
                 buf.copy_to_vec_interleaved::<i16>(out);
-                return Ok(Some(frames));
+                return Ok(Some((frames, rate, channels)));
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(SymphoniaError::IoError(_)) => continue,

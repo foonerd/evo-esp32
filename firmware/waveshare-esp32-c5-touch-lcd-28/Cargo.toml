@@ -36,8 +36,9 @@ evo-esp32-sdk = { path = "../../sdk" }
 evo-esp32-steward = { path = "../../steward" }
 evo-esp32-catalogue = { path = "../../catalogue" }
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
-# Without AAC: its decoder overflows the main task's stack (see README).
-org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia", default-features = false }
+# AAC's demuxer, not Symphonia's AAC decoder (it overflows the main
+# task's stack); Espressif's decodes, registered by the platform crate.
+org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia", default-features = false, features = ["flac", "mp3", "pcm", "vorbis", "aac"] }
 org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
 

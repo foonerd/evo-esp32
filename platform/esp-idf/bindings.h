@@ -6,3 +6,4 @@
 #include "esp_audio_types.h"
 #include "esp_audio_dec.h"
 #include "esp_mp3_dec.h"
+#include "esp_aac_dec.h"

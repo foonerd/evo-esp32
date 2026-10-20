@@ -17,15 +17,21 @@ evo-esp32-sdk = { path = "../../sdk" }
 # Pure Rust, MPL-2.0 (file-level copyleft; linking is unaffected). No SIMD
 # feature: that pulls rustfft, and the target has no SIMD. Codecs are the
 # ones a card of music holds.
-symphonia = { version = "0.6", default-features = false, features = ["flac", "id3v1", "id3v2", "mp3", "pcm", "wav", "ogg", "vorbis"] }
+symphonia = { version = "0.6", default-features = false, features = ["id3v1", "id3v2", "wav", "ogg"] }
 log = "0.4"
 
 [features]
-default = ["aac"]
-# AAC-LC. Symphonia's decoder is built on the stack before it is boxed,
-# tens of kilobytes of it; a distribution whose decoding task has less
-# leaves this out and refuses AAC streams instead of overflowing.
+default = ["flac", "mp3", "pcm", "vorbis", "aac", "aac-symphonia"]
+flac = ["symphonia/flac"]
+mp3 = ["symphonia/mp3"]
+pcm = ["symphonia/pcm"]
+vorbis = ["symphonia/vorbis"]
+# The ADTS demuxer and AAC's place in the stream logic; the decoder is
+# `aac-symphonia`, or one the distribution registers (Espressif's on
+# the board: Symphonia's is built on the stack before it is boxed, tens
+# of kilobytes of it, and decodes the AAC-LC core alone).
 aac = ["symphonia/aac"]
+aac-symphonia = ["aac"]
 
 [dev-dependencies]
 evo-esp32-steward = { path = "../../steward" }
