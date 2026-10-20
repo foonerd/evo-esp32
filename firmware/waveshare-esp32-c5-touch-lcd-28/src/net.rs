@@ -201,6 +201,26 @@ fn work(
         "net: driver started; internal heap {before} B before, {} B after",
         free_internal()
     );
+    // A mains-powered player: the modem stays awake, so a stream's
+    // packets are not held for the next beacon (with the driver's
+    // default, a round trip wandered to two seconds). Read back, since
+    // the driver may say yes and keep its own counsel.
+    // SAFETY: plain setter and getter on the started driver.
+    unsafe {
+        let set = sys::esp_wifi_set_ps(sys::wifi_ps_type_t_WIFI_PS_NONE);
+        let mut now = sys::wifi_ps_type_t_WIFI_PS_MIN_MODEM;
+        let got = sys::esp_wifi_get_ps(&mut now);
+        if set == sys::ESP_OK
+            && got == sys::ESP_OK
+            && now == sys::wifi_ps_type_t_WIFI_PS_NONE
+        {
+            info!("net: power save off");
+        } else {
+            warn!(
+                "net: power save stays on (set {set}, get {got}, mode {now})"
+            );
+        }
+    }
     loop {
         match net.join(&mut store, ssid, password) {
             Ok(()) => {

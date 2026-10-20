@@ -32,7 +32,7 @@ CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=n
 CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
 # The block-ack window may not exceed twice the static buffers.
 CONFIG_ESP_WIFI_RX_BA_WIN=6
 # A player receives; it sends acknowledgements and requests. With the
@@ -42,6 +42,16 @@ CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM=6
 CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
 CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=3
+
+# A stream over TCP gets at most one receive window per round trip. The
+# default window of four segments (5.7 KB) caps a Wi-Fi link whose round
+# trip wanders at a few tens of kilobytes a second, under a FLAC
+# multiroom stream; 32 KB lets the sender keep a quarter second of such
+# a stream in flight. The segments wait in PSRAM (the dynamic RX buffers
+# above, enough for a full window), the socket's mailbox holds a
+# window's worth of them.
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 
 # TLS for https:// streams: mbedTLS takes tens of kilobytes for a
 # session (its 16 KB record buffers above all); in PSRAM, where the

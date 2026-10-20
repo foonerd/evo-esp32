@@ -53,18 +53,25 @@ const LEAD_MS: u32 = 600;
 /// The highest rate the chip decodes in time; the reservoir is sized
 /// for it once and used up to [`LEAD_MS`] at the rate in hand.
 const CEILING_HZ: u32 = 96_000;
-/// Frames per DMA buffer, the most the driver allows at four bytes a
-/// frame, and the buffer count: the DMA is in internal SRAM and only
-/// has to outlast a stall of the chip (a flash erase is split into
-/// 20 ms pieces), since the feeder refills it within microseconds.
+/// Frames per DMA buffer and the buffer count: the DMA is in internal
+/// SRAM and only has to outlast a stall of the chip (a flash erase is
+/// split into 20 ms pieces), since the feeder refills it within
+/// microseconds. The count is for [`DMA_MS`] at [`CEILING_HZ`] and the
+/// same at every rate: a reopen at a higher rate then never asks
+/// internal SRAM for more than the ring it just gave back, whatever
+/// grew meanwhile. A receiver keeping time with other rooms asks the
+/// sink what it holds, and the ring's content is known to a buffer
+/// after a starvation (21 ms at 48 kHz); shorter buffers would tighten
+/// that but cost the core at 96 kHz, where the decoder has none to
+/// spare (measured: 480-frame buffers starve a 96 kHz FLAC every few
+/// hundred milliseconds).
 const FRAMES_PER_BUFFER: u32 = 1023;
 const DMA_MS: u32 = 80;
-const MIN_BUFFERS: u32 = 4;
-const MAX_BUFFERS: u32 = 8;
+const BUFFERS: u32 = (CEILING_HZ * DMA_MS / 1000).div_ceil(FRAMES_PER_BUFFER);
 /// Bytes per stereo 16-bit frame on the wire.
 const FRAME_BYTES: usize = 4;
-/// What the feeder takes from the reservoir at a time: 4 KB is one DMA
-/// buffer, and sits in internal SRAM by the allocator's rule.
+/// What the feeder takes from the reservoir at a time: 4 KB, a few DMA
+/// buffers' worth, in internal SRAM by the allocator's rule.
 const CHUNK: usize = 4096;
 /// The feeder's stack, internal: small, and it never touches flash.
 const FEEDER_STACK: usize = 4 * 1024;
@@ -85,13 +92,6 @@ const PRIME_MS: u32 = 250;
 /// worst starvation in milliseconds; read and cleared by [`report_dry`].
 static DRY_COUNT: AtomicU32 = AtomicU32::new(0);
 static DRY_WORST_MS: AtomicU32 = AtomicU32::new(0);
-
-/// How many DMA buffers hold [`DMA_MS`] at `rate`.
-fn buffers_for(rate: u32) -> u32 {
-    let frames = u64::from(rate) * u64::from(DMA_MS) / 1000;
-    let n = frames.div_ceil(u64::from(FRAMES_PER_BUFFER)) as u32;
-    n.clamp(MIN_BUFFERS, MAX_BUFFERS)
-}
 
 /// The lead a ring of `buffers` holds at `rate`, in milliseconds. The
 /// driver hands the writer each buffer as it finishes, so the ring plays
@@ -174,6 +174,52 @@ struct Reservoir {
     rate: AtomicU32,
     /// A stream has started since boot.
     started: AtomicBool,
+    /// What the DMA ring holds, by account.
+    dma: Mutex<DmaModel>,
+}
+
+/// The DMA ring's content, kept by account since the driver does not
+/// say where the DMA is: frames handed to it, less frames it has
+/// played, which run at the rate from an anchor. The anchor is the feed
+/// that found the ring empty: what that feed added began to play then,
+/// within a buffer. Between starvations the account is exact, the
+/// DMA's clock and the chip's being one crystal.
+#[derive(Debug, Clone, Copy)]
+struct DmaModel {
+    /// Frames handed to the DMA since the channel opened.
+    fed: u64,
+    /// Frames handed to the DMA before the anchor.
+    anchor_fed: u64,
+    /// When the frames after `anchor_fed` began to play.
+    anchor: Instant,
+}
+
+impl DmaModel {
+    fn new() -> Self {
+        Self {
+            fed: 0,
+            anchor_fed: 0,
+            anchor: Instant::now(),
+        }
+    }
+
+    /// Frames the DMA still holds at `rate`.
+    fn held(&self, rate: u32) -> usize {
+        let played = self.anchor_fed
+            + self.anchor.elapsed().as_micros() as u64 * u64::from(rate)
+                / 1_000_000;
+        (self.fed.saturating_sub(played) as usize)
+            .min((BUFFERS * FRAMES_PER_BUFFER) as usize)
+    }
+
+    /// `frames` were just handed over, at `rate`.
+    fn fed(&mut self, frames: usize, rate: u32) {
+        if self.held(rate) == 0 {
+            self.anchor_fed = self.fed;
+            self.anchor = Instant::now();
+        }
+        self.fed += frames as u64;
+    }
 }
 
 // SAFETY: one writer and one reader, each touching only the bytes the
@@ -195,7 +241,14 @@ impl Reservoir {
             prime: AtomicUsize::new(0),
             rate: AtomicU32::new(0),
             started: AtomicBool::new(false),
+            dma: Mutex::new(DmaModel::new()),
         }
+    }
+
+    /// Frames the DMA ring holds, by account.
+    fn in_dma(&self) -> usize {
+        let rate = self.rate.load(Ordering::Relaxed);
+        self.dma.lock().map_or(0, |m| m.held(rate))
     }
 
     fn readable(&self) -> usize {
@@ -420,13 +473,12 @@ fn open(
         + 'static,
     rate: u32,
 ) -> Result<(I2sDriver<'static, I2sTx>, u32), sys::EspError> {
-    let buffers = buffers_for(rate);
-    let lead = lead_ms(rate, buffers);
-    info!("i2s: {rate} Hz, {buffers} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead");
+    let lead = lead_ms(rate, BUFFERS);
+    info!("i2s: {rate} Hz, {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead");
     let config = StdConfig::new(
         ChannelConfig::default()
             .auto_clear(true)
-            .dma_buffer_count(buffers)
+            .dma_buffer_count(BUFFERS)
             .frames_per_buffer(FRAMES_PER_BUFFER),
         StdClkConfig::from_sample_rate_hz(rate),
         StdSlotConfig::philips_slot_default(
@@ -479,6 +531,9 @@ fn feed(
                     // No channel is no player; say so and stop.
                     Err(e) => panic!("i2s: could not reopen at {rate} Hz: {e}"),
                 }
+                if let Ok(mut m) = reservoir.dma.lock() {
+                    *m = DmaModel::new();
+                }
                 opened.fetch_add(1, Ordering::Release);
                 continue;
             }
@@ -526,7 +581,13 @@ fn feed(
         let mut offset = 0;
         while offset < n {
             match i2s.write(&chunk[offset..n], 200) {
-                Ok(written) => offset += written,
+                Ok(written) => {
+                    offset += written;
+                    if let Ok(mut m) = reservoir.dma.lock() {
+                        let rate = reservoir.rate.load(Ordering::Relaxed);
+                        m.fed(written / FRAME_BYTES, rate);
+                    }
+                }
                 Err(e) if e.code() == sys::ESP_ERR_TIMEOUT => {}
                 Err(e) => {
                     warn!("i2s: write: {e}");
@@ -577,7 +638,7 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
             }
             self.rate = format.sample_rate;
             self.reservoir.rate.store(self.rate, Ordering::Relaxed);
-            self.dma_lead_ms = lead_ms(self.rate, buffers_for(self.rate));
+            self.dma_lead_ms = lead_ms(self.rate, BUFFERS);
             self.reservoir
                 .dma_lead_ms
                 .store(self.dma_lead_ms, Ordering::Relaxed);
@@ -671,7 +732,7 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
     }
 
     fn held(&self) -> usize {
-        self.reservoir.readable() / FRAME_BYTES
+        self.reservoir.readable() / FRAME_BYTES + self.reservoir.in_dma()
     }
 }
 
