@@ -62,6 +62,8 @@ pub mod shelf {
     pub const DECODE: &str = "decode";
     /// `playback/receive`.
     pub const RECEIVE: &str = "receive";
+    /// `playback/snapcast`.
+    pub const SNAPCAST: &str = "snapcast";
     /// `delivery/output`.
     pub const OUTPUT: &str = "output";
     /// `metadata/tags`.
@@ -87,6 +89,10 @@ pub mod shelf {
     /// `playback/receive` as a reference.
     pub fn playback_receive() -> ShelfRef {
         ShelfRef::new(PLAYBACK, RECEIVE)
+    }
+    /// `playback/snapcast` as a reference.
+    pub fn playback_snapcast() -> ShelfRef {
+        ShelfRef::new(PLAYBACK, SNAPCAST)
     }
     /// `delivery/output` as a reference.
     pub fn delivery_output() -> ShelfRef {
@@ -239,15 +245,16 @@ pub mod playback {
         pub start_ms: u64,
     }
 
-    /// The instruction of an assignment on `playback/receive`: play the
-    /// frames an Evo source-host on the network is sending this device
-    /// as a member of `group`, until it stops. The warden on that shelf
-    /// has the connection already; the custody is the sink's hand-over.
+    /// The instruction of an assignment on `playback/receive` or
+    /// `playback/snapcast`: play what a source on the network is sending
+    /// this device as a member of `group` (an Evo group; a Snapcast
+    /// stream), until it stops. The warden on that shelf has the
+    /// connection already; the custody is the sink's hand-over.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct Receive {
-        /// The group the frames belong to, as the source-host names it.
+        /// The group or stream the frames belong to, as the source names it.
         pub group: String,
-        /// The source-host's device id.
+        /// The source: an Evo source-host's device id, a Snapcast server's address.
         pub leader: String,
     }
 
