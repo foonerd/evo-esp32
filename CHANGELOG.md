@@ -6,6 +6,51 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The device as a client of a Snapcast server.
+  `plugins/org.evoframework.snapcast.receiver` stocks the new
+  `playback/snapcast` shelf: the binary protocol (`wire`), FLAC frames
+  split and decoded one by one through Symphonia (`flac`), a thread
+  that dials the server named, says hello as the device's MAC and
+  hostname, probes the clock ten times quickly and then every second
+  (median of the last fifteen), takes the codec header and the chunks
+  into one ring in PSRAM sized for the server's buffer, and dials again
+  with a lengthening pause when the server goes. The warden plays each
+  chunk at the server's time against what the sink holds, pads the
+  server's silences, drops or doubles a frame in fifty while the clocks
+  lean, trims a chunk well behind, drops one 200 ms late, and applies
+  the server's volume (squared) and mute. The firmware names the server
+  from the card's new `snapserver` key or finds one by mDNS
+  (`_snapcast._tcp`, asked again every thirty seconds until one answers,
+  and again if a found one goes); the hand-over of the sink now serves
+  two network sources (the Evo room first), the face says *Snapcast*,
+  the heartbeat reports the session. `platform/esp-idf::mdns` gains a
+  polled `Search`. The SDK gains the shelf.
+- The sink's DMA ring is sized once for 96 kHz and the same at every
+  rate (8 buffers of 1023 frames), so a reopen at a higher rate never
+  asks internal SRAM for more than it gave back: the card's 96 kHz
+  track resuming after a stream no longer fails with `ESP_ERR_NO_MEM`
+  and restarts the player. The sink keeps account of what the DMA
+  holds (frames handed over, less frames played at the rate from the
+  feed that found the ring empty) and reports it with the reservoir in
+  `held()`, so a receiver's schedule includes the ring; the account is
+  good to one buffer, 21 ms at 48 kHz, from the start of a stream.
+- Wi-Fi power save is off from the moment the driver starts (a
+  mains-powered player; with it on, a probe's round trip wandered to
+  1.9 s and a ping averaged 290 ms; off, a ping is 2 to 9 ms), and the
+  TCP receive window is 32 KB (was four segments, 5.7 KB, which capped
+  a stream at a few tens of kilobytes a second under such round trips);
+  the segments wait in PSRAM.
+- The network and the hand-over of the sink run on their own cadence,
+  no longer inside the paint block a decoder short of lead skips: a
+  96 kHz track at the core's limit no longer blinds the player to the
+  network.
+- Both receivers read the last frame's stamp before the clock when
+  judging silence; the other order, with the client's thread storing a
+  newer stamp between the two, read as a wrap and ended a custody with
+  "stopped sending" while chunks flowed.
+- The arrival stamp on a Snapcast message is taken once its header is
+  in, not before the wait for it.
+
 ## [0.1.1] - 2026-10-20
 
 - The device as a room of an Evo multiroom group.
