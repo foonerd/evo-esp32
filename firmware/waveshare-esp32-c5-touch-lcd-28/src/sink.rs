@@ -349,6 +349,10 @@ impl<F: RateFollower> I2sSink<F> {
             let reservoir = reservoir.clone();
             let volume = volume.clone();
             let opened = opened.clone();
+            // The caller's configuration comes back after: the main task
+            // gives every thread spawned from it PSRAM stacks, and the
+            // plugins' threads spawn from it later.
+            let before = ThreadSpawnConfiguration::get();
             ThreadSpawnConfiguration {
                 name: Some(c"feeder"),
                 stack_size: FEEDER_STACK,
@@ -361,7 +365,7 @@ impl<F: RateFollower> I2sSink<F> {
                 .name("feeder".into())
                 .stack_size(FEEDER_STACK)
                 .spawn(move || feed(i2s, &reservoir, &volume, &inbox, &opened));
-            ThreadSpawnConfiguration::default().set().map_err(fail)?;
+            before.unwrap_or_default().set().map_err(fail)?;
             spawned.map_err(fail)?;
         }
         Ok(Self {
