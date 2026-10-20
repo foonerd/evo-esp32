@@ -310,7 +310,8 @@ fn decode(bytes: &[u8], size: u32, under: u16) -> Result<Image, String> {
         [0xff, 0xd8, ..] => {
             jpeg::decode(bytes, size).map_err(|e| e.to_string())
         }
-        [0x89, b'P', b'N', b'G', ..] => png::decode(bytes, under),
+        // Shrunk to twice the square as it decodes; `fit` takes it the rest.
+        [0x89, b'P', b'N', b'G', ..] => png::decode(bytes, under, size * 2),
         _ => Err("neither a JPEG nor a PNG".to_string()),
     }
 }

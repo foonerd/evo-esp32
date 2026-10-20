@@ -49,6 +49,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and next move in to make room in portrait.
 ## [0.1.0] - 2026-10-20
 
+- PNG logos decoded a row at a time and shrunk on the way to twice the
+  art square (`png::decode(png, under, target)`): a 981-pixel logo had
+  cost six megabytes of PSRAM and eight seconds decoded whole. An
+  interlaced PNG is decoded whole up to 512 a side and refused beyond.
+  The heartbeat's companion `memory:` lines report PSRAM free and
+  largest block as well as internal.
+
 The first release: the player on the Waveshare ESP32-C5-Touch-LCD-2.8, flashable from the GitHub release, built there from the tag (`.github/workflows/release.yml`; a manual run files a draft). `.github/FUNDING.yml`.
 
 - Radio, from the second bench. The ticker is gone: a tap on the text
