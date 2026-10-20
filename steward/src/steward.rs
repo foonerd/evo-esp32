@@ -310,11 +310,17 @@ impl Steward {
             .position(|c| c.handle == handle)
             .ok_or(DispatchError::UnknownCustody(handle))?;
         let index = self.custodies.remove(pos).plugin;
-        self.release_on(index, handle, now);
+        self.release_on(index, handle, now, None);
         Ok(())
     }
 
-    fn release_on(&mut self, index: usize, handle: CustodyHandle, now: Ticks) {
+    fn release_on(
+        &mut self,
+        index: usize,
+        handle: CustodyHandle,
+        now: Ticks,
+        reason: Option<String>,
+    ) {
         {
             let mut ctx = Context::new(&mut self.tables, index, now);
             if let Slot::Warden(w) = &mut self.plugins[index].slot {
@@ -326,6 +332,7 @@ impl Steward {
             None,
             HappeningKind::CustodyReleased {
                 warden: String::from(self.plugins[index].description.name),
+                reason,
             },
         );
     }
@@ -361,7 +368,11 @@ impl Steward {
                 }
                 Progress::Done => {
                     self.custodies.remove(i);
-                    self.release_on(index, handle, now);
+                    self.release_on(index, handle, now, None);
+                }
+                Progress::Failed(reason) => {
+                    self.custodies.remove(i);
+                    self.release_on(index, handle, now, Some(reason));
                 }
             }
         }
@@ -435,7 +446,7 @@ impl Steward {
     /// Release every custody and unload every plugin, newest first.
     pub fn shutdown(&mut self, now: Ticks) {
         while let Some(c) = self.custodies.pop() {
-            self.release_on(c.plugin, c.handle, now);
+            self.release_on(c.plugin, c.handle, now, None);
         }
         for index in (0..self.plugins.len()).rev() {
             let mut ctx = Context::new(&mut self.tables, index, now);

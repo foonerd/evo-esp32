@@ -60,6 +60,9 @@ pub enum HappeningKind {
     CustodyReleased {
         /// The warden's name.
         warden: String,
+        /// Why, when the work failed rather than finished or was let go.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 

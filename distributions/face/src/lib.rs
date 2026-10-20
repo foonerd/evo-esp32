@@ -55,6 +55,8 @@ pub enum Status {
     /// Nothing in custody.
     #[default]
     Stopped,
+    /// Being reached; nothing out yet.
+    Opening,
     /// Frames are going out.
     Playing,
     /// Held.
@@ -114,6 +116,7 @@ impl View {
         View {
             status: match pb.status {
                 playback::Status::Stopped => Status::Stopped,
+                playback::Status::Opening => Status::Opening,
                 playback::Status::Playing => Status::Playing,
                 playback::Status::Paused => Status::Paused,
             },
@@ -180,6 +183,9 @@ impl View {
 
     /// "FLAC 96 kHz 16 bit", or empty before the format is known.
     pub fn format_line(&self) -> String {
+        if self.status == Status::Opening {
+            return "connecting".to_string();
+        }
         if self.sample_rate == 0 {
             return String::new();
         }

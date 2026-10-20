@@ -49,12 +49,15 @@ impl core::fmt::Display for CustodyError {
 }
 
 /// What a tick of work came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     /// Still working; tick again.
     Working,
     /// The assignment is complete; the steward may release custody.
     Done,
+    /// The assignment cannot go on, for this reason; the steward
+    /// releases custody and the reason rides on the happening.
+    Failed(String),
     /// The warden wants ticking again no sooner than this many milliseconds.
     Idle(u32),
 }

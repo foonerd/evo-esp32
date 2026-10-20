@@ -35,11 +35,20 @@
 //! this plugin exists to make, with the panel and Wi-Fi up beside it.
 //! One custody at a time: a second `Play` while one is in hand is
 //! refused, as a single output carries one stream.
+//!
+//! A network stream is reached on a thread of its own: `take_custody`
+//! returns at once with the state `Opening`, the thread connects,
+//! buffers and probes, and the tick that finds it done starts the sink
+//! and says `Playing`; one that finds it failed ends the custody with
+//! the reason. The loop that also reads the touch and paints is never
+//! held for a connect. A file opens on the spot: it is a read away.
 #![forbid(unsafe_code)]
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
+use std::thread;
 
 use evo_esp32_sdk::context::Context;
 use evo_esp32_sdk::contract::audio::playback::{
@@ -83,6 +92,12 @@ const PAUSED_IDLE_MS: u32 = 250;
 const SINK_FULL_IDLE_MS: u32 = 20;
 /// How long to wait for a network stream's buffer to fill.
 const BUFFERING_IDLE_MS: u32 = 50;
+/// How long between looks at a stream still being reached.
+const OPENING_IDLE_MS: u32 = 50;
+/// The stack of the thread that reaches a network stream: the TLS
+/// handshake runs on it, and the probe. Placed by the distribution
+/// (PSRAM on the board).
+const OPEN_STACK: usize = 32 * 1024;
 /// The most audio one tick decodes, in milliseconds. Past this the
 /// warden yields even if the sink would take more: a sink that runs the
 /// decoder ahead of the ear would otherwise take whole ticks of the
@@ -108,11 +123,22 @@ struct Stream {
     live: Option<Live>,
 }
 
+/// A network stream being reached on its thread: what the thread will
+/// send, and what the custody asked for meanwhile.
+struct Opening {
+    result: Receiver<Result<(Stream, Format), CustodyError>>,
+    start_ms: u64,
+    /// Paused before the stream arrived: it starts held.
+    hold: bool,
+}
+
 /// The custody in hand.
 struct InHand {
     handle: CustodyHandle,
     state: State,
-    stream: Stream,
+    /// The open stream; none while `opening`.
+    stream: Option<Stream>,
+    opening: Option<Opening>,
     /// Interleaved samples decoded but not yet taken by the sink.
     pending: Vec<i16>,
     /// How far into `pending` the sink has got, in samples.
@@ -139,13 +165,6 @@ impl InHand {
         }
         let heard = self.frames_out.saturating_sub(held as u64);
         self.base_ms + heard * 1000 / u64::from(rate)
-    }
-
-    fn channels(&self) -> usize {
-        self.state
-            .format
-            .as_ref()
-            .map_or(1, |f| usize::from(f.channels).max(1))
     }
 }
 
@@ -176,7 +195,7 @@ pub fn default_codecs() -> CodecRegistry {
 /// The Symphonia playback warden.
 pub struct PlaybackSymphonia {
     sink: Box<dyn FrameSink>,
-    codecs: CodecRegistry,
+    codecs: Arc<CodecRegistry>,
     /// How `http://` and `https://` tracks are reached; none, and they
     /// are refused.
     opener: Option<Arc<dyn StreamOpener>>,
@@ -199,7 +218,7 @@ impl PlaybackSymphonia {
     ) -> Self {
         Self {
             sink,
-            codecs,
+            codecs: Arc::new(codecs),
             opener: None,
             subject: None,
             in_hand: None,
@@ -273,58 +292,67 @@ impl Warden for PlaybackSymphonia {
         }
         let play: Play = from_value(&assignment.instruction)
             .map_err(|e| CustodyError(format!("instruction: {e}")))?;
-        let mut track = play.track;
-        let (mut stream, format) =
-            open(&track.uri, &self.codecs, self.opener.as_ref())?;
-        if track.duration_ms.is_none() {
-            track.duration_ms = duration_ms(&stream);
-        }
-        let tags = tags(&mut stream);
-        if let Some(title) = tags.title {
-            track.title = title;
-        }
-        if track.artist.is_none() {
-            track.artist = tags.artist;
-        }
-        if track.album.is_none() {
-            track.album = tags.album;
-        }
-        if let Some(live) = &stream.live {
-            // A station: its name is the album line, under the title,
-            // which the stream replaces with what is playing. The name
-            // the playlist gave wins over the server's (`icy-name` tends
-            // to carry the bitrate); a station the playlist left to its
-            // host takes the server's.
-            let curated = track.title != host_of(&track.uri);
-            track.album = Some(match &live.info.name {
-                Some(name) if !curated => name.clone(),
-                _ => track.title.clone(),
+        let track = play.track;
+        if is_network(&track.uri) {
+            let opener = self.opener.clone().ok_or_else(|| {
+                CustodyError("no transport for a network stream".into())
+            })?;
+            let (tx, rx) = mpsc::channel();
+            let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
+            thread::Builder::new()
+                .name("open".into())
+                .stack_size(OPEN_STACK)
+                .spawn(move || {
+                    // The custody may be gone by now; then this is dropped.
+                    let _ = tx.send(open(&uri, &codecs, Some(&opener)));
+                })
+                .map_err(|e| CustodyError(format!("open thread: {e}")))?;
+            let state = State {
+                status: Status::Opening,
+                track: Some(track),
+                position_ms: 0,
+                format: None,
+            };
+            self.publish(ctx, &state);
+            self.in_hand = Some(InHand {
+                handle,
+                state,
+                stream: None,
+                opening: Some(Opening {
+                    result: rx,
+                    start_ms: play.start_ms,
+                    hold: false,
+                }),
+                pending: Vec::new(),
+                taken: 0,
+                frames_out: 0,
+                base_ms: 0,
+                skip: 0,
+                ended: false,
             });
+            return Ok(());
         }
-        let (base_ms, skip) = if play.start_ms > 0 {
-            seek(&mut stream, play.start_ms, format.sample_rate)?
-        } else {
-            (0, 0)
-        };
-        self.sink.start(&format);
-        let state = State {
-            status: Status::Playing,
-            track: Some(track),
-            position_ms: base_ms,
-            format: Some(format),
-        };
-        self.publish(ctx, &state);
-        self.in_hand = Some(InHand {
+        let opened = open(&track.uri, &self.codecs, None)?;
+        let mut h = InHand {
             handle,
-            state,
-            stream,
+            state: State {
+                status: Status::Opening,
+                track: Some(track),
+                position_ms: 0,
+                format: None,
+            },
+            stream: None,
+            opening: None,
             pending: Vec::new(),
             taken: 0,
             frames_out: 0,
-            base_ms,
-            skip,
+            base_ms: 0,
+            skip: 0,
             ended: false,
-        });
+        };
+        begin(&mut h, opened, play.start_ms, false, self.sink.as_mut())?;
+        self.publish(ctx, &h.state);
+        self.in_hand = Some(h);
         Ok(())
     }
 
@@ -340,6 +368,21 @@ impl Warden for PlaybackSymphonia {
         };
         let c: Correction = from_value(&correction.instruction)
             .map_err(|e| CustodyError(format!("correction: {e}")))?;
+        if let Some(opening) = h.opening.as_mut() {
+            // Not yet reached: pause and resume are remembered, a seek
+            // has nothing to land in.
+            match c {
+                Correction::Pause => opening.hold = true,
+                Correction::Resume => opening.hold = false,
+                Correction::Seek { .. } => {
+                    return Err(CustodyError("still opening".into()));
+                }
+            }
+            return Ok(());
+        }
+        let Some(stream) = h.stream.as_mut() else {
+            return Err(CustodyError("no stream".into()));
+        };
         match c {
             Correction::Pause => {
                 h.state.status = Status::Paused;
@@ -353,7 +396,7 @@ impl Warden for PlaybackSymphonia {
                 let cap = h.state.track.as_ref().and_then(|t| t.duration_ms);
                 let target = cap.map_or(position_ms, |d| position_ms.min(d));
                 let rate = h.state.format.as_ref().map_or(0, |f| f.sample_rate);
-                let (landed, skip) = seek(&mut h.stream, target, rate)?;
+                let (landed, skip) = seek(stream, target, rate)?;
                 h.pending.clear();
                 h.taken = 0;
                 h.frames_out = 0;
@@ -373,8 +416,13 @@ impl Warden for PlaybackSymphonia {
         ctx: &mut dyn Context,
     ) {
         if self.in_hand.as_ref().is_some_and(|h| h.handle == handle) {
-            self.in_hand = None;
-            self.sink.stop();
+            // Dropping a custody still opening drops the thread's
+            // receiver; what it opens is dropped in turn, fetcher and all.
+            let started =
+                self.in_hand.take().is_some_and(|h| h.stream.is_some());
+            if started {
+                self.sink.stop();
+            }
             self.publish(ctx, &State::default());
         }
     }
@@ -388,6 +436,27 @@ impl Warden for PlaybackSymphonia {
         else {
             return Progress::Done;
         };
+        if let Some(opening) = h.opening.as_ref() {
+            let opened = match opening.result.try_recv() {
+                Err(TryRecvError::Empty) => {
+                    return Progress::Idle(OPENING_IDLE_MS)
+                }
+                Err(TryRecvError::Disconnected) => {
+                    Err(CustodyError("the open gave up".into()))
+                }
+                Ok(r) => r,
+            };
+            let Opening { start_ms, hold, .. } =
+                h.opening.take().expect("checked");
+            if let Err(e) = opened
+                .and_then(|o| begin(h, o, start_ms, hold, self.sink.as_mut()))
+            {
+                log::warn!("open: {}; releasing", e.0);
+                return Progress::Failed(e.0);
+            }
+            self.publish_in_hand(ctx);
+            return Progress::Working;
+        }
         if h.state.status == Status::Paused {
             return Progress::Idle(PAUSED_IDLE_MS);
         }
@@ -395,9 +464,31 @@ impl Warden for PlaybackSymphonia {
             u64::from(h.state.format.as_ref().map_or(0, |f| f.sample_rate));
         let budget_frames = (rate * TICK_BUDGET_MS / 1000).max(1);
         let mut decoded_frames: u64 = 0;
-        if let Some(live) = h.stream.live.as_ref() {
+        let channels_of = |state: &State| {
+            state
+                .format
+                .as_ref()
+                .map_or(1, |f| usize::from(f.channels).max(1))
+        };
+        // The fields apart, so the stream and the rest are borrowed side
+        // by side.
+        let InHand {
+            stream,
+            state,
+            pending,
+            taken,
+            frames_out,
+            base_ms,
+            skip,
+            ended,
+            ..
+        } = h;
+        let Some(stream) = stream.as_mut() else {
+            return Progress::Failed("no stream".into());
+        };
+        if let Some(live) = stream.live.as_ref() {
             if let Some(title) = live.take_title() {
-                if let Some(t) = h.state.track.as_mut() {
+                if let Some(t) = state.track.as_mut() {
                     // Stations say "Artist - Title".
                     match title.split_once(" - ") {
                         Some((artist, name)) if !name.trim().is_empty() => {
@@ -414,21 +505,21 @@ impl Warden for PlaybackSymphonia {
         }
         let progress = loop {
             // Offer what is pending before decoding more.
-            if h.taken < h.pending.len() {
-                let channels = h.channels();
-                let frames = self.sink.write(&h.pending[h.taken..]);
+            if *taken < pending.len() {
+                let channels = channels_of(state);
+                let frames = self.sink.write(&pending[*taken..]);
                 if frames == 0 {
                     break Progress::Idle(SINK_FULL_IDLE_MS);
                 }
-                h.taken += frames * channels;
-                h.frames_out += frames as u64;
-                if h.taken < h.pending.len() {
+                *taken += frames * channels;
+                *frames_out += frames as u64;
+                if *taken < pending.len() {
                     continue;
                 }
-                h.pending.clear();
-                h.taken = 0;
+                pending.clear();
+                *taken = 0;
             }
-            if h.ended {
+            if *ended {
                 break Progress::Done;
             }
             if decoded_frames >= budget_frames {
@@ -436,20 +527,26 @@ impl Warden for PlaybackSymphonia {
             }
             // A stream from the network is decoded only from what has
             // arrived; short of that, the tick waits for the fetcher.
-            if h.stream.live.as_mut().is_some_and(|l| !l.ready()) {
+            if stream.live.as_mut().is_some_and(|l| !l.ready()) {
                 break Progress::Idle(BUFFERING_IDLE_MS);
             }
-            match next_frames(&mut h.stream, &mut h.pending) {
+            match next_frames(stream, pending) {
                 Ok(Some((frames, rate, channels))) => {
                     // The decoder has the last word on the format: when
                     // it differs from what the sink was started with,
                     // the sink is started again and the state says so.
-                    let differs = h.state.format.as_ref().is_some_and(|f| {
+                    let differs = state.format.as_ref().is_some_and(|f| {
                         f.sample_rate != rate || f.channels != channels
                     });
                     if differs {
-                        let played = h.position_ms(0);
-                        if let Some(f) = h.state.format.as_mut() {
+                        if let Some(f) = state.format.as_mut() {
+                            let played = if f.sample_rate == 0 {
+                                *base_ms
+                            } else {
+                                *base_ms
+                                    + *frames_out * 1000
+                                        / u64::from(f.sample_rate)
+                            };
                             log::info!(
                                 "format: the decoder gives {rate} Hz {channels} ch, the container said {} Hz {} ch; following the decoder",
                                 f.sample_rate, f.channels
@@ -457,37 +554,105 @@ impl Warden for PlaybackSymphonia {
                             f.sample_rate = rate;
                             f.channels = channels;
                             self.sink.start(f);
+                            *base_ms = played;
+                            *frames_out = 0;
                         }
-                        h.base_ms = played;
-                        h.frames_out = 0;
                     }
                     decoded_frames += frames;
-                    h.taken = 0;
-                    if h.skip > 0 {
-                        let drop = h.skip.min(frames);
-                        h.taken = drop as usize * h.channels();
-                        h.skip -= drop;
+                    *taken = 0;
+                    if *skip > 0 {
+                        let drop = (*skip).min(frames);
+                        *taken = drop as usize * channels_of(state);
+                        *skip -= drop;
                     }
                 }
-                Ok(None) => h.ended = true,
+                Ok(None) => *ended = true,
                 Err(e) => {
-                    // The stream is lost. Say so in the state and let the
-                    // steward release custody.
+                    // The stream is lost; the custody ends with the reason.
                     log::warn!("decode: {e}; releasing");
-                    h.state.status = Status::Stopped;
-                    if let Some(t) = h.state.track.as_mut() {
-                        t.title = format!("{} ({e})", t.title);
-                    }
-                    h.pending.clear();
-                    h.taken = 0;
-                    h.ended = true;
-                    break Progress::Done;
+                    state.status = Status::Stopped;
+                    pending.clear();
+                    *taken = 0;
+                    *ended = true;
+                    break Progress::Failed(e.to_string());
                 }
             }
         };
         self.publish_in_hand(ctx);
         progress
     }
+}
+
+/// Whether `uri` is reached over the network rather than read from a
+/// path.
+fn is_network(uri: &str) -> bool {
+    uri.starts_with("http://") || uri.starts_with("https://")
+}
+
+/// The stream is open: name the track from its tags, land the start,
+/// start the sink, and set the custody playing (or held, if a pause
+/// came while it was being reached).
+fn begin(
+    h: &mut InHand,
+    (mut stream, format): (Stream, Format),
+    start_ms: u64,
+    hold: bool,
+    sink: &mut dyn FrameSink,
+) -> Result<(), CustodyError> {
+    let track = h
+        .state
+        .track
+        .as_mut()
+        .ok_or_else(|| CustodyError("no track".into()))?;
+    if track.duration_ms.is_none() {
+        track.duration_ms = duration_ms(&stream);
+    }
+    let tags = tags(&mut stream);
+    if let Some(title) = tags.title {
+        track.title = title;
+    }
+    if track.artist.is_none() {
+        track.artist = tags.artist;
+    }
+    if track.album.is_none() {
+        track.album = tags.album;
+    }
+    if let Some(live) = &stream.live {
+        // A station: its name is the album line, under the title,
+        // which the stream replaces with what is playing. The name
+        // the playlist gave wins over the server's (`icy-name` tends
+        // to carry the bitrate); a station the playlist left to its
+        // host takes the server's.
+        let curated = track.title != host_of(&track.uri);
+        track.album = Some(match &live.info.name {
+            Some(name) if !curated => name.clone(),
+            _ => track.title.clone(),
+        });
+    }
+    let (base_ms, skip) = if start_ms > 0 {
+        seek(&mut stream, start_ms, format.sample_rate)?
+    } else {
+        (0, 0)
+    };
+    sink.start(&format);
+    if hold {
+        sink.pause();
+    }
+    h.state.status = if hold {
+        Status::Paused
+    } else {
+        Status::Playing
+    };
+    h.state.position_ms = base_ms;
+    h.state.format = Some(format);
+    h.stream = Some(stream);
+    h.pending.clear();
+    h.taken = 0;
+    h.frames_out = 0;
+    h.base_ms = base_ms;
+    h.skip = skip;
+    h.ended = false;
+    Ok(())
 }
 
 /// Whether a server's `Content-Type` names something this build
@@ -522,46 +687,44 @@ fn open(
 ) -> Result<(Stream, Format), CustodyError> {
     let mut hint = Hint::new();
     let mut live = None;
-    let source: Box<dyn symphonia::core::io::MediaSource> =
-        if uri.starts_with("http://") || uri.starts_with("https://") {
-            let opener = opener.ok_or_else(|| {
-                CustodyError("no transport for a network stream".into())
-            })?;
-            let bytes = opener.open(uri).map_err(CustodyError)?;
-            // A format this build cannot decode is refused by the server's
-            // word for it, before a byte of it is probed.
-            if let Some(kind) = bytes.header("content-type") {
-                if !decodable(&kind) {
-                    return Err(CustodyError(format!(
-                        "{kind}: format not supported here"
-                    )));
-                }
+    let source: Box<dyn symphonia::core::io::MediaSource> = if is_network(uri) {
+        let opener = opener.ok_or_else(|| {
+            CustodyError("no transport for a network stream".into())
+        })?;
+        let bytes = opener.open(uri).map_err(CustodyError)?;
+        // A format this build cannot decode is refused by the server's
+        // word for it, before a byte of it is probed.
+        if let Some(kind) = bytes.header("content-type") {
+            if !decodable(&kind) {
+                return Err(CustodyError(format!(
+                    "{kind}: format not supported here"
+                )));
             }
-            let reopen = stream::Reopen {
-                opener: Arc::clone(opener),
-                uri: uri.to_string(),
-            };
-            let (buffered, handle) = stream::start(bytes, Some(reopen))
-                .map_err(|e| CustodyError(format!("buffer: {e}")))?;
-            if let Some(ext) = handle.info.extension_hint() {
-                hint.with_extension(ext);
-            } else if let Some(ext) =
-                uri.rsplit('.').next().filter(|e| e.len() <= 4)
-            {
-                hint.with_extension(ext);
-            }
-            live = Some(handle);
-            Box::new(buffered)
-        } else {
-            let path = file_path(uri)?;
-            let file = File::open(&path).map_err(|e| {
-                CustodyError(format!("{}: {e}", path.display()))
-            })?;
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                hint.with_extension(ext);
-            }
-            Box::new(file)
+        }
+        let reopen = stream::Reopen {
+            opener: Arc::clone(opener),
+            uri: uri.to_string(),
         };
+        let (buffered, handle) = stream::start(bytes, Some(reopen))
+            .map_err(|e| CustodyError(format!("buffer: {e}")))?;
+        if let Some(ext) = handle.info.extension_hint() {
+            hint.with_extension(ext);
+        } else if let Some(ext) =
+            uri.rsplit('.').next().filter(|e| e.len() <= 4)
+        {
+            hint.with_extension(ext);
+        }
+        live = Some(handle);
+        Box::new(buffered)
+    } else {
+        let path = file_path(uri)?;
+        let file = File::open(&path)
+            .map_err(|e| CustodyError(format!("{}: {e}", path.display())))?;
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+        Box::new(file)
+    };
     let mss =
         MediaSourceStream::new(source, MediaSourceStreamOptions::default());
     let reader = symphonia::default::get_probe()
@@ -784,6 +947,7 @@ pub fn file_track(path: &Path) -> Track {
 mod tests {
     use super::*;
     use evo_esp32_sdk::catalogue::{Catalogue, Family, Kind, Rack, Shelf};
+    use evo_esp32_sdk::contract::audio::playback::ByteStream;
     use evo_esp32_sdk::projection::ProjectionKey;
     use evo_esp32_sdk::Ticks;
     use evo_esp32_steward::{Config, Steward};
@@ -1072,5 +1236,165 @@ mod tests {
         let mut tr = file_track(&path);
         tr.uri = "http://x/y".into();
         assert!(play(&mut s2, tr, 0).is_err());
+    }
+
+    /// Serves `bytes` as a stream with `content-type`, or refuses with
+    /// `refusal`.
+    struct Served {
+        bytes: Vec<u8>,
+        content_type: &'static str,
+        refusal: Option<&'static str>,
+    }
+
+    struct ServedBytes {
+        bytes: Vec<u8>,
+        at: usize,
+        content_type: &'static str,
+    }
+
+    impl ByteStream for ServedBytes {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+            let n = buf.len().min(self.bytes.len() - self.at).min(512);
+            buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+            self.at += n;
+            Ok(n)
+        }
+
+        fn header(&self, name: &str) -> Option<String> {
+            (name == "content-type").then(|| self.content_type.to_string())
+        }
+    }
+
+    impl StreamOpener for Served {
+        fn open(&self, _uri: &str) -> Result<Box<dyn ByteStream>, String> {
+            if let Some(why) = self.refusal {
+                return Err(why.to_string());
+            }
+            Ok(Box::new(ServedBytes {
+                bytes: self.bytes.clone(),
+                at: 0,
+                content_type: self.content_type,
+            }))
+        }
+    }
+
+    fn rig_with(room: usize, opener: Served) -> (Steward, Shared) {
+        let tape = Shared(Rc::new(RefCell::new(Tape {
+            room,
+            ..Tape::default()
+        })));
+        let mut s = Steward::new(catalogue(), Config::default()).unwrap();
+        s.admit_warden(
+            Box::new(
+                PlaybackSymphonia::new(Box::new(tape.clone()))
+                    .with_opener(Box::new(opener)),
+            ),
+            Ticks(0),
+        )
+        .unwrap();
+        (s, tape)
+    }
+
+    /// Tick until the custody leaves `Opening`, or `limit` ticks.
+    fn settle(s: &mut Steward, limit: u64) -> u64 {
+        let mut t = 1;
+        while state(s).status == Status::Opening && t < limit {
+            s.tick(Ticks(t));
+            thread::sleep(std::time::Duration::from_millis(1));
+            t += 1;
+        }
+        t
+    }
+
+    #[test]
+    fn a_stream_is_reached_on_its_own_thread_and_then_plays() {
+        // Longer than the ring's prebuffer (48 KB), so the decoder is
+        // let go before the stream ends: 4 s of 8 kHz stereo is 128 KB.
+        let wav_bytes = std::fs::read(wav(32_000)).unwrap();
+        let (mut s, tape) = rig_with(
+            800,
+            Served {
+                bytes: wav_bytes,
+                content_type: "audio/wav",
+                refusal: None,
+            },
+        );
+        let mut tr = file_track(Path::new("/x/station.wav"));
+        tr.uri = "http://x/station".into();
+        tr.title = "x".into();
+        play(&mut s, tr, 0).unwrap();
+        // Back at once, nothing out yet.
+        assert_eq!(state(&s).status, Status::Opening);
+        assert!(tape.0.borrow().frames.is_empty());
+        let t = settle(&mut s, 5000);
+        assert_eq!(state(&s).status, Status::Playing);
+        let st = state(&s);
+        assert_eq!(st.format.unwrap().sample_rate, RATE);
+        // A station's name is its album line.
+        assert_eq!(st.track.unwrap().album.as_deref(), Some("x"));
+        let mut i = 0;
+        while tape.0.borrow().frames.len() < 800 && i < 2000 {
+            s.tick(Ticks(t + i));
+            thread::sleep(std::time::Duration::from_millis(1));
+            i += 1;
+        }
+        assert!(tape.0.borrow().frames.len() >= 800, "{i} ticks");
+    }
+
+    #[test]
+    fn a_stream_that_cannot_be_reached_ends_the_custody_with_the_reason() {
+        let (mut s, tape) = rig_with(
+            800,
+            Served {
+                bytes: vec![],
+                content_type: "audio/wav",
+                refusal: Some("HTTP_CONNECT: no route"),
+            },
+        );
+        let mut tr = file_track(Path::new("/x/station.wav"));
+        tr.uri = "http://x/station".into();
+        let h = play(&mut s, tr, 0).unwrap();
+        assert_eq!(state(&s).status, Status::Opening);
+        settle(&mut s, 5000);
+        assert_eq!(state(&s).status, Status::Stopped);
+        assert!(s.custodies().all(|c| c != h), "released");
+        assert_eq!(
+            tape.0.borrow().stops,
+            0,
+            "a sink never started is not stopped"
+        );
+        let released = s
+            .happenings_since(evo_esp32_sdk::happening::Seq(0))
+            .happenings
+            .into_iter()
+            .find_map(|h| match h.kind {
+                evo_esp32_sdk::happening::HappeningKind::CustodyReleased {
+                    reason,
+                    ..
+                } => Some(reason),
+                _ => None,
+            })
+            .expect("a release happened");
+        assert_eq!(released.as_deref(), Some("HTTP_CONNECT: no route"));
+    }
+
+    #[test]
+    fn a_pause_while_opening_starts_the_stream_held() {
+        let wav_bytes = std::fs::read(wav(8000)).unwrap();
+        let (mut s, tape) = rig_with(
+            800,
+            Served {
+                bytes: wav_bytes,
+                content_type: "audio/wav",
+                refusal: None,
+            },
+        );
+        let mut tr = file_track(Path::new("/x/station.wav"));
+        tr.uri = "http://x/station".into();
+        let h = play(&mut s, tr, 0).unwrap();
+        correct(&mut s, h, Correction::Pause, 1);
+        settle(&mut s, 5000);
+        assert_eq!(state(&s).status, Status::Paused);
+        assert!(tape.0.borrow().frames.is_empty());
     }
 }

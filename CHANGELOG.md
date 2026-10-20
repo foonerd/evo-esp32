@@ -6,25 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- AAC on the board, through Espressif's decoder. `platform/esp-idf`
-  gains `aac`: `EspAac` wraps `esp_aac_dec` (AAC-LC and HE-AAC, the
-  sample rate following the decoder's word, so an HE-AAC stream's
-  doubled rate reaches the sink), rebuilding the ADTS header Symphonia's
-  demuxer strips before each packet. The Symphonia plugin's `aac`
-  feature is now the demuxer and content-type logic alone;
-  `aac-symphonia` (default, host) adds Symphonia's decoder, and the
-  firmware registers Espressif's instead, as it does for MP3. A stream
-  whose decoded format differs from the demuxer's word (HE-AAC) restarts
-  the sink at the new format with the position carried over. Measured
-  on the bench: an AAC station takes about 54 KB of internal SRAM to
-  open and 37% of the core (MP3: 5 KB and 28%). The `.aac` greying and
-  the refusal go. `sdcard/Radio/Evo Selection.m3u` is now alphabetical
-  and 47 stations: Absolute (four, AAC-LC 128k), talkSPORT, Times Radio,
-  Virgin Radio UK, Capital Chill, KEXP and Radio Swiss Classic/Jazz
-  (HE-AAC); Planet Rock, Kerrang!, Greatest Hits, Hits Radio, Magic and
-  Magic Soul on their 112k MP3 feeds (Bauer's streams want the
-  directory's `aw_0_1st.skey` parameter, without it they answer 500);
-  and the BBC World Service, the one BBC station with a plain stream.
+- A network stream is reached on a thread of its own. `take_custody`
+  returns at once with the new `Status::Opening` ("connecting" on the
+  face); the thread connects, buffers and probes (32 KB stack, in
+  PSRAM); the tick that finds it done starts the sink, and one that
+  finds it failed ends the custody with the reason, which now rides the
+  `custody_released` happening (`Progress::Failed(reason)`). The loop
+  that reads the touch and paints is never held for a connect. A pause
+  while opening starts the stream held; a file opens on the spot. The
+  firmware holds a station that could not be reached with the reason
+  on the strip, as before.
 - Shuffle, repeat, and what plays at power-on. `distributions/queue`
   (`evo-esp32-queue`, no_std): the queue a distribution's loop owns,
   items in the given order with a play order over them, shuffled or

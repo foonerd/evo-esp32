@@ -185,6 +185,10 @@ pub mod playback {
         /// Nothing in custody.
         #[default]
         Stopped,
+        /// The track is being reached (connected, buffered, probed);
+        /// nothing is going out yet. A network stream passes through
+        /// here; a file opens at once.
+        Opening,
         /// Frames are going out.
         Playing,
         /// Held at a position.
