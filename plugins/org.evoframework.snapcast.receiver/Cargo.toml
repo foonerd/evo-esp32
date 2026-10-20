@@ -1,0 +1,24 @@
+[package]
+name = "org-evoframework-snapcast-receiver"
+description = "Snapcast client for evo-esp32: the device as one client of a Snapcast server. Dials the server, keeps its clock against the server's, decodes the chunks (FLAC through Symphonia, or PCM) and plays each at the server's time, under a custody the distribution grants while the server is sending."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# A reference warden — Apache 2.0 so a device's receiver can copy it.
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+# The FLAC decoder, frame by frame; the server's chunks hold whole frames.
+symphonia = { version = "0.6", default-features = false, features = ["flac"] }
+log = "0.4"
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }

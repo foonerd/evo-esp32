@@ -353,6 +353,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "org-evoframework-snapcast-receiver"
+version = "0.1.1"
+dependencies = [
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "log",
+ "serde",
+ "serde_json",
+ "symphonia",
+]
+
+[[package]]
 name = "org-evoframework-source-files"
 version = "0.1.1"
 dependencies = [

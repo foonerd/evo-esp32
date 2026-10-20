@@ -10,6 +10,7 @@ members = [
     "plugins/org.evoframework.source.files",
     "plugins/org.evoframework.playback.symphonia",
     "plugins/org.evoframework.multiroom.receiver",
+    "plugins/org.evoframework.snapcast.receiver",
     "distributions/config",
     "distributions/queue",
     "distributions/face",
