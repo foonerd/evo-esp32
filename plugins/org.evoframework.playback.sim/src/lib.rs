@@ -259,6 +259,7 @@ mod tests {
             album: None,
             duration_ms: ms,
             sample_rate: None,
+            art: None,
         }
     }
 

@@ -1,75 +1,74 @@
 #EXTM3U
-# Internet radio stations for evo-esp32: copy this folder to the
-# card and the stations appear in the library under Radio. One
-# #EXTINF line names the station on the URL line below it; add or
-# remove as you like, or put your own .m3u or .pls files here.
+# Internet radio for evo-esp32: copy this folder to the card and the
+# stations appear in the library under Radio. Each #EXTINF line names
+# the station on the URL line below it; tvg-logo="..." is its picture
+# (a URL, or a path on the card relative to this file). Add or remove
+# as you like, or put your own .m3u or .pls files here.
 #
-# These are the stations Volumio's own selection lists (October
-# 2026); the streams are their broadcasters'. What the player
-# decodes: MP3, FLAC, Ogg Vorbis and AAC-LC. HE-AAC (aacp) streams
-# play at reduced quality.
+# A selection of UK stations, and Radio Paradise's two FLAC streams
+# from the US, drawn from the radio-browser.info directory and checked
+# on 20 October 2026: every stream answered, every logo decoded. The
+# streams and logos are the broadcasters' own. What this player decodes
+# from the air: MP3, FLAC and Ogg Vorbis. AAC streams (Absolute, Planet
+# Rock, Kerrang!, Greatest Hits and the other Bauer brands) are not
+# played on the ESP32-C5 board; the BBC's live streams are HLS, which
+# no evo-esp32 plays yet.
 
-#EXTINF:-1,Absolut Radio
-https://absolut-ai.live-sm.absolutradio.de/absolut-ai/stream/mp3
-#EXTINF:-1,Absolut Relax
-https://edge56.live-sm.absolutradio.de/absolut-relax/stream/mp3
-#EXTINF:-1,ArtSound FM 92.7
-http://stream.artsound.fm/mp3
-#EXTINF:-1,Classic FM
+#EXTINF:-1 tvg-logo="https://www.classicfm.com/assets_v4r/classic/img/favicon-196x196.png",Classic FM
 http://media-ice.musicradio.com/ClassicFMMP3
-#EXTINF:-1,CDNX 1 - Classic & New Indie Alt
-https://listen-msmn.sharp-stream.com/nme1.mp3
-#EXTINF:-1,CDNX 2 - New & Upfront Indie Alt
-https://listen-msmn.sharp-stream.com/nme2.mp3
-#EXTINF:-1,EuropaRadioJazz - 88.3 Smooth Jazz HD
-https://onair.europaradiojazz.org/radio/8000/sd
-#EXTINF:-1,France Culture Live
-http://icecast.radiofrance.fr/franceculture-midfi.mp3
-#EXTINF:-1,France Musique Classique Plus
-http://icecast.radiofrance.fr/francemusiqueclassiqueplus-midfi.mp3
-#EXTINF:-1,France Musique La Contemporaine
-http://icecast.radiofrance.fr/francemusiquelacontemporaine-midfi.mp3
-#EXTINF:-1,France Musique La Jazz
-http://icecast.radiofrance.fr/francemusiquelajazz-midfi.mp3
-#EXTINF:-1,Ibiza Sonica
-https://ibizasonica.streaming-pro.com:8011/sonicaclub
-#EXTINF:-1,Jazz24
-https://live.amperwave.net/direct/ppm-jazz24mp3-ibc1
-#EXTINF:-1,KDHX 88.1 FM St. Louis
-http://kdhx-ice.streamguys1.com:80/live
-#EXTINF:-1,KEXP 90.3 FM Seattle
-http://live-aacplus-64.kexp.org/kexp64.aac
-#EXTINF:-1,KMHD Portland FM 89.1 -  Jazz
-http://stream1.opb.org/kmhd.mp3
-#EXTINF:-1,Mix 106
-https://stream13.shoutcastsolutions.com/proxy/gbeaum00?mp=/stream
-#EXTINF:-1,Naim Classical (FLAC)
-http://mscp3.live-streams.nl:8250/class-flac.flac
-#EXTINF:-1,Naim Jazz (FLAC)
-http://mscp3.live-streams.nl:8340/jazz-flac.flac
-#EXTINF:-1,Naim Radio (FLAC)
-http://mscp3.live-streams.nl:8360/flac.flac
-#EXTINF:-1,NTS Live International
+#EXTINF:-1 tvg-logo="https://www.classicfm.com/assets_v4r/classic/img/favicon-196x196.png",Classic FM Calm
+https://media-ice.musicradio.com/ClassicFMCalmMP3
+#EXTINF:-1 tvg-logo="https://www.smoothradio.com/assets_v4r/smooth/img/favicon-196x196.png",Smooth Chill
+https://media-ssl.musicradio.com/ChillMP3
+#EXTINF:-1 tvg-logo="https://www.smoothradio.com/assets_v4r/smooth/img/favicon-196x196.png",Smooth Radio London
+http://media-the.musicradio.com/SmoothLondonMP3
+#EXTINF:-1 tvg-logo="https://www.heart.co.uk/assets_v4r/heart/img/favicon-196x196.png",Heart London
+http://ice-sov.musicradio.com/HeartLondonMP3
+#EXTINF:-1 tvg-logo="https://www.heart.co.uk/assets_v4r/heart/img/favicon-196x196.png",Heart 80s
+https://media-ssl.musicradio.com/Heart80sMP3
+#EXTINF:-1 tvg-logo="https://www.heart.co.uk/assets_v4r/heart/img/favicon-196x196.png",Heart 90s
+https://media-ssl.musicradio.com/Heart90sMP3
+#EXTINF:-1 tvg-logo="https://www.heart.co.uk/assets_v4r/heart/img/favicon-196x196.png",Heart Dance
+https://media-ssl.musicradio.com/HeartDanceMP3
+#EXTINF:-1 tvg-logo="https://www.mygoldmusic.co.uk/assets_v4r/gold/img/favicon-196x196.png",Gold
+https://media-ssl.musicradio.com/GoldMP3
+#EXTINF:-1 tvg-logo="https://www.capitalfm.com/assets_v4r/capital/img/favicon-196x196.png",Capital London
+http://media-ice.musicradio.com/CapitalMP3
+#EXTINF:-1 tvg-logo="https://www.capitalfm.com/assets_v4r/capital/img/favicon-196x196.png",Capital XTRA
+http://media-the.musicradio.com/CapitalXTRALondonMP3
+#EXTINF:-1 tvg-logo="https://www.capitaldance.com/assets_v4r/capitaldance/img/favicon-196x196.png",Capital Dance
+https://icecast.thisisdax.com/CapitalDanceMP3
+#EXTINF:-1 tvg-logo="https://www.radiox.co.uk/assets_v4r/xfm/img/favicon-196x196.png",Radio X
+http://icecast.thisisdax.com/RadioXUKMP3
+#EXTINF:-1 tvg-logo="https://www.radiox.co.uk/assets_v4r/xfm/img/favicon-196x196.png",Radio X Classic Rock
+https://media-ice.musicradio.com/RadioXClassicRockMP3
+#EXTINF:-1 tvg-logo="https://www.radiox.co.uk/assets_v4r/xfm/img/favicon-196x196.png",Radio X Chilled
+http://media-ice.musicradio.com/RadioXChilledMP3
+#EXTINF:-1 tvg-logo="https://www.lbc.co.uk/apple-touch-icon.png",LBC
+http://media-ice.musicradio.com/LBCUKMP3Low
+#EXTINF:-1 tvg-logo="https://media.bauerradio.com/image/upload/c_crop,g_custom/v1678797505/brand_manager/stations/mahvph4fqjmnp4y8d6wt.png",KISS
+https://live-kiss.sharp-stream.com/kiss100.mp3
+#EXTINF:-1 tvg-logo="https://www.nts.live/apple-touch-icon.png",NTS Radio 1
+http://stream-relay-geo.ntslive.net/stream
+#EXTINF:-1 tvg-logo="https://www.nts.live/apple-touch-icon.png",NTS Radio 2
 http://stream-relay-geo.ntslive.net/stream2
-#EXTINF:-1,RadioJAZZ.FM
-https://radiojazz.out.airtime.pro/radiojazz_a
-#EXTINF:-1,Radio Paradise
-http://stream-dc1.radioparadise.com/rp_192m.ogg
-#EXTINF:-1,Radio Paradise (FLAC+)
+#EXTINF:-1,Worldwide FM
+https://worldwide-fm.radiocult.fm/stream
+#EXTINF:-1 tvg-logo="https://sohoradiolondon.com/wp-content/themes/sohoradio-jan-2023/build/images/favicons/sohoradio-192x192.jpg",Soho Radio
+http://sohoradiomusic.doughunt.co.uk:8000/320mp3
+#EXTINF:-1 tvg-logo="https://www.resonancefm.com/assets/logo-a79206a34394173ba3e41d66a3388f4c.png",Resonance FM
+https://stream.resonance.fm/resonance
+#EXTINF:-1 tvg-logo="https://www.radiocaroline.co.uk/apple-touch-icon.png",Radio Caroline
+http://78.129.202.200:8040/;
+#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s159857/images/logod.png",TMM 1 (CDNX)
+https://listen-msmn.sharp-stream.com/nme1.mp3
+#EXTINF:-1 tvg-logo="https://www.naimaudio.com/build/assets/apple-touch-icon-2a4e35a0.png",Naim Jazz (FLAC)
+http://mscp3.live-streams.nl:8340/jazz-flac.flac
+#EXTINF:-1 tvg-logo="https://www.naimaudio.com/build/assets/apple-touch-icon-2a4e35a0.png",Naim Classical (FLAC)
+http://mscp3.live-streams.nl:8250/class-flac.flac
+#EXTINF:-1 tvg-logo="https://www.naimaudio.com/build/assets/apple-touch-icon-2a4e35a0.png",Naim Radio (FLAC)
+http://mscp3.live-streams.nl:8360/flac.flac
+#EXTINF:-1 tvg-logo="https://radioparadise.com/apple-touch-icon.png",Radio Paradise (FLAC)
 http://stream.radioparadise.com/flacm
-#EXTINF:-1,Radio Paradise Mellow (FLAC+)
+#EXTINF:-1 tvg-logo="https://radioparadise.com/apple-touch-icon.png",Radio Paradise Mellow (FLAC)
 http://stream.radioparadise.com/mellow-flacm
-#EXTINF:-1,Radio Paradise Rock (FLAC+)
-http://stream.radioparadise.com/rock-flacm
-#EXTINF:-1,Radio Paradise World (FLAC+)
-http://stream.radioparadise.com/world-etc-flacm
-#EXTINF:-1,Radio Reload
-http://onair15.xdevel.com:7012/1
-#EXTINF:-1,Radio Swiss Classic
-http://stream.srg-ssr.ch/m/rsc_de/aacp_96
-#EXTINF:-1,Radio Swiss Jazz
-http://stream.srg-ssr.ch/m/rsj/aacp_96
-#EXTINF:-1,Radio X London
-http://media-sov.musicradio.com:80/RadioXLondonMP3
-#EXTINF:-1,San Diego Jazz 88.3
-http://listen.jazz88.org/ksds.mp3

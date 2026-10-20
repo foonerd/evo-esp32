@@ -6,6 +6,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Station logos, a name card, and a ticker. `sdk`: `Track` gains `art`,
+  a picture's URI where the source knows one. `source.files`: an M3U's
+  `tvg-logo="…"` (the IPTV attribute) names a station's picture, a URL
+  or a path on the card relative to the playlist. `platform/esp-idf`
+  (`png.rs`): PNG through the `png` crate, transparency composed onto
+  the face's background. The firmware's art fetcher takes three
+  sources (the track's picture on the card, on the web through the
+  HTTP opener, or the folder's cover as before); a logo is set whole on
+  a square of the background, a cover cropped to its centre; a theme
+  change recomposes it. `face`: a station without a logo shows its
+  name in the art square (disc label or card tile, up to three lines);
+  a text line too long for its area scrolls as a loop (the text, a
+  gap, the text again), holding three seconds at the start of each
+  lap, 16 px/s, on Now Playing's three lines and a list page's bar,
+  driven by a `clock_ms` the caller puts on the `View`; the status
+  strip can carry a `notice`. `sdcard/Radio/Evo Selection.m3u` is now
+  a UK selection (29 stations, with Radio Paradise's FLAC streams)
+  drawn from radio-browser.info, every stream and logo checked.
+- Flash: 32 MB declared (the C5's MMU reaches all of it), one 8 MB app
+  partition (`partitions.csv`); the app was 3.02 MB of its 3 MB.
+- Radio, from the first bench. A station that will not open stays on
+  the face with the reason on the status strip ("could not connect",
+  "not found (404)", "format not supported here") instead of the
+  player moving on to the next station unasked; a file that will not
+  open is still passed over. AAC is left out of the board's decoder
+  set (a feature of the playback plugin the firmware disables; the
+  host keeps it): Symphonia's AAC decoder is built on the stack and
+  overflowed the main task's 32 KB at the first AAC station (a stack
+  protection fault); a station whose address ends in `.aac` is greyed
+  in the library. Threads the plugins spawn from the main task (a
+  stream's fetcher) get their stacks in PSRAM; the HTTP client's send
+  buffer is 1 KB. Internal SRAM with a station playing: about 22 KB
+  free before the stack move, measured again next. The previous
+  track's folder art is dropped when a stream starts.
 - Internet radio. A playlist on the card (`.m3u`, `.m3u8`, `.pls`) lists
   stations; they appear in the library under the playlist's name and a
   tap plays one over Wi-Fi. `sdk`: `ByteStream` and `StreamOpener`, the
@@ -26,8 +60,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (SHOUTcast's `ICY 200 OK` accepted). Stations stay out of the boot's
   run through the card. The face drops the previous track's art when a
   stream starts. `sdcard/Radio/Evo Selection.m3u`: thirty-two stations
-  to begin with. Decoded: MP3, FLAC, Ogg Vorbis, AAC-LC; HE-AAC plays
-  its core at reduced quality. The app image is 3.02 MB of its 3 MB
+  to begin with. Decoded: MP3, FLAC, Ogg Vorbis (AAC on the host only;
+  see the entry above). The app image was 3.02 MB of its 3 MB
   partition.
 - The reservoir. `firmware/waveshare-esp32-c5-touch-lcd-28/src/sink.rs`:
   the decoder runs ahead of the ear into a 600 ms ring of decoded audio

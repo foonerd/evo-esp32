@@ -58,6 +58,7 @@ use es9018k2m::Es9018k2m;
 use esp_idf_svc::hal::gpio::Pin;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
 use evo_esp32_face::touch::{Intent, Tracker};
@@ -146,6 +147,15 @@ fn main() -> anyhow::Result<()> {
         ..
     } = Peripherals::take()?;
     memory("at start");
+    // Threads the plugins spawn from this task (a stream's fetcher) get
+    // their stacks in PSRAM: they write no flash, and internal SRAM is
+    // what the Wi-Fi driver and the DMA rings live on. A thread that
+    // does write flash (`net.rs`) asks for internal itself.
+    ThreadSpawnConfiguration {
+        stack_alloc_caps: MallocCap::Spiram | MallocCap::Cap8bit,
+        ..Default::default()
+    }
+    .set()?;
 
     // The SPI bus first, so the card is read before the panel is up.
     let spi = board::spi_bus(spi2, pins.gpio6, pins.gpio7, pins.gpio8)?;
@@ -319,8 +329,10 @@ fn main() -> anyhow::Result<()> {
     let mut next = 0usize;
     // The level the listener wants; every track starts at it.
     let mut wanted = start_level;
+    // Why the last thing asked for did not play, for the status strip.
+    let mut notice: Option<String> = None;
     let mut current =
-        play_next(&mut steward, &tracks, &mut next, now(), wanted);
+        play_next(&mut steward, &tracks, &mut next, now(), wanted, &mut notice);
     let mut track_started = Instant::now();
 
     // The output subject's level and mute reach the sink from here.
@@ -360,7 +372,8 @@ fn main() -> anyhow::Result<()> {
     ];
     config.write_status(&status_head);
     // Album art, fetched beneath this task; the face shows it when it lands.
-    let mut art = art::Fetcher::new(face.layout().art.size.width)?;
+    let mut art =
+        art::Fetcher::new(face.layout().art.size.width, background(&face))?;
     memory("after the art fetcher");
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
@@ -421,6 +434,7 @@ fn main() -> anyhow::Result<()> {
                                             &mut next,
                                             t,
                                             wanted,
+                                            &mut notice,
                                         );
                                         track_started = Instant::now();
                                     }
@@ -491,6 +505,13 @@ fn main() -> anyhow::Result<()> {
                                             let next = next_theme(face.theme());
                                             face.set_theme(next);
                                             config.save("theme", next.name);
+                                            // A logo sits on the background.
+                                            if art.refit(
+                                                face.layout().art.size.width,
+                                                background(&face),
+                                            ) {
+                                                face.set_art(None);
+                                            }
                                         }
                                         Some(SettingsRow::Style) => {
                                             let next = match face.layout().style
@@ -501,8 +522,9 @@ fn main() -> anyhow::Result<()> {
                                             face.set_style(next);
                                             config.save("style", next.name());
                                             // The art square may be another size now.
-                                            if art.resize(
+                                            if art.refit(
                                                 face.layout().art.size.width,
+                                                background(&face),
                                             ) {
                                                 face.set_art(None);
                                             }
@@ -580,6 +602,7 @@ fn main() -> anyhow::Result<()> {
                                             &mut next,
                                             t,
                                             wanted,
+                                            &mut notice,
                                         );
                                         track_started = Instant::now();
                                     }
@@ -639,9 +662,13 @@ fn main() -> anyhow::Result<()> {
                     current = None;
                 }
             }
-            let state = View::new(&pb, output.as_ref(), "Card");
+            let mut state = View::new(&pb, output.as_ref(), "Card");
+            state.clock_ms = started.elapsed().as_millis() as u64;
+            if current.is_none() {
+                state.notice = notice.clone().unwrap_or_default();
+            }
             if let Some(track) = pb.track.as_ref() {
-                if art.track(&track.uri) {
+                if art.track(track) {
                     face.set_art(None);
                 }
             }
@@ -738,6 +765,7 @@ fn main() -> anyhow::Result<()> {
                         &mut next,
                         now(),
                         wanted,
+                        &mut notice,
                     );
                     track_started = Instant::now();
                 } else if next == tracks.len() {
@@ -976,12 +1004,17 @@ fn report_playback(steward: &Steward, elapsed: Duration) {
 /// a refused track (a codec nobody stocks, an unreadable file) is logged
 /// and passed over, so one bad file does not end the run. The custody
 /// taken, if any.
+/// Play the track `next` names, or the first after it that opens: a
+/// file that will not play is passed over. A station that will not play
+/// is not: the one asked for stays on the face with the reason in
+/// `notice`, rather than another station starting unasked.
 fn play_next(
     steward: &mut Steward,
     tracks: &[Track],
     next: &mut usize,
     now: Ticks,
     level: u8,
+    notice: &mut Option<String>,
 ) -> Option<CustodyHandle> {
     while let Some(track) = tracks.get(*next) {
         *next += 1;
@@ -993,11 +1026,42 @@ fn play_next(
             );
             continue;
         }
-        if let Some(handle) = play(steward, track, now, level) {
-            return Some(handle);
+        if is_stream(track) {
+            memory("before the station");
+        }
+        match play(steward, track, now, level) {
+            Ok(handle) => {
+                if is_stream(track) {
+                    memory("with the station open");
+                }
+                *notice = None;
+                return Some(handle);
+            }
+            Err(why) if is_stream(track) => {
+                *notice = Some(format!("{}: {}", track.title, plain(&why)));
+                return None;
+            }
+            Err(_) => continue,
         }
     }
     None
+}
+
+/// A refusal's reason in the listener's words, for the status strip.
+fn plain(why: &str) -> &'static str {
+    if why.contains("HTTP_CONNECT") || why.contains("getaddrinfo") {
+        "could not connect"
+    } else if why.contains("HTTP 404") {
+        "not found (404)"
+    } else if why.contains("HTTP ") {
+        "the server refused"
+    } else if why.contains("os error 12") || why.contains("NO_MEM") {
+        "out of memory"
+    } else if why.contains("unsupported") || why.contains("codec") {
+        "format not supported here"
+    } else {
+        "could not open"
+    }
 }
 
 /// Whether the source's listing says the track's rate is one this board
@@ -1006,9 +1070,26 @@ fn within_ceiling(track: &Track) -> bool {
     track.sample_rate.is_none_or(|rate| rate <= RATE_CEILING)
 }
 
+/// The face's background as the raw RGB565 a picture is composed on.
+fn background(face: &Face) -> u16 {
+    evo_esp32_face::art::raw(face.theme().background)
+}
+
 /// A track from the network rather than the card.
 fn is_stream(track: &Track) -> bool {
     track.uri.starts_with("http://") || track.uri.starts_with("https://")
+}
+
+/// A stream whose address says it is AAC, which this board does not
+/// decode (the decoder wants more stack than the main task has; see the
+/// README). One whose address says nothing is tried.
+fn aac_stream(track: &Track) -> bool {
+    is_stream(track)
+        && track
+            .uri
+            .split(['?', '#'])
+            .next()
+            .is_some_and(|path| path.to_ascii_lowercase().ends_with(".aac"))
 }
 
 /// Pause, resume or seek the track in custody.
@@ -1067,7 +1148,7 @@ fn play(
     track: &Track,
     now: Ticks,
     level: u8,
-) -> Option<CustodyHandle> {
+) -> Result<CustodyHandle, String> {
     let taken = match steward.assign(
         &shelf::playback_decode(),
         Assignment {
@@ -1081,11 +1162,11 @@ fn play(
     ) {
         Ok(handle) => {
             info!("playing {:?} under custody {}", track.title, handle.0);
-            Some(handle)
+            Ok(handle)
         }
         Err(e) => {
             warn!("assign {:?}: {e:?}", track.title);
-            None
+            Err(format!("{e:?}"))
         }
     };
     set_volume(steward, level, now);
@@ -1168,7 +1249,7 @@ impl Browse {
                         name: t.title.clone(),
                         folder: false,
                         uri: Some(t.uri.clone()),
-                        playable: within_ceiling(&t),
+                        playable: within_ceiling(&t) && !aac_stream(&t),
                     });
                     self.tracks.push(t);
                 }

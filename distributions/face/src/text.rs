@@ -7,8 +7,10 @@
 //! text colour and the colour it sits on, so the edges are anti-aliased
 //! without a frame buffer: the face knows what it painted under the text.
 
+use alloc::vec::Vec;
+
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::{DrawTarget, Point, Size};
+use embedded_graphics::prelude::{DrawTarget, DrawTargetExt, Point, Size};
 use embedded_graphics::primitives::Rectangle;
 
 use crate::theme::mix;
@@ -98,6 +100,46 @@ impl Atlas {
         }
     }
 
+    /// `text` broken at spaces into lines no wider than `width`, at most
+    /// `max_lines` of them, the last cut with an ellipsis if more would
+    /// not fit. A word wider than the line is cut on its own line.
+    pub fn wrap<'a>(
+        &self,
+        text: &'a str,
+        width: i32,
+        max_lines: usize,
+    ) -> Vec<Fitted<'a>> {
+        let mut lines: Vec<Fitted<'a>> = Vec::new();
+        let mut rest = text.trim();
+        while !rest.is_empty() && lines.len() < max_lines {
+            if lines.len() + 1 == max_lines || self.width(rest) <= width {
+                lines.push(self.fit(rest, width));
+                break;
+            }
+            // The longest head of whole words that fits.
+            let mut cut = 0;
+            for (i, _) in rest.match_indices(' ') {
+                if self.width(&rest[..i]) <= width {
+                    cut = i;
+                } else {
+                    break;
+                }
+            }
+            if cut == 0 {
+                lines.push(self.fit(rest, width));
+                let word_end = rest.find(' ').unwrap_or(rest.len());
+                rest = rest[word_end..].trim_start();
+            } else {
+                lines.push(Fitted {
+                    head: &rest[..cut],
+                    ellipsis: false,
+                });
+                rest = rest[cut..].trim_start();
+            }
+        }
+        lines
+    }
+
     /// Draw `text` with its baseline's left end at `pen`, `fg` over `bg`.
     /// Returns the pen after the last glyph.
     pub fn draw<D>(
@@ -126,11 +168,32 @@ impl Atlas {
     where
         D: DrawTarget<Color = Rgb565>,
     {
+        self.draw_over_within(target, text, pen, fg, ground, None)
+    }
+
+    /// [`Atlas::draw_over`], skipping glyphs wholly outside the columns
+    /// `span` (`[from, to)`): a scrolled line draws only what shows.
+    fn draw_over_within<D>(
+        &self,
+        target: &mut D,
+        text: &str,
+        pen: Point,
+        fg: Rgb565,
+        ground: impl Fn(Point) -> Rgb565,
+        span: Option<(i32, i32)>,
+    ) -> Result<Point, D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
         let mut x = pen.x;
         let mut px = [fg; MAX_SIDE * MAX_SIDE];
         for c in text.chars() {
             let g = self.glyph(c);
-            if g.w > 0 && g.h > 0 {
+            let shows = span.is_none_or(|(from, to)| {
+                let left = x + g.x0 as i32;
+                left < to && left + g.w as i32 > from
+            });
+            if g.w > 0 && g.h > 0 && shows {
                 let (w, h) = (g.w as usize, g.h as usize);
                 let origin = Point::new(x + g.x0 as i32, pen.y + g.y0 as i32);
                 let stride = w.div_ceil(2);
@@ -189,7 +252,62 @@ impl Atlas {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        let mut buf = [fg; ROW];
+        self.lay(target, area, &ground)?;
+        self.line_text(target, text, area, align, fg, ground)
+    }
+
+    /// `text` flush left and moved `offset` pixels to the left, and the
+    /// same text again `lap` pixels after it, clipped to `area`: one
+    /// frame of a line too long for its area looping past. The area is
+    /// laid with the ground first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn line_scrolled<D>(
+        &self,
+        target: &mut D,
+        text: &str,
+        area: Rectangle,
+        offset: i32,
+        lap: i32,
+        fg: Rgb565,
+        ground: impl Fn(Point) -> Rgb565,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        self.lay(target, area, &ground)?;
+        let baseline = area.top_left.y
+            + (area.size.height as i32 - self.height()) / 2
+            + self.ascent as i32;
+        let (from, to) =
+            (area.top_left.x, area.top_left.x + area.size.width as i32);
+        let mut clipped = target.clipped(&area);
+        for x in [from - offset, from - offset + lap] {
+            if x >= to {
+                break;
+            }
+            self.draw_over_within(
+                &mut clipped,
+                text,
+                Point::new(x, baseline),
+                fg,
+                &ground,
+                Some((from, to)),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Lay `area` with `ground`, a row at a time.
+    fn lay<D>(
+        &self,
+        target: &mut D,
+        area: Rectangle,
+        ground: impl Fn(Point) -> Rgb565,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let mut buf = [Rgb565::default(); ROW];
         let (x0, w) = (area.top_left.x, (area.size.width as usize).min(ROW));
         for yy in 0..area.size.height as i32 {
             let y = area.top_left.y + yy;
@@ -201,7 +319,7 @@ impl Atlas {
                 buf[..w].iter().copied(),
             )?;
         }
-        self.line_text(target, text, area, align, fg, ground)
+        Ok(())
     }
 
     fn line_text<D>(

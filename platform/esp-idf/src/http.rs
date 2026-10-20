@@ -23,6 +23,8 @@ use evo_esp32_sdk::contract::audio::playback::{ByteStream, StreamOpener};
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// The client's receive buffer, internal SRAM: one chunk of a stream.
 const BUFFER: usize = 4096;
+/// The client's send buffer: the request is a few hundred bytes.
+const BUFFER_TX: usize = 1024;
 /// Who is asking.
 const USER_AGENT: &str = concat!("evo-esp32/", env!("CARGO_PKG_VERSION"));
 
@@ -45,6 +47,7 @@ impl StreamOpener for HttpOpener {
     fn open(&self, uri: &str) -> Result<Box<dyn ByteStream>, String> {
         let mut connection = EspHttpConnection::new(&Configuration {
             buffer_size: Some(BUFFER),
+            buffer_size_tx: Some(BUFFER_TX),
             timeout: Some(TIMEOUT),
             follow_redirects_policy: FollowRedirectsPolicy::FollowAll,
             crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
@@ -71,9 +74,7 @@ impl StreamOpener for HttpOpener {
 
 impl ByteStream for HttpStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
-        self.connection
-            .read(buf)
-            .map_err(|e| format!("read: {e}"))
+        self.connection.read(buf).map_err(|e| format!("read: {e}"))
     }
 
     fn header(&self, name: &str) -> Option<String> {

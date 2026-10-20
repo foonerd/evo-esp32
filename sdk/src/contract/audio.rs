@@ -119,6 +119,11 @@ pub struct Track {
     /// over without opening it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_rate: Option<u32>,
+    /// A picture for it, where the source knows one: a station's logo
+    /// (`file:///sdcard/Radio/logos/a.png`, `https://host/a.png`). Not
+    /// set, a distribution looks where it will (the folder's cover).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub art: Option<String>,
 }
 
 /// The subject kind a source announces a track under.
@@ -400,6 +405,7 @@ mod tests {
             album: None,
             duration_ms: Some(1000),
             sample_rate: None,
+            art: None,
         };
         let v = to_value(&t);
         // Value maps sort their keys; the unknown fields are absent.

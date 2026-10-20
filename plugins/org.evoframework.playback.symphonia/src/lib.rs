@@ -275,11 +275,16 @@ impl Warden for PlaybackSymphonia {
             track.album = tags.album;
         }
         if let Some(live) = &stream.live {
-            // A station: its name is the album line, under the title the
-            // playlist gave it, until the stream says what is playing.
-            if let Some(name) = &live.info.name {
-                track.album = Some(name.clone());
-            }
+            // A station: its name is the album line, under the title,
+            // which the stream replaces with what is playing. The name
+            // the playlist gave wins over the server's (`icy-name` tends
+            // to carry the bitrate); a station the playlist left to its
+            // host takes the server's.
+            let curated = track.title != host_of(&track.uri);
+            track.album = Some(match &live.info.name {
+                Some(name) if !curated => name.clone(),
+                _ => track.title.clone(),
+            });
         }
         let (base_ms, skip) = if play.start_ms > 0 {
             seek(&mut stream, play.start_ms, format.sample_rate)?
@@ -549,6 +554,17 @@ fn file_path(uri: &str) -> Result<PathBuf, CustodyError> {
         .ok_or_else(|| CustodyError(format!("not a file URI: {uri}")))
 }
 
+/// The host part of a URL: what the source titles a station by when the
+/// playlist gives it no name.
+fn host_of(uri: &str) -> &str {
+    uri.split("://")
+        .nth(1)
+        .unwrap_or(uri)
+        .split(['/', ':', '?'])
+        .next()
+        .unwrap_or(uri)
+}
+
 /// What the stream's tags call the track.
 #[derive(Debug, Default)]
 struct Tags {
@@ -680,6 +696,7 @@ pub fn file_track(path: &Path) -> Track {
         album: None,
         duration_ms: None,
         sample_rate: None,
+        art: None,
     }
 }
 

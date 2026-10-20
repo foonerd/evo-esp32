@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use embedded_graphics::pixelcolor::raw::RawU16;
+use embedded_graphics::pixelcolor::raw::{RawData, RawU16};
 use embedded_graphics::pixelcolor::Rgb565;
 
 /// A square picture at the size the face draws it.
@@ -31,6 +31,11 @@ impl Art {
             .get(y as usize * self.size as usize + x as usize)
             .map(|&p| Rgb565::from(RawU16::new(p)))
     }
+}
+
+/// A colour as the raw RGB565 a picture's pixels are kept in.
+pub fn raw(colour: Rgb565) -> u16 {
+    RawU16::from(colour).into_inner()
 }
 
 /// `size` square pixels from a `width` by `height` picture of RGB565

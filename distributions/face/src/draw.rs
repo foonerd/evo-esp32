@@ -23,7 +23,11 @@ use embedded_graphics::prelude::{DrawTarget, Point, Size};
 use embedded_graphics::primitives::Rectangle;
 
 use crate::art::Art;
+use crate::text;
 use crate::theme::{mix, Theme};
+
+/// The most lines a station's name takes on its card.
+const NAME_LINES: usize = 3;
 
 /// The widest edge run the row blender handles at once.
 const RUN: usize = 48;
@@ -672,6 +676,82 @@ where
         )?;
     }
     icon_note(target, c, label_r * 5 / 4, theme.accent, label)
+}
+
+/// A station without a logo, in a circle: the disc's label colour over
+/// the whole disc and the station's name across it, up to three lines.
+pub fn station_disc<D>(
+    target: &mut D,
+    area: Rectangle,
+    name: &str,
+    theme: &Theme,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let c = area.center();
+    let r = area.size.width as i32 / 2;
+    let fill = mix(theme.card, theme.accent, 4);
+    disc(target, c, r, fill, theme.background)?;
+    // The chord at the lines' height, less a margin.
+    let width = r * 7 / 5;
+    name_lines(target, c, width, name, theme.foreground, fill)
+}
+
+/// A station without a logo, on a card: the placeholder's tile with the
+/// station's name centred in its `free` height from the top (the card
+/// style's text band may lie over the foot).
+pub fn station_card<D>(
+    target: &mut D,
+    area: Rectangle,
+    radius: i32,
+    free: u32,
+    name: &str,
+    theme: &Theme,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    rounded(target, area, radius, theme.secondary, theme.background)?;
+    let c = Point::new(
+        area.top_left.x + area.size.width as i32 / 2,
+        area.top_left.y + free as i32 / 2,
+    );
+    let width = area.size.width as i32 - 2 * radius;
+    name_lines(target, c, width, name, theme.foreground, theme.secondary)
+}
+
+/// `name` in the heading face, wrapped to `width` and centred on `c`.
+fn name_lines<D>(
+    target: &mut D,
+    c: Point,
+    width: i32,
+    name: &str,
+    fg: Rgb565,
+    bg: Rgb565,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let font = &text::HEADING;
+    let lines = font.wrap(name, width, NAME_LINES);
+    let step = font.line as i32;
+    let top = c.y - (lines.len() as i32 * step) / 2;
+    for (i, line) in lines.iter().enumerate() {
+        // The tile is laid already; draw the glyphs alone.
+        let shown = if line.ellipsis {
+            alloc::format!("{}…", line.head)
+        } else {
+            alloc::string::String::from(line.head)
+        };
+        let w = font.width(&shown);
+        let baseline = top
+            + i as i32 * step
+            + (step - font.height()) / 2
+            + font.ascent as i32;
+        font.draw(target, &shown, Point::new(c.x - w / 2, baseline), fg, bg)?;
+    }
+    Ok(())
 }
 
 /// Album art in a circle inscribed in `area`, its edge blended onto

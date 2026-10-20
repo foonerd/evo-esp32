@@ -239,6 +239,7 @@ fn gallery(dir: &std::path::Path) -> Result<(), String> {
             album: Some("Brothers In Arms".into()),
             duration_ms: Some(506_000),
             sample_rate: None,
+            art: None,
         }),
         position_ms: 119_000,
         format: Some(playback::Format {

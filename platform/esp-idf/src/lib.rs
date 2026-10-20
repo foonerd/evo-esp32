@@ -15,6 +15,9 @@
 //! at a scale of 1/2, 1/4 or 1/8 so a cover of hundreds of pixels comes
 //! out near the face's art square in a few kilobytes of work area.
 //!
+//! [`png`]: the `png` crate for a station's logo, with its transparency
+//! composited onto the colour it will sit on.
+//!
 //! [`http`]: `http://` and `https://` streams over ESP-IDF's HTTP client
 //! and certificate bundle, as the playback plugin's [`StreamOpener`]
 //! (`evo_esp32_sdk::contract::audio::playback::StreamOpener`).
@@ -22,5 +25,6 @@
 pub mod http;
 pub mod jpeg;
 pub mod mp3;
+pub mod png;
 
 pub use http::HttpOpener;

@@ -89,6 +89,14 @@ pub struct View {
     pub muted: bool,
     /// Where the music comes from, for the status strip: "Card".
     pub source: &'static str,
+    /// A clock that only goes forward, milliseconds, for what moves on
+    /// its own (a line too long for its area scrolling past); the caller
+    /// sets it, 0 keeps everything still.
+    pub clock_ms: u64,
+    /// Why nothing is playing, when something was asked for and did not
+    /// play ("Jazz24: not found (404)"); shown on the status strip in
+    /// the format's place. Empty when there is nothing to say.
+    pub notice: String,
 }
 
 impl View {
@@ -119,7 +127,40 @@ impl View {
             volume: out.map(|o| o.volume).unwrap_or(0),
             muted: out.map(|o| o.muted).unwrap_or(false),
             source,
+            clock_ms: 0,
+            notice: String::new(),
         }
+    }
+
+    /// The status strip: where the music is from, and the stream, or
+    /// the notice when there is one.
+    pub fn status_line(&self) -> String {
+        let detail = if self.notice.is_empty() {
+            self.format_line()
+        } else {
+            self.notice.clone()
+        };
+        if detail.is_empty() {
+            self.source.to_string()
+        } else {
+            format!("{}  ·  {detail}", self.source)
+        }
+    }
+
+    /// The station's name when the track is a stream: its album line,
+    /// which the playback plugin keeps for the station's name, else its
+    /// title. None for a file.
+    pub fn station(&self) -> Option<&str> {
+        if !(self.uri.starts_with("http://")
+            || self.uri.starts_with("https://"))
+        {
+            return None;
+        }
+        Some(if self.album.is_empty() {
+            self.title.as_str()
+        } else {
+            self.album.as_str()
+        })
     }
 
     /// Position over duration, 0 to 1, when both are known.
@@ -172,6 +213,8 @@ pub enum Repaint {
     Rows,
     /// A list page's now-playing bar.
     Bar,
+    /// One text line too long for its area, moved a step along.
+    Ticker,
     /// One stage of a full frame; call again soon for the next.
     Partial,
     /// The whole face: a scene change, or the first frame, complete.
@@ -205,6 +248,52 @@ impl Scene {
     }
 }
 
+/// A text line too long for its area, shown as a loop: the text, a gap,
+/// and the text again following it in, moving left until the second
+/// copy stands where the first did; there it holds a while, then moves
+/// on. No jump: the end of one lap is the start of the next. The offset
+/// at any moment follows from the clock alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Ticker {
+    /// The text's width less the area's; 0 or less when it fits.
+    overflow: i32,
+    /// One lap: the text's width and the gap after it.
+    lap: i32,
+    /// The clock when the line was set.
+    since: u64,
+    /// The offset last painted.
+    painted: i32,
+}
+
+/// How long a scrolling line holds at its start each lap.
+const TICKER_HOLD_MS: u64 = 3000;
+/// How fast it moves.
+const TICKER_PX_PER_S: u64 = 16;
+/// The gap between the end of the text and its next copy.
+const TICKER_GAP: i32 = 48;
+
+impl Ticker {
+    /// The offset at `clock`, within one lap.
+    fn offset(&self, clock: u64) -> i32 {
+        if self.overflow <= 0 || self.lap <= 0 || clock <= self.since {
+            return 0;
+        }
+        let travel_ms = self.lap as u64 * 1000 / TICKER_PX_PER_S;
+        let t = (clock - self.since) % (TICKER_HOLD_MS + travel_ms);
+        if t < TICKER_HOLD_MS {
+            0
+        } else {
+            (((t - TICKER_HOLD_MS) * TICKER_PX_PER_S / 1000) as i32)
+                .min(self.lap - 1)
+        }
+    }
+}
+
+/// The lines that may scroll: the title, the artist, the album on Now
+/// Playing, and the title in a list page's bar.
+const TICKERS: usize = 4;
+const BAR_TICKER: usize = 3;
+
 /// Now Playing, repainted in place as the view moves.
 pub struct Face {
     layout: Layout,
@@ -212,6 +301,7 @@ pub struct Face {
     scene: Option<Scene>,
     second: Option<u64>,
     level: Option<(u8, bool)>,
+    tickers: [Ticker; TICKERS],
     /// How far round the ring the accent reaches.
     ring_to: f32,
     /// The next stage of a full paint in progress.
@@ -255,6 +345,7 @@ impl Face {
             scene: None,
             second: None,
             level: None,
+            tickers: [Ticker::default(); TICKERS],
             ring_to: 0.0,
             stage: None,
             art: None,
@@ -401,7 +492,7 @@ impl Face {
             title: view.title.clone(),
             artist: view.artist.clone(),
             album: view.album.clone(),
-            format: view.format_line(),
+            format: view.status_line(),
             duration_ms: view.duration_ms,
             style: self.layout.style,
             theme: self.theme.name,
@@ -467,6 +558,14 @@ impl Face {
                 return Ok(Repaint::Rows);
             }
         }
+        if let Some(n) = self.ticker_due(view.clock_ms) {
+            if n == BAR_TICKER {
+                self.paint_bar_title(target, view)?;
+            } else {
+                self.paint_text_line(target, view, n as u8)?;
+            }
+            return Ok(Repaint::Ticker);
+        }
         if on_page {
             // The position and the level are not on a list page; remember
             // them so a return to Now Playing starts from the truth.
@@ -485,6 +584,40 @@ impl Face {
             return Ok(Repaint::Volume);
         }
         Ok(Repaint::None)
+    }
+
+    /// The scrolling line whose offset moved since it was painted, if
+    /// one has: on Now Playing the three text lines, on a list page the
+    /// bar's title.
+    fn ticker_due(&mut self, clock: u64) -> Option<usize> {
+        let lines: &[usize] = if self.screen == Screen::NowPlaying {
+            &[0, 1, 2]
+        } else {
+            &[BAR_TICKER]
+        };
+        for &n in lines {
+            let offset = self.tickers[n].offset(clock);
+            if offset != self.tickers[n].painted {
+                self.tickers[n].painted = offset;
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// Measure the text lines against their areas for `view`, and start
+    /// their clocks: called when a line is painted whole.
+    fn set_ticker(&mut self, n: usize, width: i32, area: i32, clock: u64) {
+        let t = &mut self.tickers[n];
+        let (overflow, lap) = (width - area, width + TICKER_GAP);
+        if t.overflow != overflow || t.lap != lap {
+            *t = Ticker {
+                overflow,
+                lap,
+                since: clock,
+                painted: 0,
+            };
+        }
     }
 
     /// [`refresh`](Self::refresh) through to a frame that is not partial:
@@ -712,7 +845,7 @@ impl Face {
     /// The now-playing bar at a page's foot: the art's thumbnail (or a
     /// small disc), the title, play or pause.
     fn paint_now_bar<D>(
-        &self,
+        &mut self,
         target: &mut D,
         view: &View,
     ) -> Result<(), D::Error>
@@ -739,25 +872,53 @@ impl Face {
                 draw::icon_note(target, c, r * 5 / 8, t.muted_fg, t.secondary)?;
             }
         }
-        let (title, colour) = if view.title.is_empty() {
-            ("Nothing playing", t.muted_fg)
-        } else {
-            (view.title.as_str(), t.foreground)
-        };
-        text::BODY.line(
-            target,
-            title,
-            l.bar_title,
-            Align::Left,
-            colour,
-            t.card,
-        )?;
+        self.paint_bar_title(target, view)?;
         let (c, r) = (l.bar_play, l.bar_play_r as i32);
         draw::disc(target, c, r, t.accent, t.card)?;
         match view.status {
             Status::Playing => draw::icon_pause(target, c, r / 2, t.accent_fg),
             _ => draw::icon_play(target, c, r / 2, t.accent_fg, t.accent),
         }
+    }
+
+    /// The bar's title: the track's, scrolled when too long for the bar.
+    fn paint_bar_title<D>(
+        &mut self,
+        target: &mut D,
+        view: &View,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let (l, t) = (self.layout.page, self.theme);
+        let (title, colour) = if view.title.is_empty() {
+            ("Nothing playing", t.muted_fg)
+        } else {
+            (view.title.as_str(), t.foreground)
+        };
+        let font = &text::BODY;
+        let width = font.width(title);
+        self.set_ticker(
+            BAR_TICKER,
+            width,
+            l.bar_title.size.width as i32,
+            view.clock_ms,
+        );
+        if width > l.bar_title.size.width as i32 {
+            let ticker = self.tickers[BAR_TICKER];
+            let offset = ticker.offset(view.clock_ms);
+            self.tickers[BAR_TICKER].painted = offset;
+            return font.line_scrolled(
+                target,
+                title,
+                l.bar_title,
+                offset,
+                ticker.lap,
+                colour,
+                |_| t.card,
+            );
+        }
+        font.line(target, title, l.bar_title, Align::Left, colour, t.card)
     }
 
     /// One stage of the full frame, in painting order: the ground, the
@@ -776,22 +937,14 @@ impl Face {
         let t = self.theme;
         match stage {
             0 => target.clear(t.background),
-            1 => {
-                // Where the music is from, and the stream.
-                let status = if view.format_line().is_empty() {
-                    view.source.to_string()
-                } else {
-                    format!("{}  ·  {}", view.source, view.format_line())
-                };
-                text::TINY.line(
-                    target,
-                    &status,
-                    l.status,
-                    Align::Left,
-                    t.muted_fg,
-                    t.background,
-                )
-            }
+            1 => text::TINY.line(
+                target,
+                &view.status_line(),
+                l.status,
+                Align::Left,
+                t.muted_fg,
+                t.background,
+            ),
             2 => self.paint_art(target, view),
             3..=5 => self.paint_text_line(target, view, stage - 3),
             6 => {
@@ -816,7 +969,11 @@ impl Face {
     /// stand-in. Where the card's text band lies over the art's foot the
     /// picture shows through a scrim, and the text lines are painted
     /// with the art since they sit on it.
-    fn paint_art<D>(&self, target: &mut D, view: &View) -> Result<(), D::Error>
+    fn paint_art<D>(
+        &mut self,
+        target: &mut D,
+        view: &View,
+    ) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
@@ -826,7 +983,10 @@ impl Face {
             (Style::Disc, Some(art)) => {
                 draw::art_disc(target, l.art, art, t.background)
             }
-            (Style::Disc, None) => draw::placeholder_disc(target, l.art, &t),
+            (Style::Disc, None) => match view.station() {
+                Some(name) => draw::station_disc(target, l.art, name, &t),
+                None => draw::placeholder_disc(target, l.art, &t),
+            },
             (Style::Card, art) => {
                 let band = self.card_band();
                 match art {
@@ -839,7 +999,20 @@ impl Face {
                         band.map(|(band, colour)| (band.top_left.y, colour)),
                     )?,
                     None => {
-                        draw::placeholder_card(target, l.art, RADIUS, &t)?;
+                        match view.station() {
+                            Some(name) => {
+                                let free =
+                                    band.map_or(l.art.size.height, |(b, _)| {
+                                        (b.top_left.y - l.art.top_left.y) as u32
+                                    });
+                                draw::station_card(
+                                    target, l.art, RADIUS, free, name, &t,
+                                )?;
+                            }
+                            None => draw::placeholder_card(
+                                target, l.art, RADIUS, &t,
+                            )?,
+                        }
                         if let Some((band, colour)) = band {
                             draw::rounded_corners(
                                 target,
@@ -899,9 +1072,11 @@ impl Face {
         )
     }
 
-    /// Text line `n`: 0 the title, 1 the artist, 2 the album.
+    /// Text line `n`: 0 the title, 1 the artist, 2 the album. A line too
+    /// long for its area scrolls (see [`Ticker`]); this paints the frame
+    /// for the view's clock.
     fn paint_text_line<D>(
-        &self,
+        &mut self,
         target: &mut D,
         view: &View,
         n: u8,
@@ -945,13 +1120,47 @@ impl Face {
             1 => (artist_font, artist, l.artist, t.muted_fg),
             _ => (album_font, album, l.album, mix(t.muted_fg, under, 5)),
         };
-        match band {
-            Some((band, band_colour)) if self.art.is_some() => {
-                font.line_over(target, line, area, align, colour, |p| {
-                    self.band_ground(band.top_left.y, band_colour, p)
-                })
+        let width = font.width(line);
+        self.set_ticker(
+            usize::from(n),
+            width,
+            area.size.width as i32,
+            view.clock_ms,
+        );
+        let lap = self.tickers[usize::from(n)].lap;
+        let offset = if width > area.size.width as i32 {
+            let offset = self.tickers[usize::from(n)].offset(view.clock_ms);
+            self.tickers[usize::from(n)].painted = offset;
+            Some(offset)
+        } else {
+            None
+        };
+        match (band, offset) {
+            (Some((band, band_colour)), Some(offset)) if self.art.is_some() => {
+                font.line_scrolled(
+                    target,
+                    line,
+                    area,
+                    offset,
+                    lap,
+                    colour,
+                    |p| self.band_ground(band.top_left.y, band_colour, p),
+                )
             }
-            _ => font.line(target, line, area, align, colour, under),
+            (Some((band, band_colour)), None) if self.art.is_some() => font
+                .line_over(target, line, area, align, colour, |p| {
+                    self.band_ground(band.top_left.y, band_colour, p)
+                }),
+            (_, Some(offset)) => font.line_scrolled(
+                target,
+                line,
+                area,
+                offset,
+                lap,
+                colour,
+                |_| under,
+            ),
+            (_, None) => font.line(target, line, area, align, colour, under),
         }
     }
 
@@ -1250,6 +1459,7 @@ mod tests {
                 album: Some("Brothers In Arms".into()),
                 duration_ms: Some(506_000),
                 sample_rate: None,
+                art: None,
             }),
             position_ms: 119_000,
             format: Some(playback::Format {
@@ -1691,5 +1901,84 @@ mod tests {
             }
         );
         assert_eq!(a.glyph('\u{1F600}').ch, '?');
+    }
+
+    #[test]
+    fn names_wrap_to_whole_words() {
+        let a = &text::HEADING;
+        let w = a.width("France Musique");
+        let lines = a.wrap("France Musique Classique Plus", w, 3);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].head, "France Musique");
+        assert_eq!(lines[1].head, "Classique Plus");
+        assert!(!lines[1].ellipsis);
+        let two =
+            a.wrap("One Two Three Four Five Six Seven", a.width("One Two"), 2);
+        assert_eq!(two.len(), 2);
+        assert!(two[1].ellipsis, "the last line is cut, not dropped");
+        let long = a.wrap("Supercalifragilistic", a.width("Super"), 3);
+        assert_eq!(
+            long.len(),
+            1,
+            "a word wider than the line is cut on its own"
+        );
+        assert!(long[0].ellipsis);
+        assert!(a.wrap("", 100, 3).is_empty());
+    }
+
+    #[test]
+    fn a_ticker_holds_then_laps_without_a_jump() {
+        let t = Ticker {
+            overflow: 48,
+            lap: 160,
+            since: 1000,
+            painted: 0,
+        };
+        // A lap of 160 px at 16 px/s: ten seconds of travel.
+        assert_eq!(t.offset(0), 0, "before it was set");
+        assert_eq!(t.offset(1000 + TICKER_HOLD_MS - 1), 0, "holding");
+        assert_eq!(t.offset(1000 + TICKER_HOLD_MS + 5000), 80, "half a lap");
+        assert_eq!(
+            t.offset(1000 + TICKER_HOLD_MS + 9999),
+            159,
+            "the second copy a pixel from where the first stood"
+        );
+        assert_eq!(
+            t.offset(1000 + TICKER_HOLD_MS + 10000),
+            0,
+            "which is the start of the next lap: no jump"
+        );
+        assert_eq!(t.offset(1000 + TICKER_HOLD_MS + 11000), 0, "holding");
+        let fits = Ticker { overflow: -3, ..t };
+        assert_eq!(fits.offset(1_000_000), 0, "a line that fits never moves");
+    }
+
+    #[test]
+    fn a_long_title_scrolls_and_a_station_shows_its_name() {
+        let mut face = Face::new(0, Style::Disc, theme::EVO_DEFAULT);
+        let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+        let mut view = View::new(&playing(), None, "Card");
+        view.uri = "http://stream.example/live".to_string();
+        view.album = "Radio Paradise".to_string();
+        view.title =
+            "A title much too long to fit the width of the panel in one line"
+                .to_string();
+        view.clock_ms = 1;
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Full));
+        assert_eq!(view.station(), Some("Radio Paradise"));
+        assert_eq!(
+            face.refresh(&mut display, &view),
+            Ok(Repaint::None),
+            "holding"
+        );
+        view.clock_ms = 1 + TICKER_HOLD_MS + 500;
+        assert_eq!(
+            face.refresh(&mut display, &view),
+            Ok(Repaint::Ticker),
+            "the title moved"
+        );
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
+        view.uri = "file:///music/a.flac".to_string();
+        assert_eq!(view.station(), None);
     }
 }

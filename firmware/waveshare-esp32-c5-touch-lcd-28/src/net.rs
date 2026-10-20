@@ -114,6 +114,7 @@ impl Net {
         hostname: Option<String>,
     ) -> Result<Self, std::io::Error> {
         let (tx, events) = channel::<Event>();
+        let before = ThreadSpawnConfiguration::get();
         ThreadSpawnConfiguration {
             name: Some(c"net"),
             stack_size: STACK,
@@ -128,7 +129,8 @@ impl Net {
             .spawn(move || {
                 work(modem, &ssid, &password, hostname.as_deref(), &tx)
             });
-        ThreadSpawnConfiguration::default()
+        before
+            .unwrap_or_default()
             .set()
             .map_err(std::io::Error::other)?;
         spawned?;
