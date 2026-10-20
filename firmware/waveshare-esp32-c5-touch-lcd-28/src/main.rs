@@ -41,6 +41,7 @@
 //!    backlight comes on after the first frame.
 
 mod art;
+mod config;
 mod sink;
 
 use std::time::{Duration, Instant};
@@ -56,7 +57,8 @@ use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys;
 use evo_esp32_face::touch::{Intent, Tracker};
 use evo_esp32_face::{
-    theme, About, Face, Fact, Hotspot, Library, Repaint, Screen, Style, View,
+    theme, About, Face, Fact, Hotspot, Library, Repaint, Screen, Style, Theme,
+    View,
 };
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Correction, Play};
@@ -151,6 +153,12 @@ fn main() -> anyhow::Result<()> {
     };
     let card_mb = _card.capacity >> 20;
 
+    // The card's evoconfig.txt: rotation is applied at the panel's
+    // bring-up, theme and style when the face is made, the level at the
+    // sink; evostatus.txt says what was read, once the fabric is up.
+    let mut config = config::Config::read(MUSIC);
+    let rotation = config.settings.rotation.unwrap_or(ROTATION);
+
     // The board in the vendor BSP's order: expander (amplifier enabled on
     // EXIO3), panel, touch. The backlight waits for the first frame.
     let mut board = board::bring_up(
@@ -163,7 +171,7 @@ fn main() -> anyhow::Result<()> {
             touch_int: pins.gpio5,
         },
         spi,
-        ROTATION,
+        rotation,
     )?;
 
     let mut codec = Es8311::new(RefCellDevice::new(board.bus));
@@ -231,7 +239,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let volume = sink.volume();
-    volume.set(VOLUME_PERCENT, false);
+    let start_level = config.settings.volume.unwrap_or(VOLUME_PERCENT);
+    volume.set(start_level, false);
     let started = Instant::now();
 
     let now = || Ticks(started.elapsed().as_millis() as u64);
@@ -257,7 +266,7 @@ fn main() -> anyhow::Result<()> {
     info!("{} tracks, shuffled", tracks.len());
     let mut next = 0usize;
     // The level the listener wants; every track starts at it.
-    let mut wanted = VOLUME_PERCENT;
+    let mut wanted = start_level;
     let mut current =
         play_next(&mut steward, &tracks, &mut next, now(), wanted);
     let mut track_started = Instant::now();
@@ -276,7 +285,29 @@ fn main() -> anyhow::Result<()> {
     // frame comes in stages, one per pass of the loop, so the decoder
     // ticks between them and the DMA ring is fed; `painting` keeps the
     // passes coming without waiting for the face's cadence.
-    let mut face = Face::new(ROTATION, Style::Disc, theme::EVO_DEFAULT);
+    let theme = config.theme(theme::EVO_DEFAULT);
+    let style = config.style(Style::Disc);
+    let mut face = Face::new(rotation, style, theme);
+    if config.settings.wifi_ssid.is_some() {
+        config
+            .note("wifi_ssid: read; this firmware does not join networks yet");
+    }
+    if config.settings.dac.is_some() || config.settings.output.is_some() {
+        config.note("dac, output: read; this firmware plays the speaker and a HAT both and has no register of boards yet");
+    }
+    config.write_status(&[
+        format!(
+            "evo-esp32 {} {} on Waveshare ESP32-C5-Touch-LCD-2.8",
+            env!("CARGO_PKG_VERSION"),
+            env!("EVO_BUILD_ID")
+        ),
+        format!(
+            "running: theme {}, style {}, rotation {rotation}, volume {start_level}%, {} tracks on the card",
+            face.theme().name,
+            face.layout().style.name(),
+            tracks.len()
+        ),
+    ]);
     // Album art, fetched beneath this task; the face shows it when it lands.
     let mut art = art::Fetcher::new(face.layout().art.size.width)?;
     let mut lit = false;
@@ -401,6 +432,31 @@ fn main() -> anyhow::Result<()> {
                                 face.set_screen(screen);
                             }
                             Intent::Tap(Hotspot::Row(i)) => {
+                                if face.screen() == Screen::Settings {
+                                    match settings_row(i) {
+                                        Some(SettingsRow::Theme) => {
+                                            let next = next_theme(face.theme());
+                                            face.set_theme(next);
+                                            config.save("theme", next.name);
+                                        }
+                                        Some(SettingsRow::Style) => {
+                                            let next = match face.layout().style
+                                            {
+                                                Style::Disc => Style::Card,
+                                                Style::Card => Style::Disc,
+                                            };
+                                            face.set_style(next);
+                                            config.save("style", next.name());
+                                        }
+                                        None => {}
+                                    }
+                                    face.set_about(facts(
+                                        &face,
+                                        card_mb,
+                                        tracks.len(),
+                                    ));
+                                    continue;
+                                }
                                 if face.screen() != Screen::Library {
                                     continue;
                                 }
@@ -1050,8 +1106,8 @@ fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
                     .to_string(),
             ),
             fact("Board", "Waveshare ESP32-C5 2.8".to_string()),
-            fact("Theme", face.theme().name.to_string()),
-            fact("Style", face.layout().style.name().to_string()),
+            fact("Theme \u{203a}", face.theme().name.to_string()),
+            fact("Style \u{203a}", face.layout().style.name().to_string()),
             fact("Rotation", format!("{}", face.layout().rotation)),
             fact(
                 "Card",
@@ -1059,4 +1115,27 @@ fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
             ),
         ],
     }
+}
+
+/// The settings rows a tap acts on, by their place in [`facts`].
+enum SettingsRow {
+    Theme,
+    Style,
+}
+
+fn settings_row(i: u8) -> Option<SettingsRow> {
+    match i {
+        3 => Some(SettingsRow::Theme),
+        4 => Some(SettingsRow::Style),
+        _ => None,
+    }
+}
+
+/// The theme after `current` in the family's order, round the end.
+fn next_theme(current: &Theme) -> Theme {
+    let at = theme::ALL
+        .iter()
+        .position(|t| t.name == current.name)
+        .unwrap_or(0);
+    theme::ALL[(at + 1) % theme::ALL.len()]
 }

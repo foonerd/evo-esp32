@@ -724,6 +724,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-config"
+version = "0.1.0"
+
+[[package]]
 name = "evo-esp32-face"
 version = "0.1.0"
 dependencies = [
@@ -770,6 +774,7 @@ dependencies = [
  "es9018k2m",
  "esp-idf-svc",
  "evo-esp32-catalogue",
+ "evo-esp32-config",
  "evo-esp32-face",
  "evo-esp32-platform-esp-idf",
  "evo-esp32-sdk",

@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `evoconfig.txt`. `distributions/config` (`evo-esp32-config`, `no_std`):
+  the card file's grammar (one `key = value` a line, `#`/`;` comment
+  lines, quotes keep spaces, an empty value is the default, a BOM and
+  CRLF tolerated, a bad line reported and the rest applied), the typed
+  `Settings` (`theme`, `style`, `rotation`, `volume`, `name`, `wifi_ssid`,
+  `wifi_password`, and `dac`, `output` reserved for the register of DAC
+  boards), `set` to rewrite one key in the file's text in place, and the
+  status report's lines (the password shown as its length). The template
+  is `sdcard/evoconfig.txt`. `firmware/waveshare-esp32-c5-touch-lcd-28`:
+  the file is read after the card mounts; rotation goes to the panel's
+  bring-up, theme and style to the face, the level to the sink;
+  `evostatus.txt` is written with the build, what runs, what was read
+  and what was not understood; a tap on `Theme ›` or `Style ›` in
+  Settings changes the face and writes the key back. The keys the file
+  may carry that this firmware does not act on yet are read and said so
+  in the status.
 - `distributions/face`: a drag on the library scrolls. The finger's
   travel arrives in small steps; it now accumulates until a row's worth
   is in, instead of each step being rounded to no rows.

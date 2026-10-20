@@ -22,6 +22,10 @@ cd ../.. && scripts/image.sh firmware/waveshare-esp32-c5-touch-lcd-28
 esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.0.bin
 ```
 
+## Configuring by card
+
+The player reads `evoconfig.txt` from the root of the card on every boot and writes `evostatus.txt` next to it with what it applied and what it did not understand. Copy [`sdcard/evoconfig.txt`](../../sdcard/evoconfig.txt) to the card and edit it in any text editor; without the file the defaults stand (Evo Default, the disc, rotation 0, 40%). One `key = value` per line, UTF-8, CRLF or LF, `#` or `;` comments on their own lines only, a value in double quotes keeps its spaces, an empty value is the default again. The keys: `theme` (evo-default, night-sky, sunrise, air, liquid), `style` (disc, card), `rotation` (0, 90, 180, 270; applied at boot), `volume` (0 to 100 at power-on), `name`, `wifi_ssid` and `wifi_password` (read and reported; this firmware does not join networks yet), `dac` and `output` (read and reported; acted on once the register of DAC boards lands). A tap on `Theme ›` or `Style ›` in Settings changes the face and writes the key back into the file in place, leaving every other line as written; a card without the file gets one. The password is on the card in clear, as it is for the companion; the card stays in the player.
+
 Known of the chip: no FPU. Software `sin` costs about 95 µs a call, so the tone is one exact cycle (441 samples) tiled, not 88 200 sines; the first build did the latter and the idle task's watchdog said so.
 
 Known of ESP-IDF: below one scheduler tick, `usleep()` spins instead of yielding, so at the default 100 Hz every sleep under 10 ms starves the idle task and its watchdog bites five seconds later. `sdkconfig.defaults` sets `CONFIG_FREERTOS_HZ=1000`; the player's loop is paced in milliseconds. The main task's stack is 48 KB; the heartbeat reports its low-water mark (45 KB free with the decoder running: Symphonia's state lives on the heap).

@@ -1,0 +1,44 @@
+# evoconfig.txt - evo-esp32
+#
+# Copy this file to the root of the FAT32 microSD card that holds your
+# music, edit the values, insert the card, power the player. The player
+# reads it on every boot and writes evostatus.txt next to it saying what
+# it applied. When you change a setting on the panel, the player writes
+# it back into this file; your other lines and comments stay as they are.
+#
+# One "key = value" per line. Lines starting with # or ; are ignored.
+# There are no comments after a value: everything after the first = is
+# the value. Wrap a value in "double quotes" to keep leading or trailing
+# spaces. An empty value puts the setting back to its default.
+
+# The face's theme: evo-default, night-sky, sunrise, air or liquid.
+theme = evo-default
+
+# The face's style: disc (art in a circle, the progress on a ring round
+# it) or card (art as a rounded square, the text over its foot).
+style = disc
+
+# Screen rotation in degrees clockwise: 0, 90, 180 or 270. Applied at
+# boot.
+rotation = 0
+
+# The level at power-on, 0 to 100.
+volume = 40
+
+# The player's name on your network: letters, digits and hyphens, up to
+# 30, no spaces. Leave empty for the default.
+name = evo-player
+
+# The Wi-Fi network to join, 2.4 or 5 GHz. Leave the password empty for
+# an open network. Read now, used once this firmware joins networks;
+# evostatus.txt says which.
+wifi_ssid = Your Network
+wifi_password = your password
+
+# The DAC board on the header, when the player cannot tell by itself
+# (a board with no I2C part, such as a PCM5102A) or to override what it
+# found; the names are on the wiki's Audio out page. And where the
+# frames go when the board has a speaker and a DAC both: speaker, hat
+# or both. Read now; acted on once the register of boards lands.
+dac =
+output = both
