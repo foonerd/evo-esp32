@@ -200,8 +200,7 @@ impl Link {
         if !s.connected || s.frames == 0 {
             return None;
         }
-        let last = self.0.last_frame_ms.load(Ordering::Relaxed);
-        if self.now_ms().wrapping_sub(last) > 2000 {
+        if self.since_last_frame_ms() > 2000 {
             return None;
         }
         Some(Receive {
@@ -222,6 +221,14 @@ impl Link {
 
     fn now_ms(&self) -> u32 {
         self.0.epoch.elapsed().as_millis() as u32
+    }
+
+    /// Milliseconds since the last frame arrived. The stamp is read
+    /// before the clock: the listener's thread may store a newer stamp
+    /// between the two, and that is no silence, not a wrap.
+    fn since_last_frame_ms(&self) -> i32 {
+        let last = self.0.last_frame_ms.load(Ordering::Relaxed);
+        self.now_ms().wrapping_sub(last) as i32
     }
 
     fn push(&self, frame: Frame) {
@@ -471,11 +478,9 @@ impl Warden for MultiroomReceiver {
         if h.state.status == Status::Paused {
             return Progress::Idle(250);
         }
-        let silent = self
-            .link
-            .now_ms()
-            .wrapping_sub(self.link.0.last_frame_ms.load(Ordering::Relaxed));
-        if u128::from(silent) > SILENCE_LIMIT.as_millis() {
+        if i128::from(self.link.since_last_frame_ms())
+            > SILENCE_LIMIT.as_millis() as i128
+        {
             return Progress::Failed("the source-host stopped sending".into());
         }
         let progress = loop {
