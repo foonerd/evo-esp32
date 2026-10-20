@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Shuffle, repeat, and what plays at power-on. `distributions/queue`
+  (`evo-esp32-queue`, no_std): the queue a distribution's loop owns,
+  items in the given order with a play order over them, shuffled or
+  not, repeat all (a fresh deal each lap when shuffled), one (a track
+  that ends on its own plays again; the listener's next moves on) or
+  off; previous and next wrap under all; a tap on a track makes its
+  folder or playlist the queue from that track; turning shuffle on
+  deals the tracks not yet played and off restores the order with the
+  hand on the same track; seeded by the distribution (the firmware logs
+  the seed). `evo-esp32-config` gains `shuffle`, `repeat` and `start`.
+  Firmware: the loop's `tracks`/`next` pair gives way to the queue;
+  Settings gains `Shuffle ›` and `Repeat ›`, written back to the card;
+  `start = <path>` names what plays at power-on (a folder, a file, a
+  playlist with `#Station`); a station named there waits for the
+  network and plays when it is up, "waiting for the network" on the
+  strip meanwhile; a `start` that is not on the card is reported in
+  `evostatus.txt` and the card plays. Defaults: shuffle on, repeat all,
+  the whole card.
 ## [0.1.0] - 2026-10-20
 
 The first release: the player on the Waveshare ESP32-C5-Touch-LCD-2.8, flashable from the GitHub release, built there from the tag (`.github/workflows/release.yml`; a manual run files a draft). `.github/FUNDING.yml`.

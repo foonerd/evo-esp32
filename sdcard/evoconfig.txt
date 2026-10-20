@@ -35,6 +35,19 @@ name = evo-player
 wifi_ssid = Your Network
 wifi_password = your password
 
+# The order the queue plays in: on (shuffled) or off (as listed). And
+# what happens at its end: all (starts again), off (stops), one (the
+# same track again). Both are also a tap away in Settings.
+shuffle = on
+repeat = all
+
+# What plays at power-on: a path on the card. Empty: the whole card, in
+# the order above. A folder plays that folder; a playlist (.m3u, .pls)
+# plays its first station, or the one named after a #, as in
+#   start = Radio/Evo Selection.m3u#Classic FM
+# A station waits for the network.
+start =
+
 # The DAC board on the header, when the player cannot tell by itself
 # (a board with no I2C part, such as a PCM5102A) or to override what it
 # found; the names are on the wiki's Audio out page. And where the

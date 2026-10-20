@@ -28,7 +28,7 @@ if ! rustup target list --installed | grep -qx "$bare"; then
 fi
 cargo build -p evo-esp32-sdk -p evo-esp32-steward -p org-evoframework-example-echo \
   -p org-evoframework-playback-sim -p org-evoframework-delivery-null \
-  -p evo-esp32-config \
+  -p evo-esp32-config -p evo-esp32-queue \
   -p evo-esp32-face \
   --target "$bare" --locked
 

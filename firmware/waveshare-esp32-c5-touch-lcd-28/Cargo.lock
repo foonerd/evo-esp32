@@ -763,6 +763,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-queue"
+version = "0.1.0"
+
+[[package]]
 name = "evo-esp32-sdk"
 version = "0.1.0"
 dependencies = [
@@ -794,6 +798,7 @@ dependencies = [
  "evo-esp32-config",
  "evo-esp32-face",
  "evo-esp32-platform-esp-idf",
+ "evo-esp32-queue",
  "evo-esp32-sdk",
  "evo-esp32-steward",
  "log",

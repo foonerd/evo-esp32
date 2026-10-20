@@ -67,6 +67,7 @@ use evo_esp32_face::{
     View,
 };
 use evo_esp32_platform_esp_idf::HttpOpener;
+use evo_esp32_queue::{Queue, Repeat};
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Correction, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -310,30 +311,86 @@ fn main() -> anyhow::Result<()> {
     );
 
     let mut tracks =
-        list_tracks(&mut steward, now()).map_err(|e| anyhow::anyhow!(e))?;
+        list_tracks(&mut steward, "", now()).map_err(|e| anyhow::anyhow!(e))?;
     memory("after the listing");
     if tracks.is_empty() {
         warn!("no audio file on the card; the face says so");
     }
-    // Each track once, shuffled so a bench run meets every format and
-    // rate on the card early; then the fabric idles.
-    // Stations have no end, so the boot's run through the card leaves
-    // them out; a tap in the library plays one.
+    // The card's files are the queue unless `start` names something
+    // else; stations have no end, so the card's run leaves them out and
+    // a tap in the library plays one.
     let stations = tracks.iter().filter(|t| is_stream(t)).count();
     tracks.retain(|t| !is_stream(t));
-    shuffle(&mut tracks);
-    info!(
-        "{} tracks, shuffled; {stations} stations on the card",
-        tracks.len()
-    );
-    let mut next = 0usize;
-    // The level the listener wants; every track starts at it.
-    let mut wanted = start_level;
+    let card_tracks = tracks.len();
+    // SAFETY: esp_random reads the hardware RNG; no preconditions.
+    let seed = unsafe {
+        (u64::from(sys::esp_random()) << 32) | u64::from(sys::esp_random())
+    };
+    let mut queue: Queue<Track> = Queue::new(seed);
+    queue.set_shuffle(config.settings.shuffle.unwrap_or(true));
+    queue.set_repeat(match config.settings.repeat {
+        Some(evo_esp32_config::Repeat::Off) => Repeat::Off,
+        Some(evo_esp32_config::Repeat::One) => Repeat::One,
+        Some(evo_esp32_config::Repeat::All) | None => Repeat::All,
+    });
     // Why the last thing asked for did not play, for the status strip.
     let mut notice: Option<String> = None;
-    let mut current =
-        play_next(&mut steward, &tracks, &mut next, now(), wanted, &mut notice);
+    // A station named by `start` waits for the network before it is
+    // asked for; a file does not.
+    let mut start_when_up = false;
+    match config.settings.start.clone() {
+        Some(start) => match starting_point(&mut steward, &start, now()) {
+            Ok((items, at)) => {
+                info!(
+                    "start: {start:?}: {} items, from {}",
+                    items.len(),
+                    at.map_or("the first".to_string(), |i| format!("#{i}"))
+                );
+                let station = at
+                    .and_then(|i| items.get(i))
+                    .or(items.first())
+                    .is_some_and(is_stream);
+                queue.set(items, at);
+                if station && net.is_some() {
+                    start_when_up = true;
+                }
+            }
+            Err(why) => {
+                warn!("start: {start:?}: {why}; the card plays");
+                notice = Some(format!("start: {why}"));
+                config.note(format!("start: {start} -> {why}"));
+                queue.set(tracks, None);
+            }
+        },
+        None => queue.set(tracks, None),
+    }
+    info!(
+        "queue: {} items, shuffle {}, repeat {}; {card_tracks} tracks and {stations} stations on the card; seed {seed:#x}",
+        queue.len(),
+        if queue.shuffle() { "on" } else { "off" },
+        repeat_name(queue.repeat())
+    );
+    // The level the listener wants; every track starts at it.
+    let mut wanted = start_level;
+    let mut current = if start_when_up {
+        if let Some(t) = queue.items().first() {
+            notice = Some(format!("{}: waiting for the network", t.title));
+        }
+        None
+    } else {
+        advance(
+            &mut steward,
+            &mut queue,
+            Step::Next,
+            now(),
+            wanted,
+            &mut notice,
+        )
+    };
     let mut track_started = Instant::now();
+    // What the release of custody should play: set before a skip that is
+    // not "the next one".
+    let mut then: Option<Step> = None;
 
     // The output subject's level and mute reach the sink from here.
     let mut level: Option<(u8, bool)> = None;
@@ -364,10 +421,9 @@ fn main() -> anyhow::Result<()> {
             env!("EVO_BUILD_ID")
         ),
         format!(
-            "running: theme {}, style {}, rotation {rotation}, volume {start_level}%, {} tracks on the card",
+            "running: theme {}, style {}, rotation {rotation}, volume {start_level}%, {card_tracks} tracks on the card",
             face.theme().name,
             face.layout().style.name(),
-            tracks.len()
         ),
     ];
     config.write_status(&status_head);
@@ -424,14 +480,15 @@ fn main() -> anyhow::Result<()> {
                                         )
                                     }
                                     _ => {
-                                        // Nothing in custody: start again.
-                                        if next >= tracks.len() {
-                                            next = 0;
-                                        }
-                                        current = play_next(
+                                        // Nothing in custody: the item in
+                                        // hand again (a held station), or
+                                        // the next; after the end, the
+                                        // start.
+                                        start_when_up = false;
+                                        current = advance(
                                             &mut steward,
-                                            &tracks,
-                                            &mut next,
+                                            &mut queue,
+                                            Step::Current,
                                             t,
                                             wanted,
                                             &mut notice,
@@ -441,15 +498,36 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Intent::Tap(Hotspot::Next) => {
-                                if next >= tracks.len() {
-                                    next = 0;
+                                if current.is_some() {
+                                    then = Some(Step::Skip);
+                                    skip(&mut steward, &mut current, t);
+                                } else {
+                                    current = advance(
+                                        &mut steward,
+                                        &mut queue,
+                                        Step::Skip,
+                                        t,
+                                        wanted,
+                                        &mut notice,
+                                    );
+                                    track_started = Instant::now();
                                 }
-                                skip(&mut steward, &mut current, t);
                             }
                             Intent::Tap(Hotspot::Previous) => {
-                                // `next` is one past the playing track.
-                                next = next.saturating_sub(2);
-                                skip(&mut steward, &mut current, t);
+                                if current.is_some() {
+                                    then = Some(Step::Previous);
+                                    skip(&mut steward, &mut current, t);
+                                } else {
+                                    current = advance(
+                                        &mut steward,
+                                        &mut queue,
+                                        Step::Previous,
+                                        t,
+                                        wanted,
+                                        &mut notice,
+                                    );
+                                    track_started = Instant::now();
+                                }
                             }
                             Intent::Slide(Hotspot::Volume(f)) => {
                                 let want = (f * 100.0).round() as u8;
@@ -489,8 +567,9 @@ fn main() -> anyhow::Result<()> {
                                     Screen::Settings => face.set_about(facts(
                                         &face,
                                         card_mb,
-                                        tracks.len(),
+                                        card_tracks,
                                         &network_line(&net),
+                                        &queue,
                                     )),
                                     _ => {}
                                 }
@@ -529,6 +608,26 @@ fn main() -> anyhow::Result<()> {
                                                 face.set_art(None);
                                             }
                                         }
+                                        Some(SettingsRow::Shuffle) => {
+                                            let on = !queue.shuffle();
+                                            queue.set_shuffle(on);
+                                            config.save(
+                                                "shuffle",
+                                                if on { "on" } else { "off" },
+                                            );
+                                        }
+                                        Some(SettingsRow::Repeat) => {
+                                            let next = match queue.repeat() {
+                                                Repeat::Off => Repeat::All,
+                                                Repeat::All => Repeat::One,
+                                                Repeat::One => Repeat::Off,
+                                            };
+                                            queue.set_repeat(next);
+                                            config.save(
+                                                "repeat",
+                                                repeat_name(next),
+                                            );
+                                        }
                                         Some(SettingsRow::Rotation) => {
                                             // The panel is oriented at bring-up:
                                             // write the setting and start again.
@@ -547,8 +646,9 @@ fn main() -> anyhow::Result<()> {
                                     face.set_about(facts(
                                         &face,
                                         card_mb,
-                                        tracks.len(),
+                                        card_tracks,
                                         &network_line(&net),
+                                        &queue,
                                     ));
                                     continue;
                                 }
@@ -591,15 +691,16 @@ fn main() -> anyhow::Result<()> {
                                 {
                                     // The folder becomes the queue, from
                                     // the tapped track on.
-                                    tracks = browse.tracks.clone();
-                                    next = at;
+                                    queue.set(browse.tracks.clone(), Some(at));
+                                    start_when_up = false;
                                     if current.is_some() {
+                                        then = Some(Step::Skip);
                                         skip(&mut steward, &mut current, t);
                                     } else {
-                                        current = play_next(
+                                        current = advance(
                                             &mut steward,
-                                            &tracks,
-                                            &mut next,
+                                            &mut queue,
+                                            Step::Skip,
                                             t,
                                             wanted,
                                             &mut notice,
@@ -695,12 +796,25 @@ fn main() -> anyhow::Result<()> {
                 };
                 config.set_network(line);
                 config.write_status(&status_head);
+                if start_when_up && matches!(event, net::Event::Up { .. }) {
+                    start_when_up = false;
+                    current = advance(
+                        &mut steward,
+                        &mut queue,
+                        Step::Next,
+                        now(),
+                        wanted,
+                        &mut notice,
+                    );
+                    track_started = Instant::now();
+                }
                 if face.screen() == Screen::Settings {
                     face.set_about(facts(
                         &face,
                         card_mb,
-                        tracks.len(),
+                        card_tracks,
                         &network_line(&net),
+                        &queue,
                     ));
                 }
             }
@@ -768,33 +882,33 @@ fn main() -> anyhow::Result<()> {
                 // by the next station unasked; Play tries it again. A
                 // file's end, and anything the listener let go of, moves
                 // on.
-                let ended_station = current.is_some()
-                    && next > 0
-                    && tracks.get(next - 1).is_some_and(is_stream);
+                let on_its_own = current.is_some();
+                let ended_station =
+                    on_its_own && queue.current().is_some_and(is_stream);
                 if ended_station {
-                    let station = &tracks[next - 1];
-                    warn!("{:?}: the stream ended", station.title);
-                    notice =
-                        Some(format!("{}: the stream ended", station.title));
+                    let title = queue.current().map(|t| t.title.clone());
+                    let title = title.unwrap_or_default();
+                    warn!("{title:?}: the stream ended");
+                    notice = Some(format!("{title}: the stream ended"));
                     current = None;
-                    next -= 1;
-                } else if next < tracks.len() {
-                    current = play_next(
+                } else {
+                    let step = then.take().unwrap_or(if on_its_own {
+                        Step::Next
+                    } else {
+                        Step::Skip
+                    });
+                    current = advance(
                         &mut steward,
-                        &tracks,
-                        &mut next,
+                        &mut queue,
+                        step,
                         now(),
                         wanted,
                         &mut notice,
                     );
+                    if current.is_none() && queue.current().is_none() {
+                        info!("the queue is at its end; the fabric idles");
+                    }
                     track_started = Instant::now();
-                } else if next == tracks.len() {
-                    info!(
-                        "all {} tracks played; the fabric idles",
-                        tracks.len()
-                    );
-                    current = None;
-                    next += 1;
                 }
             }
         }
@@ -905,10 +1019,11 @@ fn bring_up(sink: I2sSink<Codec>, now: Ticks) -> Result<Steward, String> {
 /// in the files source's order: one listing request per folder.
 fn list_tracks(
     steward: &mut Steward,
+    root: &str,
     now: Ticks,
 ) -> Result<Vec<Track>, String> {
     let mut tracks = Vec::new();
-    let mut pending = vec![String::new()];
+    let mut pending = vec![root.to_string()];
     while let Some(path) = pending.pop() {
         let listing = list_folder(steward, &path, now)?;
         let depth = path.split('/').filter(|s| !s.is_empty()).count();
@@ -988,14 +1103,6 @@ fn output_state(steward: &Steward) -> Option<delivery::State> {
 }
 
 /// A Fisher-Yates shuffle on the chip's hardware random numbers.
-fn shuffle<T>(items: &mut [T]) {
-    for i in (1..items.len()).rev() {
-        // SAFETY: esp_random reads the hardware RNG; no preconditions.
-        let r = unsafe { sys::esp_random() } as usize;
-        items.swap(i, r % (i + 1));
-    }
-}
-
 /// The playback projection against the wall clock since the track was
 /// assigned: position over elapsed is 1.0 when the decoder keeps up.
 fn report_playback(steward: &Steward, elapsed: Duration) {
@@ -1024,21 +1131,53 @@ fn report_playback(steward: &Steward, elapsed: Duration) {
 /// a refused track (a codec nobody stocks, an unreadable file) is logged
 /// and passed over, so one bad file does not end the run. The custody
 /// taken, if any.
-/// Play the track `next` names, or the first after it that opens: a
-/// file that will not play is passed over. A station that will not play
-/// is not: the one asked for stays on the face with the reason in
-/// `notice`, rather than another station starting unasked.
-fn play_next(
+/// How the queue moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// The item in hand again (a held station, a pause's end), else the
+    /// next.
+    Current,
+    /// The next, a track having ended on its own (repeat-one repeats).
+    Next,
+    /// The next, asked for (repeat-one moves on).
+    Skip,
+    /// The previous.
+    Previous,
+}
+
+/// Move the queue by `step` and play what it lands on, or the first
+/// after it that opens: a file that will not play is passed over. A
+/// station that will not play is not: the one asked for stays on the
+/// face with the reason in `notice`, rather than another station
+/// starting unasked.
+fn advance(
     steward: &mut Steward,
-    tracks: &[Track],
-    next: &mut usize,
+    queue: &mut Queue<Track>,
+    step: Step,
     now: Ticks,
     level: u8,
     notice: &mut Option<String>,
 ) -> Option<CustodyHandle> {
-    while let Some(track) = tracks.get(*next) {
-        *next += 1;
-        if !within_ceiling(track) {
+    let mut step = step;
+    // A queue of nothing but files above the ceiling would loop on
+    // repeat; one pass over it is enough to know.
+    for _ in 0..queue.len().max(1) {
+        let track = match step {
+            Step::Current => queue.current(),
+            Step::Next => queue.next(true),
+            Step::Skip => queue.next(false),
+            Step::Previous => queue.previous(),
+        };
+        let track = match track {
+            Some(t) => t.clone(),
+            None if step == Step::Current => {
+                step = Step::Skip;
+                continue;
+            }
+            None => return None,
+        };
+        step = Step::Skip;
+        if !within_ceiling(&track) {
             info!(
                 "{:?} is {} Hz, above this board's ceiling of {RATE_CEILING} Hz; passed over unopened",
                 track.title,
@@ -1046,18 +1185,18 @@ fn play_next(
             );
             continue;
         }
-        if is_stream(track) {
+        if is_stream(&track) {
             memory("before the station");
         }
-        match play(steward, track, now, level) {
+        match play(steward, &track, now, level) {
             Ok(handle) => {
-                if is_stream(track) {
+                if is_stream(&track) {
                     memory("with the station open");
                 }
                 *notice = None;
                 return Some(handle);
             }
-            Err(why) if is_stream(track) => {
+            Err(why) if is_stream(&track) => {
                 *notice = Some(format!("{}: {}", track.title, plain(&why)));
                 return None;
             }
@@ -1065,6 +1204,82 @@ fn play_next(
         }
     }
     None
+}
+
+/// The name a repeat mode is written as.
+fn repeat_name(repeat: Repeat) -> &'static str {
+    match repeat {
+        Repeat::Off => "off",
+        Repeat::All => "all",
+        Repeat::One => "one",
+    }
+}
+
+/// What `start` names: `(items, the index to start at)`. A playlist's
+/// stations, with `#Name` picking one; a folder's files, all of them,
+/// deep; a file, with its folder round it.
+fn starting_point(
+    steward: &mut Steward,
+    start: &str,
+    now: Ticks,
+) -> Result<(Vec<Track>, Option<usize>), String> {
+    let (path, pick) = match start.split_once('#') {
+        Some((p, n)) => (p.trim_end_matches('/'), Some(n.trim())),
+        None => (start.trim_end_matches('/'), None),
+    };
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".m3u")
+        || lower.ends_with(".m3u8")
+        || lower.ends_with(".pls")
+    {
+        let listing = list_folder(steward, path, now)?;
+        let items: Vec<Track> = listing
+            .entries
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Track(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        if items.is_empty() {
+            return Err(format!("{path}: no station in it"));
+        }
+        let at = match pick {
+            Some(name) if !name.is_empty() => Some(
+                items
+                    .iter()
+                    .position(|t| t.title.eq_ignore_ascii_case(name))
+                    .ok_or_else(|| {
+                        format!("{path}: no station called {name:?}")
+                    })?,
+            ),
+            _ => None,
+        };
+        return Ok((items, at));
+    }
+    // A folder, or a file in one.
+    let (folder, file) = match list_folder(steward, path, now) {
+        Ok(_) => (path.to_string(), None),
+        Err(_) => match path.rsplit_once('/') {
+            Some((f, name)) => (f.to_string(), Some(name)),
+            None => (String::new(), Some(path)),
+        },
+    };
+    let mut items = list_tracks(steward, &folder, now)?;
+    items.retain(|t| !is_stream(t));
+    if items.is_empty() {
+        return Err(format!("{path}: nothing to play in it"));
+    }
+    let at = match file {
+        Some(name) => Some(
+            items
+                .iter()
+                .position(|t| t.uri.ends_with(&format!("/{name}")))
+                .ok_or_else(|| format!("{path}: not found"))?,
+        ),
+        None => None,
+    };
+    Ok((items, at))
 }
 
 /// A refusal's reason in the listener's words, for the status strip.
@@ -1331,7 +1546,13 @@ fn network_line(net: &Option<net::Net>) -> String {
     }
 }
 
-fn facts(face: &Face, card_mb: u64, tracks: usize, network: &str) -> About {
+fn facts(
+    face: &Face,
+    card_mb: u64,
+    tracks: usize,
+    network: &str,
+    queue: &Queue<Track>,
+) -> About {
     let fact = |name: &str, value: String| Fact {
         name: name.to_string(),
         value,
@@ -1351,6 +1572,11 @@ fn facts(face: &Face, card_mb: u64, tracks: usize, network: &str) -> About {
             fact("Style \u{203a}", face.layout().style.name().to_string()),
             fact("Rotation \u{203a}", format!("{}", face.layout().rotation)),
             fact(
+                "Shuffle \u{203a}",
+                if queue.shuffle() { "on" } else { "off" }.to_string(),
+            ),
+            fact("Repeat \u{203a}", repeat_name(queue.repeat()).to_string()),
+            fact(
                 "Card",
                 format!("{:.0} GB, {tracks} tracks", card_mb as f64 / 1024.0),
             ),
@@ -1364,6 +1590,8 @@ enum SettingsRow {
     Theme,
     Style,
     Rotation,
+    Shuffle,
+    Repeat,
 }
 
 fn settings_row(i: usize) -> Option<SettingsRow> {
@@ -1371,6 +1599,8 @@ fn settings_row(i: usize) -> Option<SettingsRow> {
         4 => Some(SettingsRow::Theme),
         5 => Some(SettingsRow::Style),
         6 => Some(SettingsRow::Rotation),
+        7 => Some(SettingsRow::Shuffle),
+        8 => Some(SettingsRow::Repeat),
         _ => None,
     }
 }

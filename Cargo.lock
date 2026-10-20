@@ -155,6 +155,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-queue"
+version = "0.1.0"
+
+[[package]]
 name = "evo-esp32-sdk"
 version = "0.1.0"
 dependencies = [

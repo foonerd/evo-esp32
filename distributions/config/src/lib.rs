@@ -47,6 +47,9 @@ pub const KEYS: &[&str] = &[
     "wifi_password",
     "dac",
     "output",
+    "shuffle",
+    "repeat",
+    "start",
 ];
 
 /// Values from the file, each `None` where the file did not say or said
@@ -74,6 +77,46 @@ pub struct Settings {
     pub dac: Option<String>,
     /// Where the frames go when the board has a speaker and a DAC both.
     pub output: Option<Output>,
+    /// Whether the queue plays in a shuffled order.
+    pub shuffle: Option<bool>,
+    /// What happens at the queue's end.
+    pub repeat: Option<Repeat>,
+    /// What plays at power-on: a path on the card (a folder, a file, a
+    /// playlist), with `#Name` after a playlist to pick a station. Not
+    /// set, the whole card.
+    pub start: Option<String>,
+}
+
+/// What happens at the end of the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Repeat {
+    /// It stops.
+    #[default]
+    Off,
+    /// It starts again.
+    All,
+    /// The one track plays again.
+    One,
+}
+
+impl Repeat {
+    /// The name [`parse`] accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            Repeat::Off => "off",
+            Repeat::All => "all",
+            Repeat::One => "one",
+        }
+    }
+
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "off" | "no" | "none" => Some(Repeat::Off),
+            "all" | "on" | "yes" => Some(Repeat::All),
+            "one" | "track" => Some(Repeat::One),
+            _ => None,
+        }
+    }
 }
 
 /// Where the frames go.
@@ -210,6 +253,31 @@ fn take(settings: &mut Settings, key: &str, value: &str) -> bool {
                 },
             }
         }
+        "shuffle" => {
+            settings.shuffle = match value.to_ascii_lowercase().as_str() {
+                "" => None,
+                "on" | "yes" | "true" | "1" => Some(true),
+                "off" | "no" | "false" | "0" => Some(false),
+                _ => return false,
+            }
+        }
+        "repeat" => {
+            settings.repeat = match value {
+                "" => None,
+                v => match Repeat::named(&v.to_ascii_lowercase()) {
+                    Some(r) => Some(r),
+                    None => return false,
+                },
+            }
+        }
+        "start" => {
+            // A path on the card, never one that leaves it.
+            if value.contains("..") || value.contains('\\') {
+                return false;
+            }
+            settings.start =
+                text.map(|t| t.trim_start_matches('/').to_string());
+        }
         _ => return false,
     }
     true
@@ -328,6 +396,15 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
     if let Some(v) = s.output {
         applied.push(("output", v.name().to_string()));
     }
+    if let Some(v) = s.shuffle {
+        applied.push(("shuffle", if v { "on" } else { "off" }.to_string()));
+    }
+    if let Some(v) = s.repeat {
+        applied.push(("repeat", v.name().to_string()));
+    }
+    if let Some(v) = &s.start {
+        applied.push(("start", v.clone()));
+    }
     if applied.is_empty() {
         lines.push("read: no settings in the file".to_string());
     } else {
@@ -411,6 +488,32 @@ mod tests {
         let p = parse("output = headphones\n");
         assert_eq!(p.settings.output, None);
         assert_eq!(p.invalid.len(), 1);
+    }
+
+    #[test]
+    fn shuffle_repeat_and_start_are_read() {
+        let p = parse(
+            "shuffle = Off\nrepeat = one\nstart = Radio/Evo Selection.m3u#Classic FM\n",
+        );
+        assert!(p.is_clean(), "{p:?}");
+        assert_eq!(p.settings.shuffle, Some(false));
+        assert_eq!(p.settings.repeat, Some(Repeat::One));
+        assert_eq!(
+            p.settings.start.as_deref(),
+            Some("Radio/Evo Selection.m3u#Classic FM")
+        );
+        let p = parse(
+            "start = /Music/Queen\nshuffle = sometimes\nrepeat = twice\n",
+        );
+        assert_eq!(p.settings.start.as_deref(), Some("Music/Queen"));
+        assert_eq!(p.invalid.len(), 2);
+        let p = parse("start = ../etc\n");
+        assert_eq!(p.settings.start, None);
+        assert_eq!(p.invalid.len(), 1, "a path that leaves the card");
+        assert_eq!(
+            status_lines(&parse("repeat = all\n")),
+            ["read: repeat = all"]
+        );
     }
 
     #[test]
