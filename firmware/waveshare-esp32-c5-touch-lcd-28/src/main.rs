@@ -608,6 +608,12 @@ fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
+                            Intent::Tap(Hotspot::Text) => {
+                                face.show_sheet(true);
+                            }
+                            Intent::Tap(Hotspot::Sheet) => {
+                                face.show_sheet(false);
+                            }
                             Intent::Tap(Hotspot::Back) => {
                                 if let Some(parent) = browse.trail.pop() {
                                     browse.open(
@@ -663,7 +669,6 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let mut state = View::new(&pb, output.as_ref(), "Card");
-            state.clock_ms = started.elapsed().as_millis() as u64;
             if current.is_none() {
                 state.notice = notice.clone().unwrap_or_default();
             }
@@ -758,7 +763,22 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if kind.contains("custody_released") {
-                if next < tracks.len() {
+                // A station that ends on its own (the fetcher gave up on
+                // the connection) is held with the reason, not followed
+                // by the next station unasked; Play tries it again. A
+                // file's end, and anything the listener let go of, moves
+                // on.
+                let ended_station = current.is_some()
+                    && next > 0
+                    && tracks.get(next - 1).is_some_and(is_stream);
+                if ended_station {
+                    let station = &tracks[next - 1];
+                    warn!("{:?}: the stream ended", station.title);
+                    notice =
+                        Some(format!("{}: the stream ended", station.title));
+                    current = None;
+                    next -= 1;
+                } else if next < tracks.len() {
                     current = play_next(
                         &mut steward,
                         &tracks,
@@ -1057,7 +1077,10 @@ fn plain(why: &str) -> &'static str {
         "the server refused"
     } else if why.contains("os error 12") || why.contains("NO_MEM") {
         "out of memory"
-    } else if why.contains("unsupported") || why.contains("codec") {
+    } else if why.contains("unsupported")
+        || why.contains("codec")
+        || why.contains("not supported")
+    {
         "format not supported here"
     } else {
         "could not open"

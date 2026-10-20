@@ -6,6 +6,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Radio, from the second bench. The ticker is gone: a tap on the text
+  block of Now Playing raises a details sheet, a card over the middle
+  with the whole title, artist, station and format wrapped and centred;
+  a tap anywhere puts it down, the navigation works through it, a
+  track change puts it down. Nothing on the face moves on its own.
+  Playlists are folders of their own in the library (Radio › Evo
+  Selection › …), their stations in the playlist's order; the queue
+  after a tap is that playlist. A stream the build cannot decode is
+  refused by the server's `Content-Type` before a byte is probed (AAC
+  without the feature, playlists, HTML), and a live stream's probe is
+  capped at 96 KB — the first bench hung the player for 58 s while
+  Symphonia read a megabyte of an AAC stream looking for a format. A
+  dropped connection is opened again by the fetch thread, three times
+  with a doubling pause, the metadata interval re-read, before the
+  station is given up (`StreamOpener` is now `Send + Sync`, shared with
+  that thread); a station that ends for good holds with "the stream
+  ended" on the strip, Play tries it again — a file's end still moves
+  on. mbedTLS's AES is software now: the hardware path copies a record
+  held in PSRAM through DMA-capable internal buffers it allocates per
+  call, and when internal SRAM was briefly short (a logo arriving as a
+  station started) the allocation failed, the TLS read with it, and the
+  station died ten seconds in (`esp-aes: Failed to allocate memory`,
+  twice in the bench). Measured: a station's open costs 5 KB of
+  internal SRAM; with an MP3 station playing 17 KB are free, the MP3
+  decoder's buffers the bulk. The host gains `--sheet`. The sample
+  playlist for the bench (`target/`, not shipped) names an AAC stream
+  and a dead host on purpose.
 - Station logos, a name card, and a ticker. `sdk`: `Track` gains `art`,
   a picture's URI where the source knows one. `source.files`: an M3U's
   `tvg-logo="…"` (the IPTV attribute) names a station's picture, a URL
@@ -17,10 +44,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a square of the background, a cover cropped to its centre; a theme
   change recomposes it. `face`: a station without a logo shows its
   name in the art square (disc label or card tile, up to three lines);
-  a text line too long for its area scrolls as a loop (the text, a
-  gap, the text again), holding three seconds at the start of each
-  lap, 16 px/s, on Now Playing's three lines and a list page's bar,
-  driven by a `clock_ms` the caller puts on the `View`; the status
+  a text line too long for its area scrolled as a loop (replaced by
+  the details sheet in the entry above, after the bench); the status
   strip can carry a `notice`. `sdcard/Radio/Evo Selection.m3u` is now
   a UK selection (29 stations, with Radio Paradise's FLAC streams)
   drawn from radio-browser.info, every stream and logo checked.

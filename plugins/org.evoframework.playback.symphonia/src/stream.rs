@@ -3,9 +3,8 @@
 
 //! A stream from the network as a media source for the decoder.
 //!
-//! The transport is the distribution's
-//! ([`StreamOpener`](evo_esp32_sdk::contract::audio::playback::StreamOpener));
-//! this module makes what it opens readable by Symphonia without the
+//! The transport is the distribution's ([`StreamOpener`]); this module
+//! makes what it opens readable by Symphonia without the
 //! decoder's tick ever waiting on the network. A fetch thread reads the
 //! stream into a ring, well ahead; the decoder's side reads from the
 //! ring and the tick asks [`Live::ready`] before decoding, so a packet
@@ -19,7 +18,24 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use evo_esp32_sdk::contract::audio::playback::ByteStream;
+use evo_esp32_sdk::contract::audio::playback::{ByteStream, StreamOpener};
+use log::{info, warn};
+
+/// How a dropped connection is taken up again.
+pub struct Reopen {
+    /// The distribution's transport.
+    pub opener: Arc<dyn StreamOpener>,
+    /// The stream's address, asked for again as it was.
+    pub uri: String,
+}
+
+/// How many times in a row a dropped stream is opened again before the
+/// fetcher gives up, and the pause before each try (doubling).
+const RECONNECTS: u32 = 3;
+const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
+/// After this many bytes flow from a reopened stream, the count of
+/// tries starts again: a drop an hour later gets its own three.
+const SETTLED: usize = 256 * 1024;
 use symphonia::core::io::MediaSource;
 
 /// The ring's size: half a minute of a 128 kb/s stream, four seconds
@@ -91,12 +107,21 @@ impl StreamInfo {
     }
 }
 
+/// What the probe may consume before it must have found the format:
+/// a stream it cannot name is given up here, not at Symphonia's own
+/// limit of a megabyte, which at 128 kb/s is a minute with the player
+/// held. MP3 syncs within a few kilobytes; an Ogg page is at most 64 KB.
+const PROBE_BUDGET: usize = 96 * 1024;
+
 /// The ring between the fetcher and the decoder.
 struct Ring {
     buf: Vec<u8>,
     /// Byte positions, monotonic.
     written: usize,
     read: usize,
+    /// What the decoder's side may still read before the probe is done;
+    /// `usize::MAX` once it is.
+    budget: usize,
     /// The fetcher is done: the server closed or the transport failed.
     ended: bool,
     /// Why, when it failed.
@@ -139,9 +164,13 @@ pub struct Live {
 }
 
 /// Start fetching `stream` on a thread: the reader for the decoder and
-/// the handle for the player. The thread ends when the stream ends or
-/// both are dropped.
-pub fn start(stream: Box<dyn ByteStream>) -> std::io::Result<(Buffered, Live)> {
+/// the handle for the player. The thread ends when the stream ends and
+/// cannot be reopened (`reopen`, when given, is tried three times with
+/// a doubling pause) or both are dropped.
+pub fn start(
+    stream: Box<dyn ByteStream>,
+    reopen: Option<Reopen>,
+) -> std::io::Result<(Buffered, Live)> {
     let info = StreamInfo::from(stream.as_ref());
     let prebuffer = info
         .bitrate_kbps
@@ -153,6 +182,7 @@ pub fn start(stream: Box<dyn ByteStream>) -> std::io::Result<(Buffered, Live)> {
             buf: vec![0u8; RING],
             written: 0,
             read: 0,
+            budget: PROBE_BUDGET,
             ended: false,
             fault: None,
             title: None,
@@ -164,7 +194,7 @@ pub fn start(stream: Box<dyn ByteStream>) -> std::io::Result<(Buffered, Live)> {
     thread::Builder::new()
         .name("fetch".into())
         .stack_size(16 * 1024)
-        .spawn(move || fetch(stream, metaint, fetcher))?;
+        .spawn(move || fetch(stream, metaint, reopen, fetcher))?;
     Ok((
         Buffered {
             shared: shared.clone(),
@@ -218,6 +248,13 @@ impl Live {
     pub fn take_title(&self) -> Option<String> {
         self.shared.ring.lock().ok()?.title.take()
     }
+
+    /// The probe named the format: the decoder may read without limit.
+    pub fn probed(&self) {
+        if let Ok(mut r) = self.shared.ring.lock() {
+            r.budget = usize::MAX;
+        }
+    }
 }
 
 impl Read for Buffered {
@@ -247,7 +284,14 @@ impl Read for Buffered {
             // Ended with nothing left: the end of the stream.
             return Ok(0);
         }
-        let n = buf.len().min(r.available());
+        if r.budget == 0 {
+            // The probe read its allowance without naming the format.
+            return Ok(0);
+        }
+        let n = buf.len().min(r.available()).min(r.budget);
+        if r.budget != usize::MAX {
+            r.budget -= n;
+        }
         let len = r.buf.len();
         let at = r.read % len;
         let first = n.min(len - at);
@@ -303,12 +347,16 @@ impl MediaSource for Buffered {
 fn fetch(
     mut stream: Box<dyn ByteStream>,
     metaint: Option<usize>,
+    reopen: Option<Reopen>,
     shared: std::sync::Weak<Shared>,
 ) {
     let mut chunk = vec![0u8; FETCH];
     // Where we are between metadata blocks, and the block in progress.
+    let mut metaint = metaint;
     let mut until_meta = metaint.unwrap_or(usize::MAX);
     let mut meta: Option<(usize, Vec<u8>)> = None;
+    let mut tries = 0u32;
+    let mut since_reopen = 0usize;
     let finish = |why: Option<String>| {
         if let Some(s) = shared.upgrade() {
             if let Ok(mut r) = s.ring.lock() {
@@ -320,10 +368,55 @@ fn fetch(
     };
     loop {
         let n = match stream.read(&mut chunk) {
-            Ok(0) => return finish(None),
-            Ok(n) => n,
-            Err(e) => return finish(Some(e)),
+            Ok(n) if n > 0 => n,
+            end => {
+                // The server closed, or the transport failed: for a live
+                // stream both are a drop, taken up again a few times.
+                // Without a way to reopen, a close is the end.
+                let Some(again) = reopen.as_ref() else {
+                    return finish(end.err());
+                };
+                let mut why = match end {
+                    Ok(_) => "the server closed the stream".to_string(),
+                    Err(e) => e,
+                };
+                loop {
+                    if since_reopen >= SETTLED {
+                        tries = 0;
+                    }
+                    if tries >= RECONNECTS {
+                        warn!("stream: {why}; given up after {tries} tries");
+                        return finish(Some(why));
+                    }
+                    tries += 1;
+                    since_reopen = 0;
+                    let pause = RECONNECT_PAUSE * 2u32.pow(tries - 1);
+                    warn!(
+                        "stream: {why}; opening again in {} ms ({tries}/{RECONNECTS})",
+                        pause.as_millis()
+                    );
+                    thread::sleep(pause);
+                    if shared.upgrade().is_none() {
+                        return;
+                    }
+                    match again.opener.open(&again.uri) {
+                        Ok(fresh) => {
+                            // A fresh response: its own metadata interval,
+                            // and the count to the next block starts over.
+                            metaint = StreamInfo::from(fresh.as_ref()).metaint;
+                            until_meta = metaint.unwrap_or(usize::MAX);
+                            meta = None;
+                            stream = fresh;
+                            info!("stream: open again");
+                            break;
+                        }
+                        Err(e) => why = format!("open again: {e}"),
+                    }
+                }
+                continue;
+            }
         };
+        since_reopen += n;
         let mut bytes = &chunk[..n];
         while !bytes.is_empty() {
             let Some(s) = shared.upgrade() else {
@@ -427,6 +520,72 @@ mod tests {
         }
     }
 
+    /// Opens a short canned stream each time, `opens` counting; after
+    /// `serve` opens it refuses, so the fetcher gives up.
+    struct Dropping {
+        opens: std::sync::atomic::AtomicUsize,
+        serve: usize,
+    }
+
+    impl StreamOpener for Dropping {
+        fn open(&self, _uri: &str) -> Result<Box<dyn ByteStream>, String> {
+            let n =
+                self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n >= self.serve {
+                return Err("refused".into());
+            }
+            Ok(Box::new(Canned {
+                bytes: vec![b'a' + n as u8; 10],
+                at: 0,
+                piece: 4,
+                headers: vec![],
+            }))
+        }
+    }
+
+    #[test]
+    fn a_dropped_stream_is_opened_again_then_given_up() {
+        let opener: Arc<dyn StreamOpener> = Arc::new(Dropping {
+            opens: std::sync::atomic::AtomicUsize::new(1),
+            serve: 3,
+        });
+        let first = Canned {
+            bytes: vec![b'a'; 10],
+            at: 0,
+            piece: 4,
+            headers: vec![],
+        };
+        let (mut b, live) = start(
+            Box::new(first),
+            Some(Reopen {
+                opener,
+                uri: "http://x.example/s".into(),
+            }),
+        )
+        .unwrap();
+        live.probed();
+        let mut out = Vec::new();
+        // Pauses of 1, 2 and 4 s between tries; the read waits them out.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut buf = [0u8; 64];
+        while Instant::now() < deadline {
+            match b.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "aaaaaaaaaabbbbbbbbbbcccccccccc",
+            "the first, then two reopened streams, in one flow"
+        );
+        assert!(
+            matches!(live.ended(), Some(Some(why)) if why.contains("refused"))
+        );
+    }
+
     #[test]
     fn metadata_blocks_come_out_and_titles_are_kept() {
         // metaint 8: eight bytes of audio, a length byte, a block.
@@ -451,7 +610,7 @@ mod tests {
                 ("content-type", "audio/mpeg; charset=x".into()),
             ],
         };
-        let (mut b, live) = start(Box::new(stream)).unwrap();
+        let (mut b, live) = start(Box::new(stream), None).unwrap();
         assert_eq!(live.info.name.as_deref(), Some("Test FM"));
         assert_eq!(live.info.bitrate_kbps, Some(128));
         assert_eq!(live.info.extension_hint(), Some("mp3"));
@@ -476,7 +635,7 @@ mod tests {
             piece: 4096,
             headers: vec![],
         };
-        let (mut b, mut live) = start(Box::new(stream)).unwrap();
+        let (mut b, mut live) = start(Box::new(stream), None).unwrap();
         // The fetcher runs ahead; ready once the prebuffer is in or the
         // stream has ended.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -484,8 +643,20 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(live.ready());
-        let mut out = Vec::new();
+        // Until the probe is declared done, reads stop at its budget.
+        let mut probe = vec![0u8; PROBE_BUDGET + 10];
+        let mut got = 0;
+        loop {
+            let n = b.read(&mut probe[got..]).unwrap();
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        assert_eq!(got, PROBE_BUDGET, "the probe's allowance, then an end");
+        live.probed();
+        let mut out = probe[..got].to_vec();
         b.read_to_end(&mut out).unwrap();
-        assert_eq!(out, bytes);
+        assert_eq!(out, bytes, "after it, the rest comes whole");
     }
 }

@@ -58,6 +58,7 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
   --dir PATH        the music directory (default .)
   --seconds N       how long to run (default 5)
   --panel PATH      write the panel's last frame as a PNG
+  --sheet           with the details sheet raised over it
   --rotation DEG    the panel's rotation, 0, 90, 180 or 270 (default 0)
   --style NAME      the face's style, disc or card (default disc)
   --theme NAME      the face's theme: evo-default, night-sky, sunrise, air, liquid
@@ -70,6 +71,7 @@ struct Cli {
     dir: PathBuf,
     seconds: u64,
     panel: Option<PathBuf>,
+    sheet: bool,
     rotation: u16,
     style: Style,
     theme: Theme,
@@ -83,6 +85,7 @@ fn parse_args() -> Result<Cli, String> {
         dir: PathBuf::from("."),
         seconds: 5,
         panel: None,
+        sheet: false,
         rotation: 0,
         style: Style::Disc,
         theme: theme::EVO_DEFAULT,
@@ -95,6 +98,10 @@ fn parse_args() -> Result<Cli, String> {
         if flag == "--help" || flag == "-h" {
             println!("{USAGE}");
             std::process::exit(0);
+        }
+        if flag == "--sheet" {
+            cli.sheet = true;
+            continue;
         }
         let value = args
             .next()
@@ -499,6 +506,9 @@ fn main() {
                 saved = true;
             }
             was_playing = playing;
+            if cli.sheet && playing {
+                panel.face_mut().show_sheet(true);
+            }
             panel.draw(&panel::View::new(&st, output.as_ref(), "Folder"));
             let line = format!(
                 "playback: {:?} {} ms{}",

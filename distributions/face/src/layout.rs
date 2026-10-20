@@ -444,7 +444,7 @@ impl Layout {
         None
     }
 
-    fn hit_nav(&self, p: Point) -> Option<Hotspot> {
+    pub(crate) fn hit_nav(&self, p: Point) -> Option<Hotspot> {
         if !self.nav.contains(p) {
             return None;
         }
@@ -506,6 +506,12 @@ impl Layout {
                 return Some(Hotspot::Seek(turns(dx, dy)));
             }
         }
+        if [self.title, self.artist, self.album]
+            .iter()
+            .any(|r| r.contains(p))
+        {
+            return Some(Hotspot::Text);
+        }
         if self.art.contains(p) {
             return Some(Hotspot::Art);
         }
@@ -552,6 +558,10 @@ pub enum Hotspot {
     Nav(u8),
     /// The art.
     Art,
+    /// The text block: title, artist, album. Opens the details sheet.
+    Text,
+    /// Anywhere on the details sheet while it is up: puts it down.
+    Sheet,
     /// A list page's back chevron.
     Back,
     /// The `i`th visible row of a list page.

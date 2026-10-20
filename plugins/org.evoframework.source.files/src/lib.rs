@@ -10,10 +10,10 @@
 //! as a `track` subject so a consumer can find it again by URI. Nothing
 //! is read inside an audio file: tags are `metadata/tags`' concern,
 //! length is the decoder's. A playlist file (`.m3u`, `.m3u8`, `.pls`)
-//! is read, and the stations it names (`http://`, `https://`) are
-//! listed as tracks of the folder, titled as the playlist titles them:
-//! that is how internet radio reaches the player, a text file on the
-//! card.
+//! is a folder of its own: listed among the folders, and opened, its
+//! stations (`http://`, `https://`) in the playlist's order, titled as
+//! it titles them. That is how internet radio reaches the player, a
+//! text file on the card.
 //!
 //! A host plugin: it uses `std::fs`. On a device the same shelf is
 //! stocked by a source over the card's filesystem with this plugin's
@@ -89,11 +89,26 @@ impl SourceFiles {
         ctx: &mut dyn Context,
     ) -> Result<Listing, Fault> {
         let dir = self.resolve(&args.path)?;
+        let mut folders = Vec::new();
+        let mut tracks = Vec::new();
+        let playlist = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| is_playlist(n))
+            .map(str::to_string);
+        if let (Some(name), true) = (&playlist, dir.is_file()) {
+            // A playlist is a folder of its own: its stations.
+            let text =
+                std::fs::read_to_string(&dir).map_err(|e| Fault::Failed {
+                    detail: format!("{}: {e}", dir.display()),
+                })?;
+            let base = dir.parent().unwrap_or(&dir);
+            tracks.extend(stations(&text, &title_of(name), base));
+            return Ok(self.listed(args, ctx, folders, tracks));
+        }
         let read = std::fs::read_dir(&dir).map_err(|e| Fault::Failed {
             detail: format!("{}: {e}", dir.display()),
         })?;
-        let mut folders = Vec::new();
-        let mut tracks = Vec::new();
         for entry in read.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
@@ -122,13 +137,28 @@ impl SourceFiles {
                     art: None,
                 });
             } else if is_playlist(&name) {
-                if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                    tracks.extend(stations(&text, &title_of(&name), &dir));
-                }
+                folders.push((title_of(&name), rel));
             }
         }
+        Ok(self.listed(args, ctx, folders, tracks))
+    }
+}
+
+impl SourceFiles {
+    /// The listing of `folders` and `tracks` under `args.path`, sorted,
+    /// the tracks announced as subjects. A playlist's stations keep the
+    /// playlist's order; files are by title.
+    fn listed(
+        &mut self,
+        args: &ListArgs,
+        ctx: &mut dyn Context,
+        mut folders: Vec<(String, String)>,
+        mut tracks: Vec<Track>,
+    ) -> Listing {
         folders.sort();
-        tracks.sort_by(|a, b| a.title.cmp(&b.title));
+        if tracks.iter().all(|t| t.uri.starts_with("file://")) {
+            tracks.sort_by(|a, b| a.title.cmp(&b.title));
+        }
         for t in &tracks {
             let scheme = if t.uri.starts_with("file://") {
                 "file"
@@ -150,10 +180,10 @@ impl SourceFiles {
             .map(|(name, path)| Entry::Folder { path, name })
             .collect();
         entries.extend(tracks.into_iter().map(Entry::Track));
-        Ok(Listing {
+        Listing {
             path: args.path.trim_matches('/').to_string(),
             entries,
-        })
+        }
     }
 }
 
@@ -468,6 +498,11 @@ mod tests {
         ] {
             std::fs::write(dir.join(f), b"").unwrap();
         }
+        std::fs::write(
+            dir.join("Album/Stations.m3u"),
+            "#EXTM3U\n#EXTINF:-1,Second\nhttp://b.example/s\n#EXTINF:-1,First\nhttp://a.example/s\n",
+        )
+        .unwrap();
         dir
     }
 
@@ -543,8 +578,26 @@ mod tests {
         let listing: Listing = from_value(&r.outcome.unwrap()).unwrap();
         assert_eq!(listing.path, "Album");
         assert!(
-            matches!(&listing.entries[0], Entry::Track(t) if t.title == "1")
+            matches!(
+                &listing.entries[0],
+                Entry::Folder { name, path } if name == "Stations" && path == "Album/Stations.m3u"
+            ),
+            "a playlist is a folder of its own"
         );
+        assert!(
+            matches!(&listing.entries[1], Entry::Track(t) if t.title == "1")
+        );
+        let r = list(&mut s, "Album/Stations.m3u");
+        let listing: Listing = from_value(&r.outcome.unwrap()).unwrap();
+        let titles: Vec<&str> = listing
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Track(t) => Some(t.title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["Second", "First"], "in the playlist's order");
         std::fs::remove_dir_all(root).unwrap();
     }
 

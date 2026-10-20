@@ -39,6 +39,7 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use evo_esp32_sdk::context::Context;
 use evo_esp32_sdk::contract::audio::playback::{
@@ -164,7 +165,7 @@ pub struct PlaybackSymphonia {
     codecs: CodecRegistry,
     /// How `http://` and `https://` tracks are reached; none, and they
     /// are refused.
-    opener: Option<Box<dyn StreamOpener>>,
+    opener: Option<Arc<dyn StreamOpener>>,
     subject: Option<SubjectId>,
     in_hand: Option<InHand>,
 }
@@ -194,7 +195,7 @@ impl PlaybackSymphonia {
     /// With a way to reach `http://` and `https://` tracks: the
     /// distribution's transport.
     pub fn with_opener(mut self, opener: Box<dyn StreamOpener>) -> Self {
-        self.opener = Some(opener);
+        self.opener = Some(Arc::from(opener));
         self
     }
 
@@ -260,7 +261,7 @@ impl Warden for PlaybackSymphonia {
             .map_err(|e| CustodyError(format!("instruction: {e}")))?;
         let mut track = play.track;
         let (mut stream, format) =
-            open(&track.uri, &self.codecs, self.opener.as_deref())?;
+            open(&track.uri, &self.codecs, self.opener.as_ref())?;
         if track.duration_ms.is_none() {
             track.duration_ms = duration_ms(&stream);
         }
@@ -455,13 +456,35 @@ impl Warden for PlaybackSymphonia {
     }
 }
 
+/// Whether a server's `Content-Type` names something this build
+/// decodes. AAC is a feature; a type not known here is tried.
+fn decodable(content_type: &str) -> bool {
+    let kind = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    match kind.as_str() {
+        "audio/aac" | "audio/aacp" | "audio/x-aac" | "audio/mp4"
+        | "audio/x-m4a" => cfg!(feature = "aac"),
+        "application/vnd.apple.mpegurl"
+        | "application/x-mpegurl"
+        | "audio/mpegurl"
+        | "audio/x-mpegurl"
+        | "audio/x-scpls"
+        | "text/html" => false,
+        _ => true,
+    }
+}
+
 /// Open a URI: a `file://` on the host, or an `http://`/`https://`
 /// stream through the opener; probe it, pick its default audio track,
 /// make a decoder, and report the format the stream will come out in.
 fn open(
     uri: &str,
     codecs: &CodecRegistry,
-    opener: Option<&dyn StreamOpener>,
+    opener: Option<&Arc<dyn StreamOpener>>,
 ) -> Result<(Stream, Format), CustodyError> {
     let mut hint = Hint::new();
     let mut live = None;
@@ -471,7 +494,20 @@ fn open(
                 CustodyError("no transport for a network stream".into())
             })?;
             let bytes = opener.open(uri).map_err(CustodyError)?;
-            let (buffered, handle) = stream::start(bytes)
+            // A format this build cannot decode is refused by the server's
+            // word for it, before a byte of it is probed.
+            if let Some(kind) = bytes.header("content-type") {
+                if !decodable(&kind) {
+                    return Err(CustodyError(format!(
+                        "{kind}: format not supported here"
+                    )));
+                }
+            }
+            let reopen = stream::Reopen {
+                opener: Arc::clone(opener),
+                uri: uri.to_string(),
+            };
+            let (buffered, handle) = stream::start(bytes, Some(reopen))
                 .map_err(|e| CustodyError(format!("buffer: {e}")))?;
             if let Some(ext) = handle.info.extension_hint() {
                 hint.with_extension(ext);
@@ -502,6 +538,9 @@ fn open(
             MetadataOptions::default(),
         )
         .map_err(|e| CustodyError(format!("probe: {e}")))?;
+    if let Some(live) = &live {
+        live.probed();
+    }
     let track = reader
         .default_track(TrackType::Audio)
         .ok_or_else(|| CustodyError("no audio track".into()))?;

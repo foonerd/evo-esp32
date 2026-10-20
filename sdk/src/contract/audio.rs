@@ -304,8 +304,10 @@ pub mod playback {
         fn header(&self, name: &str) -> Option<String>;
     }
 
-    /// Opens the URIs a distribution's platform can reach.
-    pub trait StreamOpener: Send {
+    /// Opens the URIs a distribution's platform can reach. Shared with
+    /// the thread that fetches a stream, which opens the URI again when
+    /// the connection drops.
+    pub trait StreamOpener: Send + Sync {
         /// Open `uri` for reading, asking the server for the stream's
         /// metadata where the protocol has it (`Icy-MetaData: 1`).
         fn open(&self, uri: &str) -> Result<Box<dyn ByteStream>, String>;

@@ -35,6 +35,7 @@ pub mod touch;
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 pub use art::Art;
 use embedded_graphics::pixelcolor::Rgb565;
@@ -89,10 +90,6 @@ pub struct View {
     pub muted: bool,
     /// Where the music comes from, for the status strip: "Card".
     pub source: &'static str,
-    /// A clock that only goes forward, milliseconds, for what moves on
-    /// its own (a line too long for its area scrolling past); the caller
-    /// sets it, 0 keeps everything still.
-    pub clock_ms: u64,
     /// Why nothing is playing, when something was asked for and did not
     /// play ("Jazz24: not found (404)"); shown on the status strip in
     /// the format's place. Empty when there is nothing to say.
@@ -127,7 +124,6 @@ impl View {
             volume: out.map(|o| o.volume).unwrap_or(0),
             muted: out.map(|o| o.muted).unwrap_or(false),
             source,
-            clock_ms: 0,
             notice: String::new(),
         }
     }
@@ -213,8 +209,8 @@ pub enum Repaint {
     Rows,
     /// A list page's now-playing bar.
     Bar,
-    /// One text line too long for its area, moved a step along.
-    Ticker,
+    /// The details sheet, laid over Now Playing.
+    Sheet,
     /// One stage of a full frame; call again soon for the next.
     Partial,
     /// The whole face: a scene change, or the first frame, complete.
@@ -248,52 +244,6 @@ impl Scene {
     }
 }
 
-/// A text line too long for its area, shown as a loop: the text, a gap,
-/// and the text again following it in, moving left until the second
-/// copy stands where the first did; there it holds a while, then moves
-/// on. No jump: the end of one lap is the start of the next. The offset
-/// at any moment follows from the clock alone.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Ticker {
-    /// The text's width less the area's; 0 or less when it fits.
-    overflow: i32,
-    /// One lap: the text's width and the gap after it.
-    lap: i32,
-    /// The clock when the line was set.
-    since: u64,
-    /// The offset last painted.
-    painted: i32,
-}
-
-/// How long a scrolling line holds at its start each lap.
-const TICKER_HOLD_MS: u64 = 3000;
-/// How fast it moves.
-const TICKER_PX_PER_S: u64 = 16;
-/// The gap between the end of the text and its next copy.
-const TICKER_GAP: i32 = 48;
-
-impl Ticker {
-    /// The offset at `clock`, within one lap.
-    fn offset(&self, clock: u64) -> i32 {
-        if self.overflow <= 0 || self.lap <= 0 || clock <= self.since {
-            return 0;
-        }
-        let travel_ms = self.lap as u64 * 1000 / TICKER_PX_PER_S;
-        let t = (clock - self.since) % (TICKER_HOLD_MS + travel_ms);
-        if t < TICKER_HOLD_MS {
-            0
-        } else {
-            (((t - TICKER_HOLD_MS) * TICKER_PX_PER_S / 1000) as i32)
-                .min(self.lap - 1)
-        }
-    }
-}
-
-/// The lines that may scroll: the title, the artist, the album on Now
-/// Playing, and the title in a list page's bar.
-const TICKERS: usize = 4;
-const BAR_TICKER: usize = 3;
-
 /// Now Playing, repainted in place as the view moves.
 pub struct Face {
     layout: Layout,
@@ -301,7 +251,10 @@ pub struct Face {
     scene: Option<Scene>,
     second: Option<u64>,
     level: Option<(u8, bool)>,
-    tickers: [Ticker; TICKERS],
+    /// The details sheet is up over Now Playing.
+    sheet: bool,
+    /// The sheet was raised since the frame was last painted.
+    sheet_due: bool,
     /// How far round the ring the accent reaches.
     ring_to: f32,
     /// The next stage of a full paint in progress.
@@ -333,6 +286,11 @@ const THUMB: u32 = 28;
 
 /// The card's corner radius: evo-ui's `--radius`, 0.75 rem.
 const RADIUS: i32 = 12;
+/// The details sheet: its margin from the frame's sides, its padding,
+/// and the gap between its parts.
+const SHEET_MARGIN: i32 = 14;
+const SHEET_PAD: i32 = 14;
+const SHEET_GAP: i32 = 6;
 /// The knob on a slider.
 const KNOB: i32 = 5;
 
@@ -345,7 +303,8 @@ impl Face {
             scene: None,
             second: None,
             level: None,
-            tickers: [Ticker::default(); TICKERS],
+            sheet: false,
+            sheet_due: false,
             ring_to: 0.0,
             stage: None,
             art: None,
@@ -423,6 +382,12 @@ impl Face {
 
     /// What is under `p` on the screen in front, for a touch.
     pub fn hit(&self, p: Point) -> Option<Hotspot> {
+        if self.sheet && self.screen == Screen::NowPlaying {
+            return Some(match self.layout.hit_nav(p) {
+                Some(nav) => nav,
+                None => Hotspot::Sheet,
+            });
+        }
         self.layout.hit_on(self.screen, self.rows_filled(), p)
     }
 
@@ -525,6 +490,8 @@ impl Face {
         if self.scene.as_ref() != Some(&scene) {
             self.scene = Some(scene);
             self.stage = Some(0);
+            self.sheet = false;
+            self.sheet_due = false;
         }
         let stages = if on_page { PAGE_STAGES } else { STAGES };
         if let Some(stage) = self.stage {
@@ -558,13 +525,14 @@ impl Face {
                 return Ok(Repaint::Rows);
             }
         }
-        if let Some(n) = self.ticker_due(view.clock_ms) {
-            if n == BAR_TICKER {
-                self.paint_bar_title(target, view)?;
-            } else {
-                self.paint_text_line(target, view, n as u8)?;
-            }
-            return Ok(Repaint::Ticker);
+        if self.sheet_due {
+            self.sheet_due = false;
+            self.paint_sheet(target, view)?;
+            return Ok(Repaint::Sheet);
+        }
+        if self.sheet {
+            // Nothing under the sheet moves until it is put down.
+            return Ok(Repaint::None);
         }
         if on_page {
             // The position and the level are not on a list page; remember
@@ -586,38 +554,25 @@ impl Face {
         Ok(Repaint::None)
     }
 
-    /// The scrolling line whose offset moved since it was painted, if
-    /// one has: on Now Playing the three text lines, on a list page the
-    /// bar's title.
-    fn ticker_due(&mut self, clock: u64) -> Option<usize> {
-        let lines: &[usize] = if self.screen == Screen::NowPlaying {
-            &[0, 1, 2]
-        } else {
-            &[BAR_TICKER]
-        };
-        for &n in lines {
-            let offset = self.tickers[n].offset(clock);
-            if offset != self.tickers[n].painted {
-                self.tickers[n].painted = offset;
-                return Some(n);
-            }
+    /// Raise the details sheet over Now Playing (the whole title, artist,
+    /// album and format, wrapped), or put it down; the next refresh
+    /// paints it, or repaints the face whole without it. A tap anywhere
+    /// while it is up is [`Hotspot::Sheet`]; a track change puts it down.
+    pub fn show_sheet(&mut self, up: bool) {
+        if up == self.sheet {
+            return;
         }
-        None
+        self.sheet = up;
+        if up {
+            self.sheet_due = true;
+        } else {
+            self.scene = None;
+        }
     }
 
-    /// Measure the text lines against their areas for `view`, and start
-    /// their clocks: called when a line is painted whole.
-    fn set_ticker(&mut self, n: usize, width: i32, area: i32, clock: u64) {
-        let t = &mut self.tickers[n];
-        let (overflow, lap) = (width - area, width + TICKER_GAP);
-        if t.overflow != overflow || t.lap != lap {
-            *t = Ticker {
-                overflow,
-                lap,
-                since: clock,
-                painted: 0,
-            };
-        }
+    /// Whether the details sheet is up.
+    pub fn sheet(&self) -> bool {
+        self.sheet
     }
 
     /// [`refresh`](Self::refresh) through to a frame that is not partial:
@@ -845,7 +800,7 @@ impl Face {
     /// The now-playing bar at a page's foot: the art's thumbnail (or a
     /// small disc), the title, play or pause.
     fn paint_now_bar<D>(
-        &mut self,
+        &self,
         target: &mut D,
         view: &View,
     ) -> Result<(), D::Error>
@@ -881,9 +836,9 @@ impl Face {
         }
     }
 
-    /// The bar's title: the track's, scrolled when too long for the bar.
+    /// The bar's title: the track's, cut with an ellipsis when too long.
     fn paint_bar_title<D>(
-        &mut self,
+        &self,
         target: &mut D,
         view: &View,
     ) -> Result<(), D::Error>
@@ -896,29 +851,7 @@ impl Face {
         } else {
             (view.title.as_str(), t.foreground)
         };
-        let font = &text::BODY;
-        let width = font.width(title);
-        self.set_ticker(
-            BAR_TICKER,
-            width,
-            l.bar_title.size.width as i32,
-            view.clock_ms,
-        );
-        if width > l.bar_title.size.width as i32 {
-            let ticker = self.tickers[BAR_TICKER];
-            let offset = ticker.offset(view.clock_ms);
-            self.tickers[BAR_TICKER].painted = offset;
-            return font.line_scrolled(
-                target,
-                title,
-                l.bar_title,
-                offset,
-                ticker.lap,
-                colour,
-                |_| t.card,
-            );
-        }
-        font.line(target, title, l.bar_title, Align::Left, colour, t.card)
+        text::BODY.line(target, title, l.bar_title, Align::Left, colour, t.card)
     }
 
     /// One stage of the full frame, in painting order: the ground, the
@@ -1072,11 +1005,11 @@ impl Face {
         )
     }
 
-    /// Text line `n`: 0 the title, 1 the artist, 2 the album. A line too
-    /// long for its area scrolls (see [`Ticker`]); this paints the frame
-    /// for the view's clock.
+    /// Text line `n`: 0 the title, 1 the artist, 2 the album; a line too
+    /// long for its area is cut with an ellipsis, and read whole on the
+    /// details sheet.
     fn paint_text_line<D>(
-        &mut self,
+        &self,
         target: &mut D,
         view: &View,
         n: u8,
@@ -1120,48 +1053,119 @@ impl Face {
             1 => (artist_font, artist, l.artist, t.muted_fg),
             _ => (album_font, album, l.album, mix(t.muted_fg, under, 5)),
         };
-        let width = font.width(line);
-        self.set_ticker(
-            usize::from(n),
-            width,
-            area.size.width as i32,
-            view.clock_ms,
-        );
-        let lap = self.tickers[usize::from(n)].lap;
-        let offset = if width > area.size.width as i32 {
-            let offset = self.tickers[usize::from(n)].offset(view.clock_ms);
-            self.tickers[usize::from(n)].painted = offset;
-            Some(offset)
-        } else {
-            None
-        };
-        match (band, offset) {
-            (Some((band, band_colour)), Some(offset)) if self.art.is_some() => {
-                font.line_scrolled(
-                    target,
-                    line,
-                    area,
-                    offset,
-                    lap,
-                    colour,
-                    |p| self.band_ground(band.top_left.y, band_colour, p),
-                )
-            }
-            (Some((band, band_colour)), None) if self.art.is_some() => font
-                .line_over(target, line, area, align, colour, |p| {
+        match band {
+            Some((band, band_colour)) if self.art.is_some() => {
+                font.line_over(target, line, area, align, colour, |p| {
                     self.band_ground(band.top_left.y, band_colour, p)
-                }),
-            (_, Some(offset)) => font.line_scrolled(
-                target,
-                line,
-                area,
-                offset,
-                lap,
-                colour,
-                |_| under,
-            ),
-            (_, None) => font.line(target, line, area, align, colour, under),
+                })
+            }
+            _ => font.line(target, line, area, align, colour, under),
         }
+    }
+
+    /// The details sheet: a card over the middle of Now Playing with the
+    /// title, artist, album (or station) and format whole, each wrapped
+    /// to the card's width; a line too long for its place on the face
+    /// is read here.
+    fn paint_sheet<D>(
+        &self,
+        target: &mut D,
+        view: &View,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let l = self.layout;
+        let t = self.theme;
+        // The room: the frame less the navigation, with a margin.
+        let room = match l.nav_axis {
+            layout::NavAxis::Bar => Rectangle::new(
+                Point::zero(),
+                Size::new(l.frame.width, l.nav.top_left.y as u32),
+            ),
+            layout::NavAxis::Rail => Rectangle::new(
+                Point::new(l.nav.top_left.x + l.nav.size.width as i32, 0),
+                Size::new(l.frame.width - l.nav.size.width, l.frame.height),
+            ),
+        };
+        let width = room.size.width as i32 - 2 * SHEET_MARGIN;
+        let inner = width - 2 * SHEET_PAD;
+        // The lines, top to bottom: (font, text, colour, lines allowed).
+        let (title, artist, album) = if view.title.is_empty() {
+            ("Nothing playing", "", "")
+        } else {
+            (
+                view.title.as_str(),
+                view.artist.as_str(),
+                view.album.as_str(),
+            )
+        };
+        let format = view.format_line();
+        let parts: [(&text::Atlas, &str, Rgb565, usize); 4] = [
+            (&text::HEADING, title, t.foreground, 4),
+            (&text::BODY, artist, t.foreground, 2),
+            (&text::BODY, album, t.muted_fg, 3),
+            (&text::SMALL, &format, t.muted_fg, 1),
+        ];
+        // Each part's lines; a gap between parts.
+        let mut blocks: Vec<(&text::Atlas, Vec<String>, Rgb565)> = Vec::new();
+        let mut height = 0;
+        for (font, text, colour, max) in parts.iter() {
+            if text.is_empty() {
+                continue;
+            }
+            let lines: Vec<String> = font
+                .wrap(text, inner, *max)
+                .into_iter()
+                .map(|line| {
+                    if line.ellipsis {
+                        format!("{}…", line.head)
+                    } else {
+                        line.head.to_string()
+                    }
+                })
+                .collect();
+            if !blocks.is_empty() {
+                height += SHEET_GAP;
+            }
+            height += lines.len() as i32 * font.line as i32;
+            blocks.push((font, lines, *colour));
+        }
+        let card_h = (height + 2 * SHEET_PAD).min(room.size.height as i32);
+        let card = Rectangle::new(
+            Point::new(
+                room.top_left.x + (room.size.width as i32 - width) / 2,
+                room.top_left.y + (room.size.height as i32 - card_h) / 2,
+            ),
+            Size::new(width as u32, card_h as u32),
+        );
+        // A hairline of the border round the card, then the card.
+        let rim = Rectangle::new(
+            card.top_left - Point::new(1, 1),
+            card.size + Size::new(2, 2),
+        );
+        draw::rounded(target, rim, RADIUS + 1, t.border, t.background)?;
+        draw::rounded(target, card, RADIUS, t.card, t.border)?;
+        let mut y = card.top_left.y + SHEET_PAD;
+        let bottom = card.top_left.y + card_h - SHEET_PAD;
+        for (i, (font, lines, colour)) in blocks.iter().enumerate() {
+            if i > 0 {
+                y += SHEET_GAP;
+            }
+            let step = font.line as i32;
+            for shown in lines {
+                if y + step > bottom {
+                    return Ok(());
+                }
+                let area = Rectangle::new(
+                    Point::new(card.top_left.x + SHEET_PAD, y),
+                    Size::new(inner as u32, step as u32),
+                );
+                font.line(target, shown, area, Align::Centre, *colour, t.card)?;
+                y += step;
+            }
+        }
+        Ok(())
     }
 
     /// The navigation bar or rail, with the first item active.
@@ -1802,7 +1806,7 @@ mod tests {
         let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
         let view = View::new(&playing(), Some(&out()), "Card");
         face.refresh_whole(&mut display, &view).unwrap();
-        let entries: alloc::vec::Vec<Entry> = (0..12)
+        let entries: Vec<Entry> = (0..12)
             .map(|i| Entry {
                 name: alloc::format!("Track {i}"),
                 folder: i == 0,
@@ -1927,34 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ticker_holds_then_laps_without_a_jump() {
-        let t = Ticker {
-            overflow: 48,
-            lap: 160,
-            since: 1000,
-            painted: 0,
-        };
-        // A lap of 160 px at 16 px/s: ten seconds of travel.
-        assert_eq!(t.offset(0), 0, "before it was set");
-        assert_eq!(t.offset(1000 + TICKER_HOLD_MS - 1), 0, "holding");
-        assert_eq!(t.offset(1000 + TICKER_HOLD_MS + 5000), 80, "half a lap");
-        assert_eq!(
-            t.offset(1000 + TICKER_HOLD_MS + 9999),
-            159,
-            "the second copy a pixel from where the first stood"
-        );
-        assert_eq!(
-            t.offset(1000 + TICKER_HOLD_MS + 10000),
-            0,
-            "which is the start of the next lap: no jump"
-        );
-        assert_eq!(t.offset(1000 + TICKER_HOLD_MS + 11000), 0, "holding");
-        let fits = Ticker { overflow: -3, ..t };
-        assert_eq!(fits.offset(1_000_000), 0, "a line that fits never moves");
-    }
-
-    #[test]
-    fn a_long_title_scrolls_and_a_station_shows_its_name() {
+    fn a_station_shows_its_name_and_the_sheet_reads_a_long_title() {
         let mut face = Face::new(0, Style::Disc, theme::EVO_DEFAULT);
         let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
         let mut view = View::new(&playing(), None, "Card");
@@ -1963,21 +1940,30 @@ mod tests {
         view.title =
             "A title much too long to fit the width of the panel in one line"
                 .to_string();
-        view.clock_ms = 1;
         assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Full));
         assert_eq!(view.station(), Some("Radio Paradise"));
-        assert_eq!(
-            face.refresh(&mut display, &view),
-            Ok(Repaint::None),
-            "holding"
-        );
-        view.clock_ms = 1 + TICKER_HOLD_MS + 500;
-        assert_eq!(
-            face.refresh(&mut display, &view),
-            Ok(Repaint::Ticker),
-            "the title moved"
-        );
         assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
+        // A tap on the text raises the sheet; the next refresh paints it
+        // and nothing under it moves; a tap anywhere puts it down.
+        let on_text = face.layout().title.center();
+        assert_eq!(face.hit(on_text), Some(Hotspot::Text));
+        face.show_sheet(true);
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Sheet));
+        view.position_ms += 5000;
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
+        assert_eq!(face.hit(face.layout().art.center()), Some(Hotspot::Sheet));
+        assert!(matches!(
+            face.hit(face.layout().nav_item(1)),
+            Some(Hotspot::Nav(1))
+        ));
+        face.show_sheet(false);
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Full));
+        // A track change while it is up puts it down.
+        face.show_sheet(true);
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Sheet));
+        view.title = "Another".to_string();
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Full));
+        assert!(!face.sheet());
         view.uri = "file:///music/a.flac".to_string();
         assert_eq!(view.station(), None);
     }
