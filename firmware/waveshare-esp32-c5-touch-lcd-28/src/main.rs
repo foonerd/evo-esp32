@@ -40,9 +40,14 @@
 //!    between each, so a track change does not starve the DMA ring; the
 //!    backlight comes on after the first frame.
 
+mod alloc;
 mod art;
 mod config;
+mod net;
 mod sink;
+
+#[global_allocator]
+static ALLOC: alloc::Placed = alloc::Placed;
 
 use std::time::{Duration, Instant};
 
@@ -136,8 +141,10 @@ fn main() -> anyhow::Result<()> {
         i2s0,
         spi2,
         pins,
+        modem,
         ..
     } = Peripherals::take()?;
+    memory("at start");
 
     // The SPI bus first, so the card is read before the panel is up.
     let spi = board::spi_bus(spi2, pins.gpio6, pins.gpio7, pins.gpio8)?;
@@ -152,6 +159,7 @@ fn main() -> anyhow::Result<()> {
         }
     };
     let card_mb = _card.capacity >> 20;
+    memory("after the card");
 
     // The card's evoconfig.txt: rotation is applied at the panel's
     // bring-up, theme and style when the face is made, the level at the
@@ -201,6 +209,7 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("es8311 volume: {e:?}"))?;
     info!("es8311: open, {RATE} Hz 16-bit, started, at its 100% ({half_db} half-dB); the level is the sink's");
 
+    memory("after the panel and the codec");
     let sink = I2sSink::new(
         i2s0,
         pins.gpio24,
@@ -210,6 +219,38 @@ fn main() -> anyhow::Result<()> {
         Codec(codec),
     )?;
     info!("i2s0: master, Philips 16-bit stereo, BCLK GPIO24, WS GPIO25, DOUT GPIO26");
+    memory("after the DMA ring");
+
+    // The network, on its own thread, after the ring has its memory: the
+    // music does not wait for the search, and the ring is not short for
+    // the driver. Its line in the status and in Settings follows the link.
+    let mut net = match config.settings.wifi_ssid.clone() {
+        Some(ssid) => {
+            let password =
+                config.settings.wifi_password.clone().unwrap_or_default();
+            let hostname = config
+                .settings
+                .name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_NAME.to_string());
+            match net::Net::start(modem, ssid.clone(), password, Some(hostname))
+            {
+                Ok(net) => {
+                    config.set_network(format!("wifi: joining '{ssid}'"));
+                    Some(net)
+                }
+                Err(e) => {
+                    warn!("net: no thread: {e}");
+                    config.set_network(format!("wifi: could not start: {e}"));
+                    None
+                }
+            }
+        }
+        None => {
+            config.set_network("wifi: no wifi_ssid set; no network");
+            None
+        }
+    };
 
     // The HAT's copy of the bus. The Pi header's I2S is BCLK pin 12, LRCLK
     // pin 35, DIN pin 40, GND pin 6; the HAT's 5 V is its own.
@@ -245,6 +286,7 @@ fn main() -> anyhow::Result<()> {
 
     let now = || Ticks(started.elapsed().as_millis() as u64);
     let mut steward = bring_up(sink, now()).map_err(|e| anyhow::anyhow!(e))?;
+    memory("after the steward");
     info!(
         "steward up with {} plugins: {}",
         steward.plugins().count(),
@@ -257,6 +299,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut tracks =
         list_tracks(&mut steward, now()).map_err(|e| anyhow::anyhow!(e))?;
+    memory("after the listing");
     if tracks.is_empty() {
         warn!("no audio file on the card; the face says so");
     }
@@ -288,14 +331,12 @@ fn main() -> anyhow::Result<()> {
     let theme = config.theme(theme::EVO_DEFAULT);
     let style = config.style(Style::Disc);
     let mut face = Face::new(rotation, style, theme);
-    if config.settings.wifi_ssid.is_some() {
-        config
-            .note("wifi_ssid: read; this firmware does not join networks yet");
-    }
+    memory("after the face");
     if config.settings.dac.is_some() || config.settings.output.is_some() {
         config.note("dac, output: read; this firmware plays the speaker and a HAT both and has no register of boards yet");
     }
-    config.write_status(&[
+    memory("before the first frame");
+    let status_head = [
         format!(
             "evo-esp32 {} {} on Waveshare ESP32-C5-Touch-LCD-2.8",
             env!("CARGO_PKG_VERSION"),
@@ -307,9 +348,11 @@ fn main() -> anyhow::Result<()> {
             face.layout().style.name(),
             tracks.len()
         ),
-    ]);
+    ];
+    config.write_status(&status_head);
     // Album art, fetched beneath this task; the face shows it when it lands.
     let mut art = art::Fetcher::new(face.layout().art.size.width)?;
+    memory("after the art fetcher");
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
     let mut painting = false;
@@ -426,6 +469,7 @@ fn main() -> anyhow::Result<()> {
                                         &face,
                                         card_mb,
                                         tracks.len(),
+                                        &network_line(&net),
                                     )),
                                     _ => {}
                                 }
@@ -475,6 +519,7 @@ fn main() -> anyhow::Result<()> {
                                         &face,
                                         card_mb,
                                         tracks.len(),
+                                        &network_line(&net),
                                     ));
                                     continue;
                                 }
@@ -593,6 +638,30 @@ fn main() -> anyhow::Result<()> {
             }
             if let Some(found) = art.poll() {
                 face.set_art(found.art);
+            }
+            if let Some(event) = net.as_mut().and_then(|n| n.poll()) {
+                let line = match &event {
+                    net::Event::Up {
+                        ssid,
+                        address,
+                        hostname,
+                        channel,
+                    } => format!(
+                        "wifi: joined '{ssid}' on channel {channel}; hostname {hostname}, address {address}"
+                    ),
+                    net::Event::Down => "wifi: link down; rejoining".to_string(),
+                    net::Event::Failed(why) => format!("wifi: off: {why}"),
+                };
+                config.set_network(line);
+                config.write_status(&status_head);
+                if face.screen() == Screen::Settings {
+                    face.set_about(facts(
+                        &face,
+                        card_mb,
+                        tracks.len(),
+                        &network_line(&net),
+                    ));
+                }
             }
             let painted = face.refresh(&mut board.panel, &state);
             let took = last_face.elapsed();
@@ -1112,7 +1181,31 @@ impl Browse {
 }
 
 /// What the settings page says about this player.
-fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
+/// The hostname when `name` is not set: the template's.
+const DEFAULT_NAME: &str = "evo-player";
+
+/// A line of internal SRAM left at a point of the boot: what the DMA
+/// rings, the stacks and the Wi-Fi driver compete for.
+fn memory(when: &str) {
+    // SAFETY: plain getters with no preconditions.
+    let (free, largest) = unsafe {
+        (
+            sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL),
+            sys::heap_caps_get_largest_free_block(sys::MALLOC_CAP_INTERNAL),
+        )
+    };
+    info!("memory: internal {free} B free, largest block {largest} B, {when}");
+}
+
+/// What the Wi-Fi row says.
+fn network_line(net: &Option<net::Net>) -> String {
+    match net {
+        Some(net) => net.state.line(),
+        None => "not set".to_string(),
+    }
+}
+
+fn facts(face: &Face, card_mb: u64, tracks: usize, network: &str) -> About {
     let fact = |name: &str, value: String| Fact {
         name: name.to_string(),
         value,
@@ -1120,6 +1213,7 @@ fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
     About {
         facts: vec![
             fact("Player", format!("evo-esp32 {}", env!("CARGO_PKG_VERSION"))),
+            fact("Wi-Fi", network.to_string()),
             fact(
                 "Build",
                 env!("EVO_BUILD_ID")
@@ -1148,9 +1242,9 @@ enum SettingsRow {
 
 fn settings_row(i: usize) -> Option<SettingsRow> {
     match i {
-        3 => Some(SettingsRow::Theme),
-        4 => Some(SettingsRow::Style),
-        5 => Some(SettingsRow::Rotation),
+        4 => Some(SettingsRow::Theme),
+        5 => Some(SettingsRow::Style),
+        6 => Some(SettingsRow::Rotation),
         _ => None,
     }
 }

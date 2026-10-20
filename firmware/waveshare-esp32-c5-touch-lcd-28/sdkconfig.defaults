@@ -1,6 +1,8 @@
-# Rust std needs more than the default main task stack.
-# The decoder runs on the main task; the heartbeat reports its low-water mark.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=49152
+# Rust std needs more than the default main task stack. The decoder runs
+# on the main task; the heartbeat reports its low-water mark, which a day
+# of FLAC, WAV and MP3 at 44.1 and 96 kHz left above 40 KB of 48, so 32
+# keeps a threefold margin and gives 16 KB of internal SRAM back.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
 
@@ -9,10 +11,34 @@ CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
-# Board has 8 MB PSRAM. Probe it, but keep booting if init fails so the
-# log reports the result instead of a boot loop.
+# Board has 8 MB PSRAM, and the player leans on it: the album art, the
+# decoder's buffers, and the Wi-Fi driver's and LwIP's pools go there.
+# A board without PSRAM therefore panics at init (the log says so)
+# rather than running out of internal RAM later; IGNORE_NOTFOUND would
+# also switch the Wi-Fi/LwIP-in-PSRAM option off.
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Internal SRAM is the scarce memory on the C5 (code in IRAM and data
+# share it). The Wi-Fi driver's IRAM optimisations default on and cost
+# tens of kilobytes of it for throughput a music stream does not need;
+# the code runs from flash instead. Static RX buffers are DMA memory and
+# stay internal, so few of them; the dynamic ones are in PSRAM.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=n
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+# The block-ack window may not exceed twice the static buffers.
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+# A player receives; it sends acknowledgements and requests. With the
+# pools in PSRAM the TX buffers are static (the only type allowed) and
+# the cache buffers are the internal copies the MAC sends from.
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
+CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=3
 
 # The card: long file names (the default is 8.3 only), buffers on the heap,
 # and names handed to the application as UTF-8 (the default is the OEM code

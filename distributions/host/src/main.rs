@@ -343,6 +343,7 @@ fn sample_about() -> About {
     About {
         facts: vec![
             fact("Player", "evo-esp32 0.1.0"),
+            fact("Wi-Fi", "192.168.1.23 (5 GHz)"),
             fact("Build", "a7fd9d9"),
             fact("Board", "Waveshare ESP32-C5 2.8"),
             fact("Theme", "Evo Default"),

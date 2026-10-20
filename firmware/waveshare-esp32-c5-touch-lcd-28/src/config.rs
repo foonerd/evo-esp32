@@ -25,6 +25,8 @@ pub struct Config {
     pub settings: Settings,
     /// The status report's lines so far.
     report: Vec<String>,
+    /// The network's line, which changes as the link does.
+    network: Option<String>,
 }
 
 impl Config {
@@ -71,6 +73,7 @@ impl Config {
             text,
             settings,
             report,
+            network: None,
         }
     }
 
@@ -116,10 +119,20 @@ impl Config {
         self.report.push(line.into());
     }
 
-    /// Write `evostatus.txt`: what the player is, then the report.
+    /// The network's line in the status, replacing the last.
+    pub fn set_network(&mut self, line: impl Into<String>) {
+        self.network = Some(line.into());
+    }
+
+    /// Write `evostatus.txt`: what the player is, then the report, then
+    /// the network.
     pub fn write_status(&self, head: &[String]) {
         let mut text = String::new();
-        for l in head.iter().chain(self.report.iter()) {
+        for l in head
+            .iter()
+            .chain(self.report.iter())
+            .chain(self.network.iter())
+        {
             text.push_str(l);
             text.push('\n');
         }

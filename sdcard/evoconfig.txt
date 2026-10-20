@@ -29,9 +29,9 @@ volume = 40
 # 30, no spaces. Leave empty for the default.
 name = evo-player
 
-# The Wi-Fi network to join, 2.4 or 5 GHz. Leave the password empty for
-# an open network. Read now, used once this firmware joins networks;
-# evostatus.txt says which.
+# The Wi-Fi network to join, 2.4 or 5 GHz, WPA2 or WPA3. Leave the
+# password empty for an open network. The address appears in Settings
+# and in evostatus.txt once joined.
 wifi_ssid = Your Network
 wifi_password = your password
 

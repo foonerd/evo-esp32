@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
+use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
 use esp_idf_svc::sys;
 use evo_esp32_face::art::{self, Art};
 use evo_esp32_platform_esp_idf::jpeg;
@@ -79,6 +79,10 @@ impl Fetcher {
             name: Some(c"art"),
             stack_size: STACK,
             priority: WORKER_PRIORITY,
+            // The stack lives in PSRAM: this thread never runs while the
+            // flash cache is off (it writes no flash), and internal SRAM
+            // is what the Wi-Fi stack and the DMA rings compete for.
+            stack_alloc_caps: MallocCap::Spiram | MallocCap::Cap8bit,
             ..Default::default()
         }
         .set()

@@ -18,10 +18,10 @@ harness = false
 [dependencies]
 # The companion's hardware layers, by commit until its next tag (MIT; the
 # dependency runs this way only, never the reverse).
-board = { package = "companion-board-waveshare-esp32-c5-touch-lcd-28", git = "https://github.com/foonerd/volumio-esp-companion", rev = "ccc5d413030fcc2032853b1f400032c38fd9e498" }
-companion-platform-esp-idf = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ccc5d413030fcc2032853b1f400032c38fd9e498" }
-es8311 = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ccc5d413030fcc2032853b1f400032c38fd9e498" }
-es9018k2m = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ccc5d413030fcc2032853b1f400032c38fd9e498" }
+board = { package = "companion-board-waveshare-esp32-c5-touch-lcd-28", git = "https://github.com/foonerd/volumio-esp-companion", rev = "f65d5688dcc297a760ac8e41822e902e280a5973" }
+companion-platform-esp-idf = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "f65d5688dcc297a760ac8e41822e902e280a5973" }
+es8311 = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "f65d5688dcc297a760ac8e41822e902e280a5973" }
+es9018k2m = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "f65d5688dcc297a760ac8e41822e902e280a5973" }
 embedded-hal-bus = "0.3"
 esp-idf-svc = { version = "0.53", features = ["std", "binstart"] }
 log = "0.4"

@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Wi-Fi. `firmware/waveshare-esp32-c5-touch-lcd-28`: with `wifi_ssid` in
+  `evoconfig.txt` the player joins the network on a thread of its own
+  (`net.rs`), through the companion's `WifiNet::join`: a network seen
+  before in about three seconds, a new one by a search of both bands in
+  about fourteen; the music starts without waiting. `name` is the
+  hostname the router is told. Settings gains a `Wi-Fi` row (address
+  and band, or why not), `evostatus.txt` a `wifi:` line rewritten as the
+  link comes and goes; a dropped link is rejoined. The companion is
+  pinned at the commit that lifts the join into `WifiNet`.
+- Internal SRAM. The Wi-Fi driver costs the ESP32-C5 about 110 KB of its
+  one SRAM, half of it code it keeps resident; naively linked it left 3
+  KB free. The firmware now: runs the driver's code from flash
+  (`sdkconfig.defaults`, the IRAM optimisations off; a music stream
+  does not need the throughput), puts the driver's and LwIP's pools in
+  PSRAM (PSRAM is therefore required; the board has 8 MB), keeps few
+  static buffers, places its own heap by size (`alloc.rs`: records and
+  text in PSRAM, the decoder's and the sink's working buffers in SRAM,
+  the stream's ring and the art in PSRAM; the card's listing alone had
+  taken 60 KB of SRAM as small strings), moves the art fetcher's stack
+  to PSRAM, and trims the main stack to 32 KB (a day's low-water mark
+  was 40 KB of 48). The network thread starts after the DMA ring has
+  its memory and runs below the main task. `memory:` lines at boot say
+  what is left at each step; about 58 KB with a 96 kHz stream and the
+  network up, 170 KB without the network. The decoder's share of the
+  core is unchanged (measured on the same track with and without).
+  Known: on a WPA3 network the join's SAE exchange can run the DMA dry
+  once, for tens of milliseconds, if a 96 kHz stream is playing at that
+  moment.
 - `evoconfig.txt`. `distributions/config` (`evo-esp32-config`, `no_std`):
   the card file's grammar (one `key = value` a line, `#`/`;` comment
   lines, quotes keep spaces, an empty value is the default, a BOM and
