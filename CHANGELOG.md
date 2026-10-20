@@ -28,6 +28,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `distributions/face`: a drag on the library scrolls. The finger's
   travel arrives in small steps; it now accumulates until a row's worth
   is in, instead of each step being rounded to no rows.
+- `distributions/face`: Settings scrolls as the library does (landscape
+  shows five of its seven rows), and a tapped row is the fact under the
+  finger wherever the list sits. The landscape card's volume is the
+  full-width row under the art where the seek was, the seek and the
+  times a row below; where the two rows' touch reaches meet, the nearer
+  bar takes the finger. The portrait card's text band is a scrim: the
+  picture shows through, dimmed, under the title, artist and album,
+  instead of a solid band over its lower third; the band's text is
+  painted with the art, so a cover arriving mid-track no longer wipes
+  it. The host gallery renders a made-up cover in every frame.
 - `plugins/org.evoframework.playback.symphonia`: a stream that is lost
   mid-decode is logged with the decoder's reason before custody is
   released; until now the reason went only into the track's title.

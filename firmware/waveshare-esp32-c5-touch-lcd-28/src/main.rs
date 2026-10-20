@@ -433,7 +433,9 @@ fn main() -> anyhow::Result<()> {
                             }
                             Intent::Tap(Hotspot::Row(i)) => {
                                 if face.screen() == Screen::Settings {
-                                    match settings_row(i) {
+                                    let fact =
+                                        face.about().first + usize::from(i);
+                                    match settings_row(fact) {
                                         Some(SettingsRow::Theme) => {
                                             let next = next_theme(face.theme());
                                             face.set_theme(next);
@@ -542,7 +544,7 @@ fn main() -> anyhow::Result<()> {
                                     );
                                 }
                             }
-                            Intent::Scroll(dy) => face.scroll_library(dy),
+                            Intent::Scroll(dy) => face.scroll(dy),
                             Intent::Tap(_)
                             | Intent::Slide(_)
                             | Intent::Commit(_) => {}
@@ -1133,6 +1135,7 @@ fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
                 format!("{:.0} GB, {tracks} tracks", card_mb as f64 / 1024.0),
             ),
         ],
+        first: 0,
     }
 }
 
@@ -1143,7 +1146,7 @@ enum SettingsRow {
     Rotation,
 }
 
-fn settings_row(i: u8) -> Option<SettingsRow> {
+fn settings_row(i: usize) -> Option<SettingsRow> {
     match i {
         3 => Some(SettingsRow::Theme),
         4 => Some(SettingsRow::Style),

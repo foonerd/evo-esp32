@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use evo_esp32_face::{
-    theme, About, Entry as Row, Fact, Library, Screen, Style, Theme,
+    art, theme, About, Art, Entry as Row, Fact, Library, Screen, Style, Theme,
 };
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Play};
@@ -254,6 +254,8 @@ fn gallery(dir: &std::path::Path) -> Result<(), String> {
         for style in [Style::Disc, Style::Card] {
             for t in theme::ALL {
                 let mut p = panel::Panel::new(rotation, style, *t);
+                let side = p.face_mut().layout().art.size.width;
+                p.face_mut().set_art(sample_art(side));
                 p.draw(&view);
                 let path = dir.join(format!(
                     "face-{rotation}-{}-{}.png",
@@ -282,6 +284,26 @@ fn gallery(dir: &std::path::Path) -> Result<(), String> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// A made-up cover at `side` pixels: a warm-to-dark sweep with a pale
+/// disc, enough texture to judge the disc, the card and its scrim by.
+fn sample_art(side: u32) -> Option<Art> {
+    let n = side as i32;
+    let pixels: Vec<u16> = (0..n * n)
+        .map(|i| {
+            let (x, y) = (i % n, i / n);
+            let (dx, dy) = (x - n * 2 / 3, y - n / 3);
+            let (r, g, b) = if dx * dx + dy * dy < (n / 5).pow(2) {
+                (29u16, 54u16, 24u16)
+            } else {
+                let t = (x + y) as u16 * 31 / (2 * n as u16);
+                (31 - t / 2, 20 + t, 4 + t / 2)
+            };
+            (r << 11) | (g << 5) | b
+        })
+        .collect();
+    art::fit(side, side, &pixels, side)
 }
 
 fn sample_library() -> Library {
@@ -328,6 +350,7 @@ fn sample_about() -> About {
             fact("Rotation", "0"),
             fact("Card", "29 GB, 54 tracks"),
         ],
+        first: 0,
     }
 }
 

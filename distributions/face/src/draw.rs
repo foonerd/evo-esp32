@@ -727,6 +727,7 @@ pub fn art_card<D>(
     radius: i32,
     art: &Art,
     bg: Rgb565,
+    scrim: Option<(i32, Rgb565)>,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -740,6 +741,10 @@ where
     let width = (w as usize).min(ROW);
     for yy in 0..h {
         let y = y0 + yy;
+        let dim = |p| match scrim {
+            Some((top, band)) if y >= top => scrimmed(band, p, y - top),
+            _ => p,
+        };
         let cy = if y < ty {
             Some(ty)
         } else if y > by {
@@ -759,7 +764,7 @@ where
             if cover == 0 {
                 continue;
             }
-            let p = art.at(i as i32, yy).unwrap_or(bg);
+            let p = dim(art.at(i as i32, yy).unwrap_or(bg));
             *px = if cover == 16 { p } else { mix(bg, p, cover) };
             span = Some(span.map_or((i, i), |(first, _)| (first, i)));
         }
@@ -774,6 +779,20 @@ where
         }
     }
     Ok(())
+}
+
+/// How much of the art shows through the scrim, sixteenths.
+const SCRIM_ART: u8 = 5;
+/// The scrim's soft top edge, rows.
+const SCRIM_EDGE: i32 = 8;
+
+/// An art pixel `p` seen through the text band's scrim, `into` rows
+/// below the band's top: the band's colour with the art showing
+/// through, after a soft edge.
+pub fn scrimmed(band: Rgb565, p: Rgb565, into: i32) -> Rgb565 {
+    let into = into.clamp(0, SCRIM_EDGE) as u8;
+    let art = 16 - (16 - SCRIM_ART) * into / SCRIM_EDGE as u8;
+    mix(band, p, art)
 }
 
 /// The stand-in for album art on a card: a tinted square with the note.

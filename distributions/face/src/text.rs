@@ -51,6 +51,8 @@ include!(concat!(env!("OUT_DIR"), "/glyphs.rs"));
 
 /// The widest glyph box any atlas here produces, in pixels a side.
 const MAX_SIDE: usize = 32;
+/// The widest line area painted in one row.
+const ROW: usize = 320;
 
 impl Atlas {
     /// The glyph for `c`, or the one for `?` when the atlas lacks it.
@@ -109,12 +111,28 @@ impl Atlas {
     where
         D: DrawTarget<Color = Rgb565>,
     {
+        self.draw_over(target, text, pen, fg, |_| bg)
+    }
+
+    /// [`Atlas::draw`] over a ground that may differ pixel by pixel.
+    pub fn draw_over<D>(
+        &self,
+        target: &mut D,
+        text: &str,
+        pen: Point,
+        fg: Rgb565,
+        ground: impl Fn(Point) -> Rgb565,
+    ) -> Result<Point, D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
         let mut x = pen.x;
-        let mut px = [bg; MAX_SIDE * MAX_SIDE];
+        let mut px = [fg; MAX_SIDE * MAX_SIDE];
         for c in text.chars() {
             let g = self.glyph(c);
             if g.w > 0 && g.h > 0 {
                 let (w, h) = (g.w as usize, g.h as usize);
+                let origin = Point::new(x + g.x0 as i32, pen.y + g.y0 as i32);
                 let stride = w.div_ceil(2);
                 for row in 0..h {
                     let bytes = &self.bitmaps
@@ -123,14 +141,14 @@ impl Atlas {
                         let byte = bytes[col / 2];
                         let cov =
                             if col % 2 == 0 { byte >> 4 } else { byte & 0xF };
+                        let bg =
+                            ground(origin + Point::new(col as i32, row as i32));
                         // 0..=15 coverage onto the mixer's 0..=16.
                         px[row * w + col] = mix(bg, fg, cov + (cov >> 3));
                     }
                 }
-                let area = Rectangle::new(
-                    Point::new(x + g.x0 as i32, pen.y + g.y0 as i32),
-                    Size::new(g.w as u32, g.h as u32),
-                );
+                let area =
+                    Rectangle::new(origin, Size::new(g.w as u32, g.h as u32));
                 target.fill_contiguous(&area, px[..w * h].iter().copied())?;
             }
             x += g.advance as i32;
@@ -154,6 +172,50 @@ impl Atlas {
         D: DrawTarget<Color = Rgb565>,
     {
         target.fill_solid(&area, bg)?;
+        self.line_text(target, text, area, align, fg, |_| bg)
+    }
+
+    /// [`Atlas::line`] over a ground that may differ pixel by pixel (art
+    /// under a scrim): the area is laid with the ground first.
+    pub fn line_over<D>(
+        &self,
+        target: &mut D,
+        text: &str,
+        area: Rectangle,
+        align: Align,
+        fg: Rgb565,
+        ground: impl Fn(Point) -> Rgb565,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let mut buf = [fg; ROW];
+        let (x0, w) = (area.top_left.x, (area.size.width as usize).min(ROW));
+        for yy in 0..area.size.height as i32 {
+            let y = area.top_left.y + yy;
+            for (i, px) in buf[..w].iter_mut().enumerate() {
+                *px = ground(Point::new(x0 + i as i32, y));
+            }
+            target.fill_contiguous(
+                &Rectangle::new(Point::new(x0, y), Size::new(w as u32, 1)),
+                buf[..w].iter().copied(),
+            )?;
+        }
+        self.line_text(target, text, area, align, fg, ground)
+    }
+
+    fn line_text<D>(
+        &self,
+        target: &mut D,
+        text: &str,
+        area: Rectangle,
+        align: Align,
+        fg: Rgb565,
+        ground: impl Fn(Point) -> Rgb565,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
         let fitted = self.fit(text, area.size.width as i32);
         let w = self.width(fitted.head)
             + if fitted.ellipsis {
@@ -169,10 +231,15 @@ impl Atlas {
         let baseline = area.top_left.y
             + (area.size.height as i32 - self.height()) / 2
             + self.ascent as i32;
-        let pen =
-            self.draw(target, fitted.head, Point::new(x, baseline), fg, bg)?;
+        let pen = self.draw_over(
+            target,
+            fitted.head,
+            Point::new(x, baseline),
+            fg,
+            &ground,
+        )?;
         if fitted.ellipsis {
-            self.draw(target, "…", pen, fg, bg)?;
+            self.draw_over(target, "…", pen, fg, &ground)?;
         }
         Ok(())
     }

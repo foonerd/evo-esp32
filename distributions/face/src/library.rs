@@ -39,19 +39,30 @@ impl Library {
     /// Scroll by `rows` (negative is up), keeping at least one row in
     /// view; `true` if the view moved.
     pub fn scroll(&mut self, rows: i32, shown: usize) -> bool {
-        let last_first = self.entries.len().saturating_sub(shown);
-        let first = (self.first as i64 + i64::from(rows))
-            .clamp(0, last_first as i64) as usize;
-        let moved = first != self.first;
-        self.first = first;
-        moved
+        scroll(&mut self.first, self.entries.len(), rows, shown)
     }
 
     /// The rows in view, at most `shown`.
     pub fn visible(&self, shown: usize) -> &[Entry] {
-        let end = (self.first + shown).min(self.entries.len());
-        &self.entries[self.first.min(end)..end]
+        visible(&self.entries, self.first, shown)
     }
+}
+
+/// Move `first` by `rows` within a list of `len` showing `shown` rows,
+/// so the last page is full; `true` if it moved.
+fn scroll(first: &mut usize, len: usize, rows: i32, shown: usize) -> bool {
+    let last_first = len.saturating_sub(shown);
+    let next =
+        (*first as i64 + i64::from(rows)).clamp(0, last_first as i64) as usize;
+    let moved = next != *first;
+    *first = next;
+    moved
+}
+
+/// At most `shown` of `rows` from `first`.
+fn visible<T>(rows: &[T], first: usize, shown: usize) -> &[T] {
+    let end = (first + shown).min(rows.len());
+    &rows[first.min(end)..end]
 }
 
 /// A fact about the player, for the settings page.
@@ -63,11 +74,30 @@ pub struct Fact {
     pub value: String,
 }
 
-/// What the settings page shows: facts, until there are settings.
+/// What the settings page shows: facts, some of them settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct About {
     /// The facts, in order.
     pub facts: Vec<Fact>,
+    /// The first row in view.
+    pub first: usize,
+}
+
+impl About {
+    /// Scroll by `rows` (negative is up), as [`Library::scroll`].
+    pub fn scroll(&mut self, rows: i32, shown: usize) -> bool {
+        scroll(&mut self.first, self.facts.len(), rows, shown)
+    }
+
+    /// The facts in view, at most `shown`.
+    pub fn visible(&self, shown: usize) -> &[Fact] {
+        visible(&self.facts, self.first, shown)
+    }
+
+    /// The fact behind the `row`th row in view, if there is one.
+    pub fn fact_at(&self, row: usize, shown: usize) -> Option<&Fact> {
+        self.visible(shown).get(row)
+    }
 }
 
 #[cfg(test)]
@@ -104,5 +134,23 @@ mod tests {
         let mut short = library(3);
         assert!(!short.scroll(1, 7), "nothing to scroll");
         assert_eq!(short.visible(7).len(), 3);
+    }
+
+    #[test]
+    fn the_facts_scroll_the_same_way() {
+        let mut about = About {
+            facts: (0..7)
+                .map(|i| Fact {
+                    name: alloc::format!("{i}"),
+                    value: String::new(),
+                })
+                .collect(),
+            first: 0,
+        };
+        assert!(!about.scroll(1, 7), "seven facts fill seven rows");
+        assert!(about.scroll(5, 5), "two are off a five-row page");
+        assert_eq!(about.first, 2);
+        assert_eq!(about.fact_at(4, 5).map(|f| f.name.as_str()), Some("6"));
+        assert_eq!(about.fact_at(5, 5), None);
     }
 }

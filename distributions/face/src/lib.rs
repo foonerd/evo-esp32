@@ -291,11 +291,11 @@ impl Face {
         &self.library
     }
 
-    /// Scroll the library by `pixels` of finger travel (positive is the
-    /// finger moving down, which brings earlier rows into view). Travel
-    /// accumulates across calls: a drag comes in small steps, and the
-    /// rows move once a whole row's worth is in.
-    pub fn scroll_library(&mut self, pixels: i32) {
+    /// Scroll the list page in front by `pixels` of finger travel
+    /// (positive is the finger moving down, which brings earlier rows
+    /// into view). Travel accumulates across calls: a drag comes in
+    /// small steps, and the rows move once a whole row's worth is in.
+    pub fn scroll(&mut self, pixels: i32) {
         let row = self.layout.page.row;
         self.scroll_rest += pixels;
         let rows = self.scroll_rest / row;
@@ -303,15 +303,31 @@ impl Face {
             return;
         }
         self.scroll_rest -= rows * row;
-        if self.library.scroll(-rows, self.layout.page.rows()) {
+        let shown = self.layout.page.rows();
+        let moved = match self.screen {
+            Screen::Library => self.library.scroll(-rows, shown),
+            Screen::Settings => self.about.scroll(-rows, shown),
+            Screen::NowPlaying => false,
+        };
+        if moved {
             self.rows_due = true;
         }
     }
 
-    /// The settings page's facts.
-    pub fn set_about(&mut self, about: About) {
+    /// The settings page's facts; the view stays where it was scrolled,
+    /// within the new list.
+    pub fn set_about(&mut self, mut about: About) {
+        about.first = self
+            .about
+            .first
+            .min(about.facts.len().saturating_sub(self.layout.page.rows()));
         self.about = about;
         self.page = self.page.wrapping_add(1);
+    }
+
+    /// The settings page as shown.
+    pub fn about(&self) -> &About {
+        &self.about
     }
 
     /// What is under `p` on the screen in front, for a touch.
@@ -324,7 +340,7 @@ impl Face {
         let shown = self.layout.page.rows();
         match self.screen {
             Screen::Library => self.library.visible(shown).len(),
-            Screen::Settings => self.about.facts.len().min(shown),
+            Screen::Settings => self.about.visible(shown).len(),
             Screen::NowPlaying => 0,
         }
     }
@@ -441,7 +457,7 @@ impl Face {
                 self.paint_now_bar(target, view)?;
                 return Ok(Repaint::Bar);
             }
-            self.paint_art(target)?;
+            self.paint_art(target, view)?;
             return Ok(Repaint::Art);
         }
         if self.rows_due {
@@ -580,7 +596,7 @@ impl Face {
                     }
                     None => target.fill_solid(&slot, t.background)?,
                 },
-                _ => match self.about.facts.get(i) {
+                _ => match self.about.visible(shown).get(i) {
                     Some(fact) => self.paint_fact(target, slot, fact)?,
                     None => target.fill_solid(&slot, t.background)?,
                 },
@@ -714,7 +730,7 @@ impl Face {
             .and_then(|a| art::fit(a.size, a.size, &a.pixels, THUMB));
         match thumb {
             Some(thumb) => {
-                draw::art_card(target, l.bar_art, 4, &thumb, t.card)?
+                draw::art_card(target, l.bar_art, 4, &thumb, t.card, None)?
             }
             None => {
                 let c = l.bar_art.center();
@@ -776,7 +792,7 @@ impl Face {
                     t.background,
                 )
             }
-            2 => self.paint_art(target),
+            2 => self.paint_art(target, view),
             3..=5 => self.paint_text_line(target, view, stage - 3),
             6 => {
                 let frac = view.progress().unwrap_or(0.0);
@@ -797,8 +813,10 @@ impl Face {
     }
 
     /// The art: the album's picture in a disc or on the card, or the
-    /// stand-in; the card's text band is laid over its foot either way.
-    fn paint_art<D>(&self, target: &mut D) -> Result<(), D::Error>
+    /// stand-in. Where the card's text band lies over the art's foot the
+    /// picture shows through a scrim, and the text lines are painted
+    /// with the art since they sit on it.
+    fn paint_art<D>(&self, target: &mut D, view: &View) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
@@ -810,6 +828,7 @@ impl Face {
             }
             (Style::Disc, None) => draw::placeholder_disc(target, l.art, &t),
             (Style::Card, art) => {
+                let band = self.card_band();
                 match art {
                     Some(art) => draw::art_card(
                         target,
@@ -817,22 +836,45 @@ impl Face {
                         RADIUS,
                         art,
                         t.background,
+                        band.map(|(band, colour)| (band.top_left.y, colour)),
                     )?,
-                    None => draw::placeholder_card(target, l.art, RADIUS, &t)?,
+                    None => {
+                        draw::placeholder_card(target, l.art, RADIUS, &t)?;
+                        if let Some((band, colour)) = band {
+                            draw::rounded_corners(
+                                target,
+                                band,
+                                RADIUS,
+                                colour,
+                                t.background,
+                                false,
+                                true,
+                            )?;
+                        }
+                    }
                 }
-                if let Some((band, band_colour)) = self.card_band() {
-                    draw::rounded_corners(
-                        target,
-                        band,
-                        RADIUS,
-                        band_colour,
-                        t.background,
-                        false,
-                        true,
-                    )?;
+                if band.is_some() {
+                    for n in 0..3 {
+                        self.paint_text_line(target, view, n)?;
+                    }
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// The colour under a point of the card's text band: the band's,
+    /// or the art seen through the scrim.
+    fn band_ground(&self, band_top: i32, colour: Rgb565, p: Point) -> Rgb565 {
+        let art_origin = self.layout.art.top_left;
+        match &self.art {
+            Some(art) => draw::scrimmed(
+                colour,
+                art.at(p.x - art_origin.x, p.y - art_origin.y)
+                    .unwrap_or(colour),
+                p.y - band_top,
+            ),
+            None => colour,
         }
     }
 
@@ -898,25 +940,18 @@ impl Face {
         } else {
             (&text::BODY, &text::SMALL)
         };
-        match n {
-            0 => text::TITLE.line(
-                target,
-                title,
-                l.title,
-                align,
-                t.foreground,
-                under,
-            ),
-            1 => artist_font
-                .line(target, artist, l.artist, align, t.muted_fg, under),
-            _ => album_font.line(
-                target,
-                album,
-                l.album,
-                align,
-                mix(t.muted_fg, under, 5),
-                under,
-            ),
+        let (font, line, area, colour) = match n {
+            0 => (&text::TITLE, title, l.title, t.foreground),
+            1 => (artist_font, artist, l.artist, t.muted_fg),
+            _ => (album_font, album, l.album, mix(t.muted_fg, under, 5)),
+        };
+        match band {
+            Some((band, band_colour)) if self.art.is_some() => {
+                font.line_over(target, line, area, align, colour, |p| {
+                    self.band_ground(band.top_left.y, band_colour, p)
+                })
+            }
+            _ => font.line(target, line, area, align, colour, under),
         }
     }
 
@@ -1513,6 +1548,44 @@ mod tests {
     }
 
     #[test]
+    fn the_card_shows_its_art_through_the_text_band() {
+        let mut face = Face::new(0, Style::Card, theme::EVO_DEFAULT);
+        let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+        let view = View::new(&playing(), Some(&out()), "Card");
+        face.refresh_whole(&mut display, &view).unwrap();
+        let (band, band_colour) = face.card_band().expect("portrait card");
+        let title = face.layout().title;
+        let fg = theme::EVO_DEFAULT.foreground;
+        let count_fg = |display: &SimulatorDisplay<Rgb565>| {
+            title
+                .points()
+                .filter(|&p| display.get_pixel(p) == fg)
+                .count()
+        };
+        let glyphs_before = count_fg(&display);
+        assert!(glyphs_before > 0, "the title is on the band");
+        // Beside the text, in the band, the stand-in is under the band.
+        let beside = Point::new(band.top_left.x + 6, title.center().y);
+        assert_eq!(display.get_pixel(beside), band_colour);
+        let orange = Rgb565::new(31, 40, 0);
+        let art =
+            art::fit(1, 1, &[0xFD00], face.layout().art.size.width).unwrap();
+        face.set_art(Some(art));
+        assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Art));
+        // The art shows through, dimmed: neither the band nor the picture.
+        let seen = display.get_pixel(beside);
+        assert_ne!(seen, band_colour);
+        assert_ne!(seen, orange);
+        assert_eq!(seen, draw::scrimmed(band_colour, orange, 100));
+        // Above the band the picture is itself; the text survived.
+        assert_eq!(
+            display.get_pixel(Point::new(beside.x, band.top_left.y - 2)),
+            orange
+        );
+        assert_eq!(count_fg(&display), glyphs_before, "the title is repainted");
+    }
+
+    #[test]
     fn the_library_page_paints_in_stages_and_repaints_rows_and_bar() {
         use alloc::string::ToString;
         let mut face = Face::new(0, Style::Disc, theme::EVO_DEFAULT);
@@ -1548,14 +1621,14 @@ mod tests {
         assert_eq!(face.hit(page.back.center()), Some(Hotspot::Back));
         // A drag comes in steps; the rows move once a row's worth is in,
         // and the repaint is the rows alone.
-        face.scroll_library(-10);
-        face.scroll_library(-10);
+        face.scroll(-10);
+        face.scroll(-10);
         assert_eq!(face.library().first, 0);
         assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
-        face.scroll_library(-10);
+        face.scroll(-10);
         assert_eq!(face.library().first, 1);
         assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Rows));
-        face.scroll_library(-page.row);
+        face.scroll(-page.row);
         assert_eq!(face.library().first, 2);
         assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::Rows));
         // The position moving is nothing here.

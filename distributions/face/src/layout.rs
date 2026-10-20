@@ -271,32 +271,33 @@ impl Layout {
             Rectangle::new(Point::new(x, y), Size::new(cw as u32, ch as u32))
         };
         // The rail, the art (ring to 10 px past it), then a text column:
-        // status, three lines, the times, the transport, and under it the
-        // volume; the strip along the foot seeks for the card and is the
-        // disc's volume instead.
+        // status, three lines, the times, the transport. Under the art
+        // the rows run the width: the disc's volume; the card's volume
+        // and, below it, the seek with the times at its ends.
         let tx = 212;
         let col = w - tx - 10;
+        let right = w - 10;
         let (seek, volume) = match style {
             Style::Disc => (
                 None,
                 Slider {
-                    bar: r(86, 192, w - 10 - 36 - 8 - 86, 4),
+                    bar: r(86, 192, right - 36 - 8 - 86, 4),
                     icon: Some(Point::new(66, 194)),
-                    label: Some(r(w - 10 - 36, 187, 36, 13)),
+                    label: Some(r(right - 36, 187, 36, 13)),
                 },
             ),
             Style::Card => (
-                Some(r(90, 192, w - 10 - 36 - 8 - 90, 4)),
+                Some(r(90, 210, right - 36 - 8 - 90, 4)),
                 Slider {
-                    bar: r(tx + 22, 168, 40, 4),
-                    icon: Some(Point::new(tx + 6, 170)),
-                    label: Some(r(w - 10 - 28, 163, 28, 13)),
+                    bar: r(86, 182, right - 36 - 8 - 86, 4),
+                    icon: Some(Point::new(66, 184)),
+                    label: Some(r(right - 36, 177, 36, 13)),
                 },
             ),
         };
         let (elapsed, duration) = match style {
-            Style::Disc => (r(tx, 88, 40, 12), r(w - 10 - 40, 88, 40, 12)),
-            Style::Card => (r(46, 187, 36, 13), r(w - 10 - 36, 187, 36, 13)),
+            Style::Disc => (r(tx, 88, 40, 12), r(right - 40, 88, 40, 12)),
+            Style::Card => (r(46, 205, 36, 13), r(right - 36, 205, 36, 13)),
         };
         Layout {
             frame: Size::new(w as u32, h as u32),
@@ -470,21 +471,29 @@ impl Layout {
         if within(t.next, t.skip_r) {
             return Some(Hotspot::Next);
         }
+        // A slider is hit 12 px above and below its bar; where two
+        // sliders' reaches meet, the nearer bar takes the touch.
         let along = |bar: Rectangle| {
             let touch = Rectangle::new(
                 bar.top_left - Point::new(4, 12),
                 bar.size + Size::new(8, 24),
             );
             touch.contains(p).then(|| {
-                ((p.x - bar.top_left.x) as f32 / bar.size.width as f32)
-                    .clamp(0.0, 1.0)
+                let f = ((p.x - bar.top_left.x) as f32 / bar.size.width as f32)
+                    .clamp(0.0, 1.0);
+                ((p.y - bar.center().y).abs(), f)
             })
         };
-        if let Some(f) = along(self.volume.bar) {
-            return Some(Hotspot::Volume(f));
-        }
-        if let Some(f) = self.seek.and_then(along) {
-            return Some(Hotspot::Seek(f));
+        let volume =
+            along(self.volume.bar).map(|(d, f)| (d, Hotspot::Volume(f)));
+        let seek = self
+            .seek
+            .and_then(along)
+            .map(|(d, f)| (d, Hotspot::Seek(f)));
+        if let Some((_, hotspot)) =
+            [volume, seek].into_iter().flatten().min_by_key(|(d, _)| *d)
+        {
+            return Some(hotspot);
         }
         if let Some(nav) = self.hit_nav(p) {
             return Some(nav);
@@ -567,5 +576,22 @@ mod tests {
         assert!((turns(-10, 0) - 0.75).abs() < 0.01);
         assert!((turns(7, -7) - 0.125).abs() < 0.01);
         assert!((turns(-7, 7) - 0.625).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_nearer_of_two_sliders_takes_the_touch() {
+        let l = Layout::new(90, Style::Card);
+        let seek = l.seek.expect("the card seeks on a strip");
+        let (vy, sy) = (l.volume.bar.center().y, seek.center().y);
+        assert!(sy - vy <= 24 + 4, "the two reaches meet between the bars");
+        let x = l.volume.bar.center().x;
+        assert!(matches!(
+            l.hit(Point::new(x, vy + 6)),
+            Some(Hotspot::Volume(_))
+        ));
+        assert!(matches!(
+            l.hit(Point::new(x, sy - 6)),
+            Some(Hotspot::Seek(_))
+        ));
     }
 }
