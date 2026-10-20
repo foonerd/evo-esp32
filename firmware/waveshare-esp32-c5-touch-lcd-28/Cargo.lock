@@ -748,6 +748,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "embedded-graphics",
+ "evo-esp32-queue",
  "evo-esp32-sdk",
 ]
 

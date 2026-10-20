@@ -138,6 +138,12 @@ pub struct Transport {
     pub next: Point,
     /// The small buttons' radius.
     pub skip_r: u32,
+    /// Shuffle, a flat icon outside previous.
+    pub shuffle: Point,
+    /// Repeat, a flat icon outside next.
+    pub repeat: Point,
+    /// The mode icons' half-size.
+    pub mode_r: u32,
 }
 
 /// A slider: an icon, a bar with a knob, a label.
@@ -235,9 +241,12 @@ impl Layout {
                 transport: Transport {
                     play: Point::new(w / 2, 266),
                     play_r: 18,
-                    prev: Point::new(w / 2 - 64, 266),
-                    next: Point::new(w / 2 + 64, 266),
+                    prev: Point::new(w / 2 - 56, 266),
+                    next: Point::new(w / 2 + 56, 266),
                     skip_r: 14,
+                    shuffle: Point::new(w / 2 - 100, 266),
+                    repeat: Point::new(w / 2 + 100, 266),
+                    mode_r: 9,
                 },
                 nav: r(0, h - NAV as i32, w, NAV as i32),
                 nav_axis: NavAxis::Bar,
@@ -312,12 +321,17 @@ impl Layout {
             duration,
             seek,
             volume,
+            // The column has no room beside next: the modes sit on a row
+            // of their own under the transport.
             transport: Transport {
                 play: Point::new(262, 128),
                 play_r: 20,
                 prev: Point::new(262 - 40, 128),
                 next: Point::new(262 + 40, 128),
                 skip_r: 13,
+                shuffle: Point::new(262 - 20, 162),
+                repeat: Point::new(262 + 20, 162),
+                mode_r: 8,
             },
             nav: r(0, 0, NAV as i32, h),
             nav_axis: NavAxis::Rail,
@@ -471,6 +485,12 @@ impl Layout {
         if within(t.next, t.skip_r) {
             return Some(Hotspot::Next);
         }
+        if within(t.shuffle, t.mode_r) {
+            return Some(Hotspot::Shuffle);
+        }
+        if within(t.repeat, t.mode_r) {
+            return Some(Hotspot::Repeat);
+        }
         // A slider is hit 12 px above and below its bar; where two
         // sliders' reaches meet, the nearer bar takes the touch.
         let along = |bar: Rectangle| {
@@ -558,6 +578,10 @@ pub enum Hotspot {
     Nav(u8),
     /// The art.
     Art,
+    /// The shuffle icon: toggles the queue's order.
+    Shuffle,
+    /// The repeat icon: steps the queue's repeat mode.
+    Repeat,
     /// The text block: title, artist, album. Opens the details sheet.
     Text,
     /// Anywhere on the details sheet while it is up: puts it down.

@@ -23,7 +23,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   network and plays when it is up, "waiting for the network" on the
   strip meanwhile; a `start` that is not on the card is reported in
   `evostatus.txt` and the card plays. Defaults: shuffle on, repeat all,
-  the whole card.
+  the whole card. On the face: shuffle and repeat icons flank the
+  transport (portrait) or sit on a row under it (landscape), lit in the
+  accent when on, a `1` for repeat-one; one tap each, written back to
+  the card; shown for files, not for a station. The layout's previous
+  and next move in to make room in portrait.
 ## [0.1.0] - 2026-10-20
 
 The first release: the player on the Waveshare ESP32-C5-Touch-LCD-2.8, flashable from the GitHub release, built there from the tag (`.github/workflows/release.yml`; a manual run files a draft). `.github/FUNDING.yml`.

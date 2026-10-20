@@ -41,6 +41,7 @@ pub use art::Art;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::{DrawTarget, Point, Size};
 use embedded_graphics::primitives::Rectangle;
+use evo_esp32_queue::Repeat;
 use evo_esp32_sdk::contract::audio::{delivery, playback};
 pub use layout::{Hotspot, Layout, Screen, Slider, Style};
 pub use library::{About, Entry, Fact, Library};
@@ -90,6 +91,10 @@ pub struct View {
     pub muted: bool,
     /// Where the music comes from, for the status strip: "Card".
     pub source: &'static str,
+    /// The queue's order is shuffled.
+    pub shuffle: bool,
+    /// What the queue does at its end.
+    pub repeat: Repeat,
     /// Why nothing is playing, when something was asked for and did not
     /// play ("Jazz24: not found (404)"); shown on the status strip in
     /// the format's place. Empty when there is nothing to say.
@@ -124,8 +129,16 @@ impl View {
             volume: out.map(|o| o.volume).unwrap_or(0),
             muted: out.map(|o| o.muted).unwrap_or(false),
             source,
+            shuffle: false,
+            repeat: Repeat::Off,
             notice: String::new(),
         }
+    }
+
+    /// Whether the queue's modes (shuffle, repeat) apply to what is in
+    /// hand: they do to files, not to a station.
+    pub fn modes(&self) -> bool {
+        self.station().is_none()
     }
 
     /// The status strip: where the music is from, and the stream, or
@@ -224,6 +237,9 @@ struct Scene {
     /// Which listing (or facts) a list page shows; bumped on each set.
     page: u32,
     status: Status,
+    shuffle: bool,
+    repeat: Repeat,
+    modes: bool,
     title: String,
     artist: String,
     album: String,
@@ -251,6 +267,9 @@ pub struct Face {
     scene: Option<Scene>,
     second: Option<u64>,
     level: Option<(u8, bool)>,
+    /// The mode icons are on the face (not for a station), so a tap on
+    /// them counts.
+    modes_shown: bool,
     /// The details sheet is up over Now Playing.
     sheet: bool,
     /// The sheet was raised since the frame was last painted.
@@ -303,6 +322,7 @@ impl Face {
             scene: None,
             second: None,
             level: None,
+            modes_shown: false,
             sheet: false,
             sheet_due: false,
             ring_to: 0.0,
@@ -388,7 +408,12 @@ impl Face {
                 None => Hotspot::Sheet,
             });
         }
-        self.layout.hit_on(self.screen, self.rows_filled(), p)
+        match self.layout.hit_on(self.screen, self.rows_filled(), p) {
+            Some(Hotspot::Shuffle | Hotspot::Repeat) if !self.modes_shown => {
+                None
+            }
+            hit => hit,
+        }
     }
 
     /// How many rows the list page in front has filled.
@@ -454,6 +479,9 @@ impl Face {
             screen: self.screen,
             page: self.page,
             status: view.status,
+            shuffle: view.shuffle,
+            repeat: view.repeat,
+            modes: view.modes(),
             title: view.title.clone(),
             artist: view.artist.clone(),
             album: view.album.clone(),
@@ -475,12 +503,16 @@ impl Face {
                     self.scene = Some(scene);
                     return Ok(Repaint::Bar);
                 }
-                // Only the status moved: the play button, not the face.
-                let only_status = Scene {
+                // Only the transport's state moved (the status, the
+                // modes): the buttons, not the face.
+                let only_transport = Scene {
                     status: scene.status,
+                    shuffle: scene.shuffle,
+                    repeat: scene.repeat,
                     ..was.clone()
                 } == scene;
-                if only_status {
+                if only_transport {
+                    self.modes_shown = view.modes();
                     self.paint_transport(target, view)?;
                     self.scene = Some(scene);
                     return Ok(Repaint::Transport);
@@ -488,6 +520,7 @@ impl Face {
             }
         }
         if self.scene.as_ref() != Some(&scene) {
+            self.modes_shown = scene.modes;
             self.scene = Some(scene);
             self.stage = Some(0);
             self.sheet = false;
@@ -1250,6 +1283,37 @@ impl Face {
                 t.accent,
             )?,
         }
+        // The modes: flat icons, lit when on; cleared for a station,
+        // where they mean nothing.
+        let r = tr.mode_r as i32;
+        if view.modes() {
+            let lit = |on: bool| if on { t.accent } else { t.muted_fg };
+            draw::icon_shuffle(
+                target,
+                tr.shuffle,
+                r,
+                lit(view.shuffle),
+                t.background,
+            )?;
+            draw::icon_repeat(
+                target,
+                tr.repeat,
+                r,
+                view.repeat == Repeat::One,
+                lit(view.repeat != Repeat::Off),
+                t.background,
+            )?;
+        } else {
+            for c in [tr.shuffle, tr.repeat] {
+                target.fill_solid(
+                    &Rectangle::new(
+                        c - Point::new(r, r),
+                        Size::new(2 * r as u32 + 1, 2 * r as u32 + 1),
+                    ),
+                    t.background,
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -1928,6 +1992,43 @@ mod tests {
         );
         assert!(long[0].ellipsis);
         assert!(a.wrap("", 100, 3).is_empty());
+    }
+
+    #[test]
+    fn the_mode_buttons_toggle_for_files_and_vanish_for_a_station() {
+        for rotation in [0u16, 90] {
+            let mut face = Face::new(rotation, Style::Card, theme::EVO_DEFAULT);
+            let mut display =
+                SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+            let mut view = View::new(&playing(), None, "Card");
+            assert_eq!(
+                face.refresh_whole(&mut display, &view),
+                Ok(Repaint::Full)
+            );
+            let tr = face.layout().transport;
+            assert_eq!(face.hit(tr.shuffle), Some(Hotspot::Shuffle));
+            assert_eq!(face.hit(tr.repeat), Some(Hotspot::Repeat));
+            view.shuffle = true;
+            assert_eq!(
+                face.refresh(&mut display, &view),
+                Ok(Repaint::Transport),
+                "a mode change repaints the buttons alone"
+            );
+            view.repeat = Repeat::One;
+            assert_eq!(
+                face.refresh(&mut display, &view),
+                Ok(Repaint::Transport)
+            );
+            assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
+            view.uri = "http://stream.example/live".to_string();
+            assert!(!view.modes());
+            assert_eq!(
+                face.refresh_whole(&mut display, &view),
+                Ok(Repaint::Full)
+            );
+            assert_eq!(face.hit(tr.shuffle), None, "no modes on a station");
+            assert_eq!(face.hit(tr.repeat), None);
+        }
     }
 
     #[test]

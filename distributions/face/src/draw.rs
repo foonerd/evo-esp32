@@ -445,6 +445,158 @@ where
     Ok(())
 }
 
+/// The side of the box a mode icon is drawn in, at most.
+const MODE_BOX: usize = 24;
+
+/// A small bitmap an icon is composed in before one blit: `set` marks
+/// pixels, lines are two pixels wide so they read on a 2.8" panel.
+struct Box {
+    side: usize,
+    on: [bool; MODE_BOX * MODE_BOX],
+}
+
+impl Box {
+    fn new(side: usize) -> Self {
+        Self {
+            side: side.min(MODE_BOX),
+            on: [false; MODE_BOX * MODE_BOX],
+        }
+    }
+
+    fn set(&mut self, x: i32, y: i32) {
+        if x >= 0
+            && y >= 0
+            && (x as usize) < self.side
+            && (y as usize) < self.side
+        {
+            self.on[y as usize * self.side + x as usize] = true;
+        }
+    }
+
+    /// A line two pixels wide from `a` to `b`.
+    fn line(&mut self, a: (i32, i32), b: (i32, i32)) {
+        let (dx, dy) = ((b.0 - a.0).abs(), -(b.1 - a.1).abs());
+        let (sx, sy) = ((b.0 - a.0).signum(), (b.1 - a.1).signum());
+        let (mut x, mut y, mut err) = (a.0, a.1, dx + dy);
+        loop {
+            self.set(x, y);
+            self.set(x + 1, y);
+            self.set(x, y + 1);
+            if x == b.0 && y == b.1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// An arrowhead: a filled triangle with its tip at `tip`, pointing
+    /// along `(dx, dy)` (unit-ish), `len` long.
+    fn head(&mut self, tip: (i32, i32), dir: (i32, i32), len: i32) {
+        // Walk back from the tip, widening: a solid wedge.
+        for i in 0..=len {
+            let cx = tip.0 - dir.0 * i;
+            let cy = tip.1 - dir.1 * i;
+            let half = i * 2 / 3;
+            for k in -half..=half {
+                // Perpendicular to the direction.
+                self.set(cx - dir.1 * k, cy + dir.0 * k);
+            }
+        }
+    }
+
+    fn blit<D>(
+        &self,
+        target: &mut D,
+        origin: Point,
+        colour: Rgb565,
+        bg: Rgb565,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let n = self.side * self.side;
+        let px = self.on[..n].iter().map(|&on| if on { colour } else { bg });
+        target.fill_contiguous(
+            &Rectangle::new(
+                origin,
+                Size::new(self.side as u32, self.side as u32),
+            ),
+            px,
+        )
+    }
+}
+
+/// The shuffle glyph, `r` half a side: two paths crossing, each ending
+/// in an arrowhead on the right.
+pub fn icon_shuffle<D>(
+    target: &mut D,
+    c: Point,
+    r: i32,
+    colour: Rgb565,
+    bg: Rgb565,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let side = (2 * r + 1) as usize;
+    let mut b = Box::new(side);
+    let (w, h) = (side as i32 - 1, side as i32 - 1);
+    let (top, bottom) = (h / 4, h - h / 4);
+    // Left stubs, the crossing diagonals, right stubs.
+    b.line((0, top), (w / 4, top));
+    b.line((0, bottom), (w / 4, bottom));
+    b.line((w / 4, top), (w - w / 4 - 1, bottom));
+    b.line((w / 4, bottom), (w - w / 4 - 1, top));
+    b.line((w - w / 4 - 1, top), (w - 3, top));
+    b.line((w - w / 4 - 1, bottom), (w - 3, bottom));
+    b.head((w, top), (1, 0), 3);
+    b.head((w, bottom), (1, 0), 3);
+    b.blit(target, c - Point::new(r, r), colour, bg)
+}
+
+/// The repeat glyph, `r` half a side: a loop with an arrowhead, and a
+/// `1` in the middle when `one`.
+pub fn icon_repeat<D>(
+    target: &mut D,
+    c: Point,
+    r: i32,
+    one: bool,
+    colour: Rgb565,
+    bg: Rgb565,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let side = (2 * r + 1) as usize;
+    let mut b = Box::new(side);
+    let (w, h) = (side as i32 - 1, side as i32 - 1);
+    let (top, bottom) = (h / 5, h - h / 5);
+    // A rounded loop drawn as a rectangle with the top-right open for
+    // the arrowhead and the bottom-left open to read as two arrows.
+    b.line((2, top), (w - 6, top));
+    b.line((w - 1, top + 3), (w - 1, bottom));
+    b.line((w - 1, bottom), (5, bottom));
+    b.line((0, bottom - 3), (0, top));
+    b.head((w - 1, top + 1), (1, 0), 3);
+    b.head((2, bottom), (-1, 0), 3);
+    b.blit(target, c - Point::new(r, r), colour, bg)?;
+    if one {
+        let font = &text::TINY;
+        let x = c.x - font.width("1") / 2;
+        let y = c.y + font.height() / 2 - 1;
+        font.draw(target, "1", Point::new(x, y), colour, bg)?;
+    }
+    Ok(())
+}
+
 /// The play glyph: a triangle pointing right, sized to a button of `r`.
 pub fn icon_play<D>(
     target: &mut D,

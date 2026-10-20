@@ -135,6 +135,7 @@ dependencies = [
  "ab_glyph",
  "embedded-graphics",
  "embedded-graphics-simulator",
+ "evo-esp32-queue",
  "evo-esp32-sdk",
 ]
 

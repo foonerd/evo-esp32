@@ -709,6 +709,23 @@ fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
+                            Intent::Tap(Hotspot::Shuffle) => {
+                                let on = !queue.shuffle();
+                                queue.set_shuffle(on);
+                                config.save(
+                                    "shuffle",
+                                    if on { "on" } else { "off" },
+                                );
+                            }
+                            Intent::Tap(Hotspot::Repeat) => {
+                                let next = match queue.repeat() {
+                                    Repeat::Off => Repeat::All,
+                                    Repeat::All => Repeat::One,
+                                    Repeat::One => Repeat::Off,
+                                };
+                                queue.set_repeat(next);
+                                config.save("repeat", repeat_name(next));
+                            }
                             Intent::Tap(Hotspot::Text) => {
                                 face.show_sheet(true);
                             }
@@ -770,6 +787,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let mut state = View::new(&pb, output.as_ref(), "Card");
+            state.shuffle = queue.shuffle();
+            state.repeat = queue.repeat();
             if current.is_none() {
                 state.notice = notice.clone().unwrap_or_default();
             }
