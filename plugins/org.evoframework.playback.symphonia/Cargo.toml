@@ -17,7 +17,7 @@ evo-esp32-sdk = { path = "../../sdk" }
 # Pure Rust, MPL-2.0 (file-level copyleft; linking is unaffected). No SIMD
 # feature: that pulls rustfft, and the target has no SIMD. Codecs are the
 # ones a card of music holds.
-symphonia = { version = "0.6", default-features = false, features = ["flac", "id3v1", "id3v2", "mp3", "pcm", "wav"] }
+symphonia = { version = "0.6", default-features = false, features = ["flac", "id3v1", "id3v2", "mp3", "pcm", "wav", "ogg", "vorbis", "aac"] }
 log = "0.4"
 
 [dev-dependencies]

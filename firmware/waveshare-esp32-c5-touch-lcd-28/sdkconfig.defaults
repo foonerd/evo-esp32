@@ -40,6 +40,11 @@ CONFIG_ESP_WIFI_CACHE_TX_BUFFER_NUM=6
 CONFIG_ESP_WIFI_MGMT_SBUF_NUM=8
 CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=3
 
+# TLS for https:// streams: mbedTLS takes tens of kilobytes for a
+# session (its 16 KB record buffers above all); in PSRAM, where the
+# stream's own buffer is. The default bundle of root certificates stays.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
 # The card: long file names (the default is 8.3 only), buffers on the heap,
 # and names handed to the application as UTF-8 (the default is the OEM code
 # page, which Rust strings cannot hold).

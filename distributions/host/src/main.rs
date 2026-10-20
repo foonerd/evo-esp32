@@ -17,6 +17,7 @@
 //! evo-esp32-host --gallery target/faces      # every rotation, style and theme
 //! ```
 
+mod http;
 mod panel;
 mod sink;
 
@@ -176,7 +177,10 @@ fn bring_up(
         .map_err(|e| e.to_string())?;
     steward
         .admit_warden(
-            Box::new(PlaybackSymphonia::new(Box::new(PacedWav::new(wav)))),
+            Box::new(
+                PlaybackSymphonia::new(Box::new(PacedWav::new(wav)))
+                    .with_opener(Box::new(http::PlainHttp)),
+            ),
             now,
         )
         .map_err(|e| e.to_string())?;

@@ -65,6 +65,7 @@ use evo_esp32_face::{
     theme, About, Face, Fact, Hotspot, Library, Repaint, Screen, Style, Theme,
     View,
 };
+use evo_esp32_platform_esp_idf::HttpOpener;
 use evo_esp32_sdk::catalogue::Catalogue;
 use evo_esp32_sdk::contract::audio::playback::{self, Correction, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -306,8 +307,15 @@ fn main() -> anyhow::Result<()> {
     }
     // Each track once, shuffled so a bench run meets every format and
     // rate on the card early; then the fabric idles.
+    // Stations have no end, so the boot's run through the card leaves
+    // them out; a tap in the library plays one.
+    let stations = tracks.iter().filter(|t| is_stream(t)).count();
+    tracks.retain(|t| !is_stream(t));
     shuffle(&mut tracks);
-    info!("{} tracks, shuffled", tracks.len());
+    info!(
+        "{} tracks, shuffled; {stations} stations on the card",
+        tracks.len()
+    );
     let mut next = 0usize;
     // The level the listener wants; every track starts at it.
     let mut wanted = start_level;
@@ -831,7 +839,10 @@ fn bring_up(sink: I2sSink<Codec>, now: Ticks) -> Result<Steward, String> {
         .map_err(|e| e.to_string())?;
     steward
         .admit_warden(
-            Box::new(PlaybackSymphonia::with_codecs(Box::new(sink), codecs())),
+            Box::new(
+                PlaybackSymphonia::with_codecs(Box::new(sink), codecs())
+                    .with_opener(Box::new(HttpOpener)),
+            ),
             now,
         )
         .map_err(|e| e.to_string())?;
@@ -993,6 +1004,11 @@ fn play_next(
 /// plays; a track whose rate the listing does not know is tried.
 fn within_ceiling(track: &Track) -> bool {
     track.sample_rate.is_none_or(|rate| rate <= RATE_CEILING)
+}
+
+/// A track from the network rather than the card.
+fn is_stream(track: &Track) -> bool {
+    track.uri.starts_with("http://") || track.uri.starts_with("https://")
 }
 
 /// Pause, resume or seek the track in custody.

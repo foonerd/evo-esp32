@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Internet radio. A playlist on the card (`.m3u`, `.m3u8`, `.pls`) lists
+  stations; they appear in the library under the playlist's name and a
+  tap plays one over Wi-Fi. `sdk`: `ByteStream` and `StreamOpener`, the
+  contract by which a distribution opens `http://` and `https://` for
+  the playback plugin. `plugins/org.evoframework.source.files`: reads
+  playlists (`#EXTINF` titles, `FileN`/`TitleN` pairs, a BOM, a station
+  without a title named by its host) into tracks with no length and the
+  playlist as their album. `plugins/org.evoframework.playback.symphonia`
+  (`stream.rs`): a fetch thread reads the stream into a 512 KB ring in
+  PSRAM, gathering a second and a half at the server's bitrate before
+  the first packet; the decoder's tick never waits on the network. The
+  server's interleaved metadata (`icy-metaint`) is taken out on the way
+  in and its `StreamTitle` becomes the track's artist and title as the
+  songs change; `icy-name` is the album line. `platform/esp-idf`
+  (`http.rs`): the opener over `esp_http_client` with the certificate
+  bundle, redirects followed, a 10 s read timeout; `mbedTLS` allocates
+  in PSRAM. The host distribution opens plain `http://` over a socket
+  (SHOUTcast's `ICY 200 OK` accepted). Stations stay out of the boot's
+  run through the card. The face drops the previous track's art when a
+  stream starts. `sdcard/Radio/Evo Selection.m3u`: thirty-two stations
+  to begin with. Decoded: MP3, FLAC, Ogg Vorbis, AAC-LC; HE-AAC plays
+  its core at reduced quality. The app image is 3.02 MB of its 3 MB
+  partition.
 - The reservoir. `firmware/waveshare-esp32-c5-touch-lcd-28/src/sink.rs`:
   the decoder runs ahead of the ear into a 600 ms ring of decoded audio
   in PSRAM, and a feeder task at the top priority (above the Wi-Fi

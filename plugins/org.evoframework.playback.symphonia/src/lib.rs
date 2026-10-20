@@ -4,12 +4,16 @@
 //! A playback warden that decodes with Symphonia.
 //!
 //! `org.evoframework.playback.symphonia` stocks `playback/decode`. Handed
-//! a [`Play`] it opens the track's `file://` URI, probes the container,
-//! makes a decoder for its first audio track and, tick by tick, decodes a
-//! bounded slice and offers the frames to the [`FrameSink`] the
-//! distribution gave it. The sink paces: when it takes less than offered
-//! the warden keeps the remainder and asks to be ticked again shortly, so
-//! a tick is never longer than a few packets' decode and a copy.
+//! a [`Play`] it opens the track's URI (`file://` on the host; `http://`
+//! and `https://` through the [`StreamOpener`] the distribution gave it,
+//! buffered on a thread of its own, see [`stream`]), probes the
+//! container, makes a decoder for its first audio track and, tick by
+//! tick, decodes a bounded slice and offers the frames to the
+//! [`FrameSink`] the distribution gave it. The sink paces: when it takes
+//! less than offered the warden keeps the remainder and asks to be
+//! ticked again shortly, so a tick is never longer than a few packets'
+//! decode and a copy. A network stream is decoded only from what has
+//! arrived, and the titles it carries become the track's.
 //!
 //! The position a consumer draws is the frames the sink has accepted,
 //! which is as near the ear as the warden can know without the sink's
@@ -65,6 +69,10 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::{MetadataOptions, StandardTag};
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
+pub mod stream;
+use evo_esp32_sdk::contract::audio::playback::StreamOpener;
+use stream::Live;
+
 /// The plugin's name, as the catalogue and the steward know it.
 pub const NAME: &str = "org.evoframework.playback.symphonia";
 
@@ -72,6 +80,8 @@ pub const NAME: &str = "org.evoframework.playback.symphonia";
 const PAUSED_IDLE_MS: u32 = 250;
 /// How long to wait when the sink took nothing.
 const SINK_FULL_IDLE_MS: u32 = 20;
+/// How long to wait for a network stream's buffer to fill.
+const BUFFERING_IDLE_MS: u32 = 50;
 /// The most audio one tick decodes, in milliseconds. Past this the
 /// warden yields even if the sink would take more: a sink that runs the
 /// decoder ahead of the ear would otherwise take whole ticks of the
@@ -93,6 +103,8 @@ struct Stream {
     time_base: Option<TimeBase>,
     /// Coarse for MPEG audio, whose accurate seek walks the frames.
     seek_mode: SeekMode,
+    /// A stream from the network: its buffer's state and its titles.
+    live: Option<Live>,
 }
 
 /// The custody in hand.
@@ -150,6 +162,9 @@ pub fn default_codecs() -> CodecRegistry {
 pub struct PlaybackSymphonia {
     sink: Box<dyn FrameSink>,
     codecs: CodecRegistry,
+    /// How `http://` and `https://` tracks are reached; none, and they
+    /// are refused.
+    opener: Option<Box<dyn StreamOpener>>,
     subject: Option<SubjectId>,
     in_hand: Option<InHand>,
 }
@@ -170,9 +185,17 @@ impl PlaybackSymphonia {
         Self {
             sink,
             codecs,
+            opener: None,
             subject: None,
             in_hand: None,
         }
+    }
+
+    /// With a way to reach `http://` and `https://` tracks: the
+    /// distribution's transport.
+    pub fn with_opener(mut self, opener: Box<dyn StreamOpener>) -> Self {
+        self.opener = Some(opener);
+        self
     }
 
     fn publish(&self, ctx: &mut dyn Context, state: &State) {
@@ -236,7 +259,8 @@ impl Warden for PlaybackSymphonia {
         let play: Play = from_value(&assignment.instruction)
             .map_err(|e| CustodyError(format!("instruction: {e}")))?;
         let mut track = play.track;
-        let (mut stream, format) = open(&track.uri, &self.codecs)?;
+        let (mut stream, format) =
+            open(&track.uri, &self.codecs, self.opener.as_deref())?;
         if track.duration_ms.is_none() {
             track.duration_ms = duration_ms(&stream);
         }
@@ -249,6 +273,13 @@ impl Warden for PlaybackSymphonia {
         }
         if track.album.is_none() {
             track.album = tags.album;
+        }
+        if let Some(live) = &stream.live {
+            // A station: its name is the album line, under the title the
+            // playlist gave it, until the stream says what is playing.
+            if let Some(name) = &live.info.name {
+                track.album = Some(name.clone());
+            }
         }
         let (base_ms, skip) = if play.start_ms > 0 {
             seek(&mut stream, play.start_ms, format.sample_rate)?
@@ -344,6 +375,23 @@ impl Warden for PlaybackSymphonia {
             u64::from(h.state.format.as_ref().map_or(0, |f| f.sample_rate));
         let budget_frames = (rate * TICK_BUDGET_MS / 1000).max(1);
         let mut decoded_frames: u64 = 0;
+        if let Some(live) = h.stream.live.as_ref() {
+            if let Some(title) = live.take_title() {
+                if let Some(t) = h.state.track.as_mut() {
+                    // Stations say "Artist - Title".
+                    match title.split_once(" - ") {
+                        Some((artist, name)) if !name.trim().is_empty() => {
+                            t.artist = Some(artist.trim().to_string());
+                            t.title = name.trim().to_string();
+                        }
+                        _ => {
+                            t.artist = None;
+                            t.title = title;
+                        }
+                    }
+                }
+            }
+        }
         let progress = loop {
             // Offer what is pending before decoding more.
             if h.taken < h.pending.len() {
@@ -365,6 +413,11 @@ impl Warden for PlaybackSymphonia {
             }
             if decoded_frames >= budget_frames {
                 break Progress::Working;
+            }
+            // A stream from the network is decoded only from what has
+            // arrived; short of that, the tick waits for the fetcher.
+            if h.stream.live.as_mut().is_some_and(|l| !l.ready()) {
+                break Progress::Idle(BUFFERING_IDLE_MS);
             }
             match next_frames(&mut h.stream, &mut h.pending) {
                 Ok(Some(frames)) => {
@@ -397,23 +450,45 @@ impl Warden for PlaybackSymphonia {
     }
 }
 
-/// Open a `file://` URI: probe it, pick its default audio track, make a
-/// decoder, and report the format the stream will come out in.
+/// Open a URI: a `file://` on the host, or an `http://`/`https://`
+/// stream through the opener; probe it, pick its default audio track,
+/// make a decoder, and report the format the stream will come out in.
 fn open(
     uri: &str,
     codecs: &CodecRegistry,
+    opener: Option<&dyn StreamOpener>,
 ) -> Result<(Stream, Format), CustodyError> {
-    let path = file_path(uri)?;
-    let file = File::open(&path)
-        .map_err(|e| CustodyError(format!("{}: {e}", path.display())))?;
-    let mss = MediaSourceStream::new(
-        Box::new(file),
-        MediaSourceStreamOptions::default(),
-    );
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
+    let mut live = None;
+    let source: Box<dyn symphonia::core::io::MediaSource> =
+        if uri.starts_with("http://") || uri.starts_with("https://") {
+            let opener = opener.ok_or_else(|| {
+                CustodyError("no transport for a network stream".into())
+            })?;
+            let bytes = opener.open(uri).map_err(CustodyError)?;
+            let (buffered, handle) = stream::start(bytes)
+                .map_err(|e| CustodyError(format!("buffer: {e}")))?;
+            if let Some(ext) = handle.info.extension_hint() {
+                hint.with_extension(ext);
+            } else if let Some(ext) =
+                uri.rsplit('.').next().filter(|e| e.len() <= 4)
+            {
+                hint.with_extension(ext);
+            }
+            live = Some(handle);
+            Box::new(buffered)
+        } else {
+            let path = file_path(uri)?;
+            let file = File::open(&path).map_err(|e| {
+                CustodyError(format!("{}: {e}", path.display()))
+            })?;
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                hint.with_extension(ext);
+            }
+            Box::new(file)
+        };
+    let mss =
+        MediaSourceStream::new(source, MediaSourceStreamOptions::default());
     let reader = symphonia::default::get_probe()
         .probe(
             &hint,
@@ -460,6 +535,7 @@ fn open(
         reader,
         decoder,
         seek_mode,
+        live,
     };
     Ok((stream, format))
 }

@@ -1,0 +1,82 @@
+// Copyright (c) 2026 Just a Nerd
+// SPDX-License-Identifier: BUSL-1.1
+
+//! `http://` and `https://` streams over ESP-IDF's HTTP client, with the
+//! certificate bundle for TLS: the board's [`StreamOpener`].
+//!
+//! The request asks for the station's metadata (`Icy-MetaData: 1`) and
+//! follows redirects; the response's headers are kept for the decoder
+//! to read the content type, the station's name, its bitrate and the
+//! metadata interval. A read that gets nothing for the timeout is the
+//! transport giving up, which the stream says.
+
+use std::time::Duration;
+
+use esp_idf_svc::http::client::{
+    Configuration, EspHttpConnection, FollowRedirectsPolicy,
+};
+use esp_idf_svc::http::Method;
+use esp_idf_svc::sys;
+use evo_esp32_sdk::contract::audio::playback::{ByteStream, StreamOpener};
+
+/// How long a read may wait for the server before the stream is lost.
+const TIMEOUT: Duration = Duration::from_secs(10);
+/// The client's receive buffer, internal SRAM: one chunk of a stream.
+const BUFFER: usize = 4096;
+/// Who is asking.
+const USER_AGENT: &str = concat!("evo-esp32/", env!("CARGO_PKG_VERSION"));
+
+/// Opens streams through `esp_http_client`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HttpOpener;
+
+/// An open response, read to its end.
+pub struct HttpStream {
+    connection: EspHttpConnection,
+}
+
+// SAFETY: an `esp_http_client` handle is not bound to the task that made
+// it; ESP-IDF asks only that one task use it at a time. The stream is
+// handed whole to the thread that reads it and is not touched by anyone
+// else afterwards.
+unsafe impl Send for HttpStream {}
+
+impl StreamOpener for HttpOpener {
+    fn open(&self, uri: &str) -> Result<Box<dyn ByteStream>, String> {
+        let mut connection = EspHttpConnection::new(&Configuration {
+            buffer_size: Some(BUFFER),
+            timeout: Some(TIMEOUT),
+            follow_redirects_policy: FollowRedirectsPolicy::FollowAll,
+            crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
+            ..Default::default()
+        })
+        .map_err(|e| format!("http client: {e}"))?;
+        connection
+            .initiate_request(
+                Method::Get,
+                uri,
+                &[("Icy-MetaData", "1"), ("User-Agent", USER_AGENT)],
+            )
+            .map_err(|e| format!("{uri}: {e}"))?;
+        connection
+            .initiate_response()
+            .map_err(|e| format!("{uri}: {e}"))?;
+        let status = connection.status();
+        if !(200..300).contains(&status) {
+            return Err(format!("{uri}: HTTP {status}"));
+        }
+        Ok(Box::new(HttpStream { connection }))
+    }
+}
+
+impl ByteStream for HttpStream {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        self.connection
+            .read(buf)
+            .map_err(|e| format!("read: {e}"))
+    }
+
+    fn header(&self, name: &str) -> Option<String> {
+        self.connection.header(name).map(str::to_string)
+    }
+}

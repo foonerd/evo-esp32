@@ -8,8 +8,12 @@
 //! then the files whose extension names an audio format, each as a
 //! [`Track`] titled by its file name; every track listed is announced
 //! as a `track` subject so a consumer can find it again by URI. Nothing
-//! is read inside a file: tags are `metadata/tags`' concern, length is
-//! the decoder's.
+//! is read inside an audio file: tags are `metadata/tags`' concern,
+//! length is the decoder's. A playlist file (`.m3u`, `.m3u8`, `.pls`)
+//! is read, and the stations it names (`http://`, `https://`) are
+//! listed as tracks of the folder, titled as the playlist titles them:
+//! that is how internet radio reaches the player, a text file on the
+//! card.
 //!
 //! A host plugin: it uses `std::fs`. On a device the same shelf is
 //! stocked by a source over the card's filesystem with this plugin's
@@ -39,6 +43,9 @@ pub const NAME: &str = "org.evoframework.source.files";
 pub const AUDIO_EXTENSIONS: &[&str] = &[
     "flac", "mp3", "wav", "ogg", "opus", "aac", "m4a", "aiff", "aif",
 ];
+
+/// Extensions taken to be playlists of stations, lower case.
+pub const PLAYLIST_EXTENSIONS: &[&str] = &["m3u", "m3u8", "pls"];
 
 static STOCKS: [Stocking; 1] = [Stocking {
     rack: shelf::SOURCE,
@@ -113,13 +120,22 @@ impl SourceFiles {
                     duration_ms,
                     sample_rate,
                 });
+            } else if is_playlist(&name) {
+                if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                    tracks.extend(stations(&text, &title_of(&name)));
+                }
             }
         }
         folders.sort();
         tracks.sort_by(|a, b| a.title.cmp(&b.title));
         for t in &tracks {
+            let scheme = if t.uri.starts_with("file://") {
+                "file"
+            } else {
+                "stream"
+            };
             if let Ok(id) = ctx.announce(SubjectAnnouncement {
-                addressing: ExternalAddressing::new("file", t.uri.clone()),
+                addressing: ExternalAddressing::new(scheme, t.uri.clone()),
                 kind: TRACK_KIND.into(),
                 state: to_value(t),
             }) {
@@ -198,6 +214,110 @@ pub fn is_audio(name: &str) -> bool {
         .is_some_and(|e| {
             AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str())
         })
+}
+
+/// True for a file name whose extension is in [`PLAYLIST_EXTENSIONS`].
+pub fn is_playlist(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            PLAYLIST_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str())
+        })
+}
+
+/// The stations a playlist names: its `http://` and `https://` entries,
+/// in order, each a [`Track`] with no length (a stream has none) and
+/// the playlist's name as its album. M3U: a `#EXTINF:-1,Title` line
+/// titles the URL on the next line; PLS: `FileN=` and `TitleN=` pairs.
+/// A local path in a playlist is not a station and is left out; an
+/// entry without a title is titled by its host.
+pub fn stations(text: &str, playlist: &str) -> Vec<Track> {
+    let text = text.trim_start_matches('\u{feff}');
+    let is_pls = text
+        .lines()
+        .next()
+        .is_some_and(|l| l.trim().eq_ignore_ascii_case("[playlist]"));
+    let station = |uri: &str, title: Option<&str>| {
+        let title = title
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| host_of(uri));
+        Track {
+            uri: uri.to_string(),
+            title,
+            artist: None,
+            album: Some(playlist.to_string()),
+            duration_ms: None,
+            sample_rate: None,
+        }
+    };
+    let is_stream =
+        |u: &str| u.starts_with("http://") || u.starts_with("https://");
+    let mut out = Vec::new();
+    if is_pls {
+        // FileN and TitleN may come in any order; pair them by N.
+        let mut files: Vec<(usize, String)> = Vec::new();
+        let mut titles: Vec<(usize, String)> = Vec::new();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if let Some(n) =
+                key.strip_prefix("File").and_then(|n| n.parse().ok())
+            {
+                files.push((n, value.to_string()));
+            } else if let Some(n) =
+                key.strip_prefix("Title").and_then(|n| n.parse().ok())
+            {
+                titles.push((n, value.to_string()));
+            }
+        }
+        files.sort_by_key(|(n, _)| *n);
+        for (n, uri) in files {
+            if is_stream(&uri) {
+                let title = titles
+                    .iter()
+                    .find(|(m, _)| *m == n)
+                    .map(|(_, t)| t.as_str());
+                out.push(station(&uri, title));
+            }
+        }
+    } else {
+        let mut pending_title: Option<String> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(info) = line.strip_prefix("#EXTINF:") {
+                pending_title =
+                    info.split_once(',').map(|(_, t)| t.to_string());
+            } else if line.starts_with('#') {
+                continue;
+            } else {
+                if is_stream(line) {
+                    out.push(station(line, pending_title.as_deref()));
+                }
+                pending_title = None;
+            }
+        }
+    }
+    out
+}
+
+/// The host part of a URL, for a station with no title.
+fn host_of(uri: &str) -> String {
+    uri.split("://")
+        .nth(1)
+        .unwrap_or(uri)
+        .split(['/', ':', '?'])
+        .next()
+        .unwrap_or(uri)
+        .to_string()
 }
 
 /// The file name without its extension.
@@ -405,6 +525,32 @@ mod tests {
                 Ticks(0)
             )
             .is_err());
+    }
+
+    #[test]
+    fn playlists_name_their_stations() {
+        let m3u = "\u{feff}#EXTM3U\n#EXTINF:-1,Radio Paradise\nhttp://stream.radioparadise.com/mp3-128\n\n# a comment\n/music/local.flac\nhttps://ice1.somafm.com/groovesalad-128-mp3\n";
+        let got = stations(m3u, "Favourites");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].title, "Radio Paradise");
+        assert_eq!(got[0].uri, "http://stream.radioparadise.com/mp3-128");
+        assert_eq!(got[0].album.as_deref(), Some("Favourites"));
+        assert_eq!(got[0].duration_ms, None);
+        assert_eq!(got[1].title, "ice1.somafm.com", "untitled: the host");
+        let pls = "[playlist]\nNumberOfEntries=2\nTitle2=Second\nFile1=http://a.example/one\nTitle1=First\nFile2=https://b.example:8000/two\nLength1=-1\n";
+        let got = stations(pls, "Radio");
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            (got[0].title.as_str(), got[0].uri.as_str()),
+            ("First", "http://a.example/one")
+        );
+        assert_eq!(
+            (got[1].title.as_str(), got[1].uri.as_str()),
+            ("Second", "https://b.example:8000/two")
+        );
+        assert!(is_playlist("stations.M3U"));
+        assert!(is_playlist("x.pls"));
+        assert!(!is_playlist("x.mp3"));
     }
 
     #[test]

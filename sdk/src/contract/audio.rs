@@ -21,6 +21,7 @@
 //! `to_value` and `from_value` are the two conversions, so a plugin does
 //! not hand-build objects and a consumer does not hand-read them.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -281,6 +282,28 @@ pub mod playback {
         fn held(&self) -> usize {
             0
         }
+    }
+
+    /// Bytes from beyond the card: what an `http://` or `https://` URI
+    /// reads as once opened. The distribution opens it through its
+    /// platform (the board's TLS, a host's sockets) and hands it to the
+    /// decoder it admits, as it hands the sink; the decoder reads and
+    /// never knows the transport.
+    pub trait ByteStream: Send {
+        /// Read into `buf`; the bytes read, zero at the end of the
+        /// stream. Blocks until there is something or the transport
+        /// gives up, which it says.
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, String>;
+        /// A response header by its lower-case name (`content-type`,
+        /// `icy-metaint`, `icy-name`, `icy-br`), if the server sent it.
+        fn header(&self, name: &str) -> Option<String>;
+    }
+
+    /// Opens the URIs a distribution's platform can reach.
+    pub trait StreamOpener: Send {
+        /// Open `uri` for reading, asking the server for the stream's
+        /// metadata where the protocol has it (`Icy-MetaData: 1`).
+        fn open(&self, uri: &str) -> Result<Box<dyn ByteStream>, String>;
     }
 }
 

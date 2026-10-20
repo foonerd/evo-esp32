@@ -115,10 +115,10 @@ impl Fetcher {
         }
     }
 
-    /// The track at `uri` (a `file://` path) is playing: fetch its
-    /// folder's art unless that folder's is already in hand. `true` when
-    /// a fetch is asked for, which is when the face should drop the old
-    /// art.
+    /// The track at `uri` is playing: fetch its folder's art unless that
+    /// folder's is already in hand. `true` when the face should drop the
+    /// art it shows: a fetch is asked for, or the track is not on the
+    /// card (a stream) and has no folder to look in.
     pub fn track(&mut self, uri: &str) -> bool {
         let Some(dir) = uri
             .strip_prefix("file://")
@@ -126,7 +126,7 @@ impl Fetcher {
             .and_then(Path::parent)
             .map(Path::to_path_buf)
         else {
-            return false;
+            return self.current.take().is_some();
         };
         if self.current.as_ref() == Some(&dir) {
             return false;

@@ -1,0 +1,75 @@
+#EXTM3U
+# Internet radio stations for evo-esp32: copy this folder to the
+# card and the stations appear in the library under Radio. One
+# #EXTINF line names the station on the URL line below it; add or
+# remove as you like, or put your own .m3u or .pls files here.
+#
+# These are the stations Volumio's own selection lists (October
+# 2026); the streams are their broadcasters'. What the player
+# decodes: MP3, FLAC, Ogg Vorbis and AAC-LC. HE-AAC (aacp) streams
+# play at reduced quality.
+
+#EXTINF:-1,Absolut Radio
+https://absolut-ai.live-sm.absolutradio.de/absolut-ai/stream/mp3
+#EXTINF:-1,Absolut Relax
+https://edge56.live-sm.absolutradio.de/absolut-relax/stream/mp3
+#EXTINF:-1,ArtSound FM 92.7
+http://stream.artsound.fm/mp3
+#EXTINF:-1,Classic FM
+http://media-ice.musicradio.com/ClassicFMMP3
+#EXTINF:-1,CDNX 1 - Classic & New Indie Alt
+https://listen-msmn.sharp-stream.com/nme1.mp3
+#EXTINF:-1,CDNX 2 - New & Upfront Indie Alt
+https://listen-msmn.sharp-stream.com/nme2.mp3
+#EXTINF:-1,EuropaRadioJazz - 88.3 Smooth Jazz HD
+https://onair.europaradiojazz.org/radio/8000/sd
+#EXTINF:-1,France Culture Live
+http://icecast.radiofrance.fr/franceculture-midfi.mp3
+#EXTINF:-1,France Musique Classique Plus
+http://icecast.radiofrance.fr/francemusiqueclassiqueplus-midfi.mp3
+#EXTINF:-1,France Musique La Contemporaine
+http://icecast.radiofrance.fr/francemusiquelacontemporaine-midfi.mp3
+#EXTINF:-1,France Musique La Jazz
+http://icecast.radiofrance.fr/francemusiquelajazz-midfi.mp3
+#EXTINF:-1,Ibiza Sonica
+https://ibizasonica.streaming-pro.com:8011/sonicaclub
+#EXTINF:-1,Jazz24
+https://live.amperwave.net/direct/ppm-jazz24mp3-ibc1
+#EXTINF:-1,KDHX 88.1 FM St. Louis
+http://kdhx-ice.streamguys1.com:80/live
+#EXTINF:-1,KEXP 90.3 FM Seattle
+http://live-aacplus-64.kexp.org/kexp64.aac
+#EXTINF:-1,KMHD Portland FM 89.1 -  Jazz
+http://stream1.opb.org/kmhd.mp3
+#EXTINF:-1,Mix 106
+https://stream13.shoutcastsolutions.com/proxy/gbeaum00?mp=/stream
+#EXTINF:-1,Naim Classical (FLAC)
+http://mscp3.live-streams.nl:8250/class-flac.flac
+#EXTINF:-1,Naim Jazz (FLAC)
+http://mscp3.live-streams.nl:8340/jazz-flac.flac
+#EXTINF:-1,Naim Radio (FLAC)
+http://mscp3.live-streams.nl:8360/flac.flac
+#EXTINF:-1,NTS Live International
+http://stream-relay-geo.ntslive.net/stream2
+#EXTINF:-1,RadioJAZZ.FM
+https://radiojazz.out.airtime.pro/radiojazz_a
+#EXTINF:-1,Radio Paradise
+http://stream-dc1.radioparadise.com/rp_192m.ogg
+#EXTINF:-1,Radio Paradise (FLAC+)
+http://stream.radioparadise.com/flacm
+#EXTINF:-1,Radio Paradise Mellow (FLAC+)
+http://stream.radioparadise.com/mellow-flacm
+#EXTINF:-1,Radio Paradise Rock (FLAC+)
+http://stream.radioparadise.com/rock-flacm
+#EXTINF:-1,Radio Paradise World (FLAC+)
+http://stream.radioparadise.com/world-etc-flacm
+#EXTINF:-1,Radio Reload
+http://onair15.xdevel.com:7012/1
+#EXTINF:-1,Radio Swiss Classic
+http://stream.srg-ssr.ch/m/rsc_de/aacp_96
+#EXTINF:-1,Radio Swiss Jazz
+http://stream.srg-ssr.ch/m/rsj/aacp_96
+#EXTINF:-1,Radio X London
+http://media-sov.musicradio.com:80/RadioXLondonMP3
+#EXTINF:-1,San Diego Jazz 88.3
+http://listen.jazz88.org/ksds.mp3
