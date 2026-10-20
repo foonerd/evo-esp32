@@ -1411,8 +1411,17 @@ mod tests {
             },
             "the offset",
         );
+        // The server's clock is its epoch plus a second, the client's is
+        // the link's epoch: the difference the probes should find is
+        // between those two clocks, not the second alone (the dialler
+        // may sleep half a second before it sees the server named, and
+        // the server's epoch is set at accept).
         let diff = link.session().diff_us.unwrap();
-        assert!((990_000..=1_010_000).contains(&diff), "offset {diff} us");
+        let expected = server.now_us() - link.now_us();
+        assert!(
+            (diff - expected).abs() <= 10_000,
+            "offset {diff} us, the clocks are {expected} us apart"
+        );
         assert_eq!(link.session().buffer_ms, 150);
 
         // Two chunks stamped now and 20 ms on, on the server's clock:
