@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-20
+
 - The device as a room of an Evo multiroom group.
   `plugins/org.evoframework.multiroom.receiver` stocks the new
   `playback/receive` shelf: a listener on the Evo audio plane (TCP

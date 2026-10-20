@@ -6,7 +6,7 @@
 # instructions as its body. The tag must equal the firmware crate's
 # version, so a release is never named one thing and built as another.
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.1.1 && git push origin v0.1.1
 #
 # A tag publishes the release and marks it the latest. A manual run
 # (workflow_dispatch) builds the same artefacts and files them as a
@@ -131,7 +131,8 @@ jobs:
 
           ## Known in this release
 
-          - AAC streams are not decoded on this board (most Bauer stations); the BBC's live streams are HLS and not played. MP3, FLAC and Ogg Vorbis from the air play.
+          - From the air: MP3, AAC (AAC-LC and HE-AAC), FLAC and Ogg Vorbis. The BBC's domestic stations are HLS and not played yet; the World Service is.
+          - The player is a room of an Evo multiroom group: it announces itself as an Evo device, and a group that has its Evo id (bottom of Settings) as a member plays through it. See [Multiroom](https://github.com/${GITHUB_REPOSITORY}/wiki/Multiroom).
           - 176.4 and 192 kHz files are beyond the chip and are greyed in the library.
           - The on-board codec is mono through its speaker and headphone output; stereo is a DAC board on the header (see [Audio out](https://github.com/${GITHUB_REPOSITORY}/wiki/Audio-out)).
           - No over-the-air update yet: every update is this flash.
