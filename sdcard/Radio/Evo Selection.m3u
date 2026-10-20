@@ -22,11 +22,11 @@ https://stream-ar.hellorayo.co.uk/absolute80shigh.aac?direct=true&aw_0_1st.skey=
 https://stream-ar.hellorayo.co.uk/absolute90shigh.aac?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s49815/images/logod.png",Absolute Classic Rock
 https://stream-ar.hellorayo.co.uk/absoluteclassicrockhigh.aac?direct=true&aw_0_1st.skey=1602676850
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s16679/images/logod.jpg",Absolute Radio
+#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s16679/images/logod.png",Absolute Radio
 https://stream-ar.hellorayo.co.uk/absoluteradiohigh.aac?direct=true&aw_0_1st.skey=1602676850
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s24948/images/logod.jpg",BBC World Service
+#EXTINF:-1 tvg-logo="https://cdn-radiotime-logos.tunein.com/s24948d.png",BBC World Service
 http://stream.live.vc.bbcmedia.co.uk/bbc_world_service
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s323115/images/logod.jpg",Capital Chill
+#EXTINF:-1 tvg-logo="https://www.capitalfm.com/assets_v4r/capital/img/favicon-196x196.png",Capital Chill
 https://media-ssl.musicradio.com/CapitalChill
 #EXTINF:-1 tvg-logo="https://www.capitaldance.com/assets_v4r/capitaldance/img/favicon-196x196.png",Capital Dance
 https://icecast.thisisdax.com/CapitalDanceMP3
@@ -40,7 +40,7 @@ http://media-ice.musicradio.com/ClassicFMMP3
 https://media-ice.musicradio.com/ClassicFMCalmMP3
 #EXTINF:-1 tvg-logo="https://www.mygoldmusic.co.uk/assets_v4r/gold/img/favicon-196x196.png",Gold
 https://media-ssl.musicradio.com/GoldMP3
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s307458/images/logod.jpg",Greatest Hits Radio
+#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s307458/images/logod.png",Greatest Hits Radio
 https://stream-mz.hellorayo.co.uk/net2national.mp3?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://www.heart.co.uk/assets_v4r/heart/img/favicon-196x196.png",Heart 80s
 https://media-ssl.musicradio.com/Heart80sMP3
@@ -50,7 +50,7 @@ https://media-ssl.musicradio.com/Heart90sMP3
 https://media-ssl.musicradio.com/HeartDanceMP3
 #EXTINF:-1 tvg-logo="https://www.heart.co.uk/assets_v4r/heart/img/favicon-196x196.png",Heart London
 http://ice-sov.musicradio.com/HeartLondonMP3
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s321334/images/logod.jpg",Hits Radio
+#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s321334/images/logod.png",Hits Radio
 https://stream-al.hellorayo.co.uk/hits.mp3?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s45579/images/logod.png",Kerrang! Radio
 https://stream-al.hellorayo.co.uk/kerrang.mp3?direct=true&aw_0_1st.skey=1602676850
@@ -60,7 +60,7 @@ http://live-aacplus-64.kexp.org/kexp64.aac
 https://live-kiss.sharp-stream.com/kiss100.mp3
 #EXTINF:-1 tvg-logo="https://www.lbc.co.uk/apple-touch-icon.png",LBC
 http://media-ice.musicradio.com/LBCUKMP3Low
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s8213/images/logod.jpg",Magic Radio
+#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s8213/images/logod.png",Magic Radio
 https://stream-mz.hellorayo.co.uk/magicnational.mp3?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s283903/images/logod.png",Magic Soul
 https://stream-mz.hellorayo.co.uk/magicsoul.mp3?direct=true&aw_0_1st.skey=1602676850
@@ -74,7 +74,7 @@ http://mscp3.live-streams.nl:8360/flac.flac
 http://stream-relay-geo.ntslive.net/stream
 #EXTINF:-1 tvg-logo="https://www.nts.live/apple-touch-icon.png",NTS Radio 2
 http://stream-relay-geo.ntslive.net/stream2
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s2377/images/logod.jpg",Planet Rock
+#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s2377/images/logod.png",Planet Rock
 https://stream-mz.hellorayo.co.uk/planetrock.mp3?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://www.radiocaroline.co.uk/apple-touch-icon.png",Radio Caroline
 http://78.129.202.200:8040/;
@@ -82,9 +82,9 @@ http://78.129.202.200:8040/;
 http://stream.radioparadise.com/flacm
 #EXTINF:-1 tvg-logo="https://radioparadise.com/apple-touch-icon.png",Radio Paradise Mellow (FLAC)
 http://stream.radioparadise.com/mellow-flacm
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s25582/images/logod.jpg",Radio Swiss Classic
+#EXTINF:-1 tvg-logo="https://cdn-radiotime-logos.tunein.com/s25582d.png",Radio Swiss Classic
 http://stream.srg-ssr.ch/m/rsc_de/aacp_96
-#EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s6814/images/logod.jpg",Radio Swiss Jazz
+#EXTINF:-1 tvg-logo="https://cdn-radiotime-logos.tunein.com/s6814d.png",Radio Swiss Jazz
 http://stream.srg-ssr.ch/m/rsj/aacp_96
 #EXTINF:-1 tvg-logo="https://www.radiox.co.uk/assets_v4r/xfm/img/favicon-196x196.png",Radio X
 http://icecast.thisisdax.com/RadioXUKMP3
@@ -98,7 +98,7 @@ https://stream.resonance.fm/resonance
 https://media-ssl.musicradio.com/ChillMP3
 #EXTINF:-1 tvg-logo="https://www.smoothradio.com/assets_v4r/smooth/img/favicon-196x196.png",Smooth Radio London
 http://media-the.musicradio.com/SmoothLondonMP3
-#EXTINF:-1 tvg-logo="https://sohoradiolondon.com/wp-content/themes/sohoradio-jan-2023/build/images/favicons/sohoradio-192x192.jpg",Soho Radio
+#EXTINF:-1 tvg-logo="https://cdn-radiotime-logos.tunein.com/s223796d.png",Soho Radio
 http://sohoradiomusic.doughunt.co.uk:8000/320mp3
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s17077/images/logod.png",talkSPORT
 https://radio.talksport.com/stream
