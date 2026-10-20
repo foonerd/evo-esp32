@@ -53,10 +53,12 @@ pub struct Found {
 
 /// Fetches album art, one folder at a time, on its own thread.
 pub struct Fetcher {
-    requests: Sender<PathBuf>,
+    requests: Sender<(PathBuf, u32)>,
     results: Receiver<Found>,
     /// The folder whose art the face shows or is fetching.
     current: Option<PathBuf>,
+    /// The side of the face's art square.
+    size: u32,
 }
 
 impl Fetcher {
@@ -71,7 +73,7 @@ impl Fetcher {
                 u32::from(MAIN_PRIORITY),
             );
         }
-        let (requests, inbox) = channel::<PathBuf>();
+        let (requests, inbox) = channel::<(PathBuf, u32)>();
         let (outbox, results) = channel::<Found>();
         ThreadSpawnConfiguration {
             name: Some(c"art"),
@@ -83,7 +85,7 @@ impl Fetcher {
         .map_err(std::io::Error::other)?;
         std::thread::Builder::new()
             .stack_size(STACK)
-            .spawn(move || work(&inbox, &outbox, size))?;
+            .spawn(move || work(&inbox, &outbox))?;
         ThreadSpawnConfiguration::default()
             .set()
             .map_err(std::io::Error::other)?;
@@ -91,7 +93,22 @@ impl Fetcher {
             requests,
             results,
             current: None,
+            size,
         })
+    }
+
+    /// The face's art square changed size (a style change): fetch the
+    /// current folder's art again at the new size. `true` when a fetch
+    /// is asked for, which is when the face should drop the old art.
+    pub fn resize(&mut self, size: u32) -> bool {
+        if size == self.size {
+            return false;
+        }
+        self.size = size;
+        match &self.current {
+            Some(dir) => self.requests.send((dir.clone(), size)).is_ok(),
+            None => false,
+        }
     }
 
     /// The track at `uri` (a `file://` path) is playing: fetch its
@@ -112,7 +129,7 @@ impl Fetcher {
         }
         self.current = Some(dir.clone());
         // The worker is gone only if its thread died, which is logged.
-        self.requests.send(dir).is_ok()
+        self.requests.send((dir, self.size)).is_ok()
     }
 
     /// A finished fetch, if one is waiting; only the one for the current
@@ -133,11 +150,12 @@ impl Fetcher {
 }
 
 /// The worker: the newest request wins, the rest are dropped unread.
-fn work(inbox: &Receiver<PathBuf>, outbox: &Sender<Found>, size: u32) {
-    while let Ok(mut dir) = inbox.recv() {
+fn work(inbox: &Receiver<(PathBuf, u32)>, outbox: &Sender<Found>) {
+    while let Ok(mut ask) = inbox.recv() {
         while let Ok(newer) = inbox.try_recv() {
-            dir = newer;
+            ask = newer;
         }
+        let (dir, size) = ask;
         let before = internal_free();
         let art = fetch(&dir, size);
         debug!(

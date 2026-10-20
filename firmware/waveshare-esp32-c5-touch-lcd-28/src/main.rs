@@ -447,6 +447,25 @@ fn main() -> anyhow::Result<()> {
                                             };
                                             face.set_style(next);
                                             config.save("style", next.name());
+                                            // The art square may be another size now.
+                                            if art.resize(
+                                                face.layout().art.size.width,
+                                            ) {
+                                                face.set_art(None);
+                                            }
+                                        }
+                                        Some(SettingsRow::Rotation) => {
+                                            // The panel is oriented at bring-up:
+                                            // write the setting and start again.
+                                            let next = (face.layout().rotation
+                                                + 90)
+                                                % 360;
+                                            config.save(
+                                                "rotation",
+                                                &next.to_string(),
+                                            );
+                                            info!("rotation {next} written; restarting");
+                                            esp_idf_svc::hal::reset::restart();
                                         }
                                         None => {}
                                     }
@@ -1108,7 +1127,7 @@ fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
             fact("Board", "Waveshare ESP32-C5 2.8".to_string()),
             fact("Theme \u{203a}", face.theme().name.to_string()),
             fact("Style \u{203a}", face.layout().style.name().to_string()),
-            fact("Rotation", format!("{}", face.layout().rotation)),
+            fact("Rotation \u{203a}", format!("{}", face.layout().rotation)),
             fact(
                 "Card",
                 format!("{:.0} GB, {tracks} tracks", card_mb as f64 / 1024.0),
@@ -1121,12 +1140,14 @@ fn facts(face: &Face, card_mb: u64, tracks: usize) -> About {
 enum SettingsRow {
     Theme,
     Style,
+    Rotation,
 }
 
 fn settings_row(i: u8) -> Option<SettingsRow> {
     match i {
         3 => Some(SettingsRow::Theme),
         4 => Some(SettingsRow::Style),
+        5 => Some(SettingsRow::Rotation),
         _ => None,
     }
 }

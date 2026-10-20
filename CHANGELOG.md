@@ -21,7 +21,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and what was not understood; a tap on `Theme ›` or `Style ›` in
   Settings changes the face and writes the key back. The keys the file
   may carry that this firmware does not act on yet are read and said so
-  in the status.
+  in the status. `Rotation ›` in Settings writes the next quarter turn
+  and restarts the player, which comes up turned (the panel is oriented
+  at bring-up). A style change refetches the album art at the new
+  square's size (the card's is 180 px in portrait, the disc's 140).
 - `distributions/face`: a drag on the library scrolls. The finger's
   travel arrives in small steps; it now accumulates until a row's worth
   is in, instead of each step being rounded to no rows.
