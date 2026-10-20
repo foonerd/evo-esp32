@@ -48,6 +48,12 @@ repeat = all
 # A station waits for the network.
 start =
 
+# The Snapcast server to play from, as host or host:port (the port is
+# 1704 when left out), for a multiroom served by snapserver. Empty: the
+# player looks for one on the network. The server takes the sink while
+# it streams and the card plays again when it stops.
+snapserver =
+
 # The DAC board on the header, when the player cannot tell by itself
 # (a board with no I2C part, such as a PCM5102A) or to override what it
 # found; the names are on the wiki's Audio out page. And where the

@@ -50,6 +50,7 @@ pub const KEYS: &[&str] = &[
     "shuffle",
     "repeat",
     "start",
+    "snapserver",
 ];
 
 /// Values from the file, each `None` where the file did not say or said
@@ -85,6 +86,10 @@ pub struct Settings {
     /// playlist), with `#Name` after a playlist to pick a station. Not
     /// set, the whole card.
     pub start: Option<String>,
+    /// The Snapcast server to play from, `host` or `host:port`, the
+    /// port 1704 when not given. Not set, the player looks for one on
+    /// the network.
+    pub snapserver: Option<String>,
 }
 
 /// What happens at the end of the queue.
@@ -278,6 +283,12 @@ fn take(settings: &mut Settings, key: &str, value: &str) -> bool {
             settings.start =
                 text.map(|t| t.trim_start_matches('/').to_string());
         }
+        "snapserver" => {
+            if !value.is_empty() && !is_host_port(value) {
+                return false;
+            }
+            settings.snapserver = text;
+        }
         _ => return false,
     }
     true
@@ -290,6 +301,21 @@ fn is_dns_label(s: &str) -> bool {
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         && !s.starts_with('-')
         && !s.ends_with('-')
+}
+
+/// A host name or address, with or without `:port`: the characters a
+/// name or a dotted address uses, and a port that is a number.
+fn is_host_port(s: &str) -> bool {
+    let (host, port) = match s.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (s, None),
+    };
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+    host_ok && port.is_none_or(|p| p.parse::<u16>().is_ok_and(|n| n > 0))
 }
 
 fn unquote(v: &str) -> &str {
@@ -405,6 +431,9 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
     if let Some(v) = &s.start {
         applied.push(("start", v.clone()));
     }
+    if let Some(v) = &s.snapserver {
+        applied.push(("snapserver", v.clone()));
+    }
     if applied.is_empty() {
         lines.push("read: no settings in the file".to_string());
     } else {
@@ -458,6 +487,20 @@ mod tests {
         );
         assert_eq!(p.settings.volume, Some(7));
         assert_eq!(p.settings.style, None, "empty clears");
+    }
+
+    #[test]
+    fn a_snapserver_is_a_host_or_a_host_and_port() {
+        let p = parse("snapserver = music.local\n");
+        assert_eq!(p.settings.snapserver.as_deref(), Some("music.local"));
+        let p = parse("snapserver = 192.0.2.5:1704\n");
+        assert_eq!(p.settings.snapserver.as_deref(), Some("192.0.2.5:1704"));
+        let p = parse("snapserver = music:room\nsnapserver = a b\n");
+        assert_eq!(p.settings.snapserver, None);
+        assert_eq!(p.invalid.len(), 2);
+        let p = parse("snapserver =\n");
+        assert!(p.is_clean());
+        assert_eq!(p.settings.snapserver, None);
     }
 
     #[test]
