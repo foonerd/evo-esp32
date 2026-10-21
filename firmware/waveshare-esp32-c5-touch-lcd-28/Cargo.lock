@@ -790,6 +790,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-volumio"
+version = "0.1.1"
+dependencies = [
+ "log",
+ "serde_json",
+]
+
+[[package]]
 name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
 version = "0.1.1"
 dependencies = [
@@ -808,6 +816,7 @@ dependencies = [
  "evo-esp32-queue",
  "evo-esp32-sdk",
  "evo-esp32-steward",
+ "evo-esp32-volumio",
  "log",
  "org-evoframework-delivery-null",
  "org-evoframework-multiroom-receiver",

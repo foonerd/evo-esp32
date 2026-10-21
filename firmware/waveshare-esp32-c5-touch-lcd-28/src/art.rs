@@ -38,6 +38,9 @@ const NAMES: [&str; 4] =
     ["cover.jpg", "folder.jpg", "albumart.jpg", "front.jpg"];
 /// The most a picture from the web may be; a logo is tens of kilobytes.
 const WEB_LIMIT: usize = 1024 * 1024;
+/// A picture's file is kept for peers up to this size; a bigger cover
+/// is shown to them as the player's tile instead.
+const KEEP_BYTES: usize = 384 * 1024;
 /// The worker's stack; TJpgDec's work area is heap, this is the file
 /// walk, the decode call and the fit.
 const STACK: usize = 12 * 1024;
@@ -68,6 +71,23 @@ pub struct Found {
     pub source: Source,
     /// The picture at the face's size, or none.
     pub art: Option<Art>,
+    /// The picture's file, kept when no longer than [`KEEP_BYTES`], for
+    /// peers that show the player's cover.
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// A picture decoded for the face, with its file when worth keeping.
+struct Fetched {
+    art: Option<Art>,
+    bytes: Option<Vec<u8>>,
+}
+
+impl Fetched {
+    fn new(art: Option<Art>, bytes: Vec<u8>) -> Self {
+        let bytes =
+            (art.is_some() && bytes.len() <= KEEP_BYTES).then_some(bytes);
+        Self { art, bytes }
+    }
 }
 
 /// One request to the worker.
@@ -221,17 +241,17 @@ fn work(inbox: &Receiver<Ask>, outbox: &Sender<Found>) {
             ask = newer;
         }
         let before = internal_free();
-        let art = match &ask.source {
+        let fetched = match &ask.source {
             Source::Folder(dir) => fetch_folder(dir, ask.size),
             Source::File(path) => fetch_file(path, ask.size, ask.under)
                 .unwrap_or_else(|e| {
                     warn!("art: {}: {e}", path.display());
-                    None
+                    Fetched::new(None, Vec::new())
                 }),
             Source::Url(url) => fetch_url(url, ask.size, ask.under)
                 .unwrap_or_else(|e| {
                     warn!("art: {url}: {e}");
-                    None
+                    Fetched::new(None, Vec::new())
                 }),
         };
         debug!(
@@ -241,7 +261,8 @@ fn work(inbox: &Receiver<Ask>, outbox: &Sender<Found>) {
         if outbox
             .send(Found {
                 source: ask.source,
-                art,
+                art: fetched.art,
+                bytes: fetched.bytes,
             })
             .is_err()
         {
@@ -252,17 +273,12 @@ fn work(inbox: &Receiver<Ask>, outbox: &Sender<Found>) {
 }
 
 /// A logo on the card, set whole on a square of the background.
-fn fetch_file(
-    path: &Path,
-    size: u32,
-    under: u16,
-) -> Result<Option<Art>, String> {
+fn fetch_file(path: &Path, size: u32, under: u16) -> Result<Fetched, String> {
     let started = Instant::now();
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let bytes = read_in_pieces(file).map_err(|e| e.to_string())?;
     let read = started.elapsed();
     let image = decode(&bytes, size, under)?;
-    drop(bytes);
     info!(
         "art: {} {}x{} read in {} ms, decoded in {} ms",
         path.display(),
@@ -271,11 +287,11 @@ fn fetch_file(
         read.as_millis(),
         (started.elapsed() - read).as_millis()
     );
-    Ok(letterbox(&image, size, under))
+    Ok(Fetched::new(letterbox(&image, size, under), bytes))
 }
 
 /// A logo on the web, set whole on a square of the background.
-fn fetch_url(url: &str, size: u32, under: u16) -> Result<Option<Art>, String> {
+fn fetch_url(url: &str, size: u32, under: u16) -> Result<Fetched, String> {
     let started = Instant::now();
     let mut stream = HttpOpener.open(url)?;
     let mut bytes = Vec::new();
@@ -301,7 +317,7 @@ fn fetch_url(url: &str, size: u32, under: u16) -> Result<Option<Art>, String> {
         image.height,
         (started.elapsed() - fetched).as_millis()
     );
-    Ok(letterbox(&image, size, under))
+    Ok(Fetched::new(letterbox(&image, size, under), bytes))
 }
 
 /// A picture by what its first bytes say it is.
@@ -339,7 +355,7 @@ fn internal_free() -> usize {
 }
 
 /// The first picture the folder has, decoded and fitted to `size`.
-fn fetch_folder(dir: &Path, size: u32) -> Option<Art> {
+fn fetch_folder(dir: &Path, size: u32) -> Fetched {
     for name in NAMES {
         let path = dir.join(name);
         let Ok(file) = std::fs::File::open(&path) else {
@@ -350,7 +366,7 @@ fn fetch_folder(dir: &Path, size: u32) -> Option<Art> {
             Ok(bytes) => bytes,
             Err(e) => {
                 warn!("art: {}: {e}", path.display());
-                return None;
+                return Fetched::new(None, Vec::new());
             }
         };
         let read = started.elapsed();
@@ -359,10 +375,9 @@ fn fetch_folder(dir: &Path, size: u32) -> Option<Art> {
             Ok(image) => image,
             Err(e) => {
                 warn!("art: {}: {e}", path.display());
-                return None;
+                return Fetched::new(None, Vec::new());
             }
         };
-        drop(bytes);
         let decoded = started.elapsed() - read;
         let art = art::fit(
             u32::from(image.width),
@@ -380,10 +395,10 @@ fn fetch_folder(dir: &Path, size: u32) -> Option<Art> {
             decoded.as_millis(),
             (started.elapsed() - read - decoded).as_millis()
         );
-        return art;
+        return Fetched::new(art, bytes);
     }
     info!("art: nothing in {}", dir.display());
-    None
+    Fetched::new(None, Vec::new())
 }
 
 /// The whole file, a piece at a time with a breath between, so the

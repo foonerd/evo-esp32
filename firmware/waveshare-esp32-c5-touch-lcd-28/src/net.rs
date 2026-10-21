@@ -300,6 +300,34 @@ fn free_internal() -> usize {
     unsafe { sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL) }
 }
 
+/// The link as the driver sees it now, for the heartbeat: band and
+/// channel, signal, and whether power save is still off (a modem that
+/// sleeps holds packets for the next beacon).
+pub fn link_line() -> String {
+    // SAFETY: zeroed records the driver fills; plain getters.
+    let (channel, rssi, ps) = unsafe {
+        let mut ap: sys::wifi_ap_record_t = std::mem::zeroed();
+        let joined = sys::esp_wifi_sta_get_ap_info(&mut ap) == sys::ESP_OK;
+        let mut ps = sys::wifi_ps_type_t_WIFI_PS_MIN_MODEM;
+        let got = sys::esp_wifi_get_ps(&mut ps);
+        (
+            if joined { ap.primary } else { 0 },
+            if joined { ap.rssi } else { 0 },
+            if got == sys::ESP_OK { Some(ps) } else { None },
+        )
+    };
+    let band = match Band::of_channel(channel) {
+        Band::Five => "5 GHz",
+        _ => "2.4 GHz",
+    };
+    let ps = match ps {
+        Some(sys::wifi_ps_type_t_WIFI_PS_NONE) => "off",
+        Some(_) => "ON",
+        None => "?",
+    };
+    format!("{band} channel {channel}, {rssi} dBm, power save {ps}")
+}
+
 /// The signal from the access point, dBm; 0 when the driver has no
 /// record (not joined).
 fn signal() -> i8 {

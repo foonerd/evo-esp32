@@ -35,6 +35,7 @@ evo-esp32-queue = { path = "../../distributions/queue" }
 evo-esp32-sdk = { path = "../../sdk" }
 evo-esp32-steward = { path = "../../steward" }
 evo-esp32-catalogue = { path = "../../catalogue" }
+evo-esp32-volumio = { path = "../../distributions/volumio" }
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
 # AAC's demuxer, not Symphonia's AAC decoder (it overflows the main
 # task's stack); Espressif's decodes, registered by the platform crate.

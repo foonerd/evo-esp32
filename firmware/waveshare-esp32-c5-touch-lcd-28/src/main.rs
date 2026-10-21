@@ -86,6 +86,10 @@ use evo_esp32_sdk::subject::SubjectId;
 use evo_esp32_sdk::warden::{Assignment, CourseCorrection, CustodyHandle};
 use evo_esp32_sdk::Ticks;
 use evo_esp32_steward::{Config, Steward};
+use evo_esp32_volumio::{
+    self as volumio, Art as VolumioArt, Command as GroupCommand, Identity,
+    Playing, Presence,
+};
 use log::{info, warn};
 use org_evoframework_delivery_null::DeliveryNull;
 use org_evoframework_multiroom_receiver::{
@@ -366,6 +370,22 @@ fn main() -> anyhow::Result<()> {
     let snapserver = config.settings.snapserver.clone();
     let mut search: Option<Search> = None;
     let mut search_at: Option<Instant> = None;
+    // The device among Volumio's: listed in their Multiroom, grouped
+    // from their side; the peers are the ones that connect.
+    let identity = Identity {
+        name: hostname.clone(),
+        uuid: device_id.clone(),
+    };
+    let presence = Presence::new(identity.clone());
+    match presence.start(volumio::PORT) {
+        Ok(()) => info!(
+            "volumio: {} on port {} as {}",
+            identity.name,
+            volumio::PORT,
+            identity.uuid
+        ),
+        Err(e) => warn!("volumio: not started: {e}"),
+    }
     memory("after the steward");
     info!(
         "steward up with {} plugins: {}",
@@ -905,7 +925,8 @@ fn main() -> anyhow::Result<()> {
                 };
                 config.set_network(line);
                 config.write_status(&status_head);
-                if let net::Event::Up { .. } = &event {
+                if let net::Event::Up { address, .. } = &event {
+                    presence.set_address(address.parse().ok());
                     // Power save as the driver has it now (R37): the net
                     // thread turned it off at start, read back here.
                     // SAFETY: a plain getter on the started driver.
@@ -919,7 +940,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     if mdns.is_none() {
-                        mdns = advertise(&hostname, &device_id);
+                        mdns = advertise(&hostname, &device_id, &identity);
                     }
                     // The server the card names is dialled once the
                     // link is up; with none named, the network is asked.
@@ -999,6 +1020,34 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            // The Volumio devices are not searched for: one that finds
+            // this device connects and introduces itself, and the
+            // presence keeps a session back to it (the crate says why a
+            // search of our own would get us dropped from their lists).
+            // A Volumio leader's word outranks the card's server and the
+            // search: grouped, the device plays the leader's stream.
+            while let Some(command) = presence.take_command() {
+                match command {
+                    GroupCommand::Join { host, id, name } => {
+                        info!(
+                            "volumio: grouped by {name:?} ({id}); its Snapcast server is at {host}"
+                        );
+                        search = None;
+                        search_at = None;
+                        rooms.snap.set_server(Some(host));
+                    }
+                    GroupCommand::Leave => {
+                        info!("volumio: ungrouped; back to the card's server or the search");
+                        match &snapserver {
+                            Some(s) => rooms.snap.set_server(Some(s.clone())),
+                            None => {
+                                rooms.snap.set_server(None);
+                                search_at = Some(Instant::now());
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Audio first: a paint stage can take 90 ms, and while the decoder
         // is short of lead the loop decodes instead of painting.
@@ -1045,6 +1094,7 @@ fn main() -> anyhow::Result<()> {
             let source = rooms.source().map_or("Card", Source::label);
             let mut state = View::new(&pb, output.as_ref(), source);
             state.caution = net.as_ref().map_or("", |n| n.state.caution());
+            presence.set_playing(playing(&pb));
             state.shuffle = queue.shuffle();
             state.repeat = queue.repeat();
             if current.is_none() {
@@ -1053,10 +1103,12 @@ fn main() -> anyhow::Result<()> {
             if let Some(track) = pb.track.as_ref() {
                 if art.track(track) {
                     face.set_art(None);
+                    presence.set_art(None);
                 }
             }
             if let Some(found) = art.poll() {
                 face.set_art(found.art);
+                presence.set_art(found.bytes.and_then(VolumioArt::sniff));
             }
             let painted = face.refresh(&mut board.panel, &state);
             let took = last_face.elapsed();
@@ -1235,6 +1287,7 @@ fn main() -> anyhow::Result<()> {
                     snap.bad_frames
                 );
             } else if snapserver.is_none()
+                && !presence.grouped()
                 && rooms.snap.server().is_some()
                 && search.is_none()
                 && search_at.is_none()
@@ -1242,6 +1295,17 @@ fn main() -> anyhow::Result<()> {
                 // A server found on the network has gone: it may be back
                 // at another address.
                 search_at = Some(Instant::now() + SEARCH_AGAIN);
+            }
+            let (served, hearing) = presence.connections();
+            if served + hearing > 0 || presence.grouped() {
+                info!(
+                    "volumio: {served} connected to this device, hearing {hearing} of {} known{}",
+                    presence.peers().len(),
+                    if presence.grouped() { ", grouped" } else { "" }
+                );
+            }
+            if net.is_some() {
+                info!("wifi: {}", net::link_line());
             }
         }
         // The idle task must run or its watchdog bites (5 s): a short
@@ -1459,6 +1523,25 @@ fn playback_state(steward: &Steward) -> Option<playback::State> {
         .find(|s| s.status != playback::Status::Stopped)
         .or(states.first())
         .cloned()
+}
+
+/// What plays, as Volumio devices are told it: opening counts as
+/// playing, since Volumio has no word for it.
+fn playing(pb: &playback::State) -> Playing {
+    let status = match pb.status {
+        playback::Status::Playing | playback::Status::Opening => {
+            volumio::Status::Play
+        }
+        playback::Status::Paused => volumio::Status::Pause,
+        _ => volumio::Status::Stop,
+    };
+    let track = pb.track.as_ref();
+    Playing {
+        status,
+        title: track.map(|t| t.title.clone()).unwrap_or_default(),
+        artist: track.and_then(|t| t.artist.clone()).unwrap_or_default(),
+        album: track.and_then(|t| t.album.clone()).unwrap_or_default(),
+    }
 }
 
 /// The output's state, if the delivery plugin has published one.
@@ -1831,9 +1914,14 @@ fn identity() -> String {
     )
 }
 
-/// Advertise the device on the local network: `hostname.local`, and
-/// the Evo audio plane's service with the id a source-host looks for.
-fn advertise(hostname: &str, device_id: &str) -> Option<Advertiser> {
+/// Advertise the device on the local network: `hostname.local`, the
+/// Evo audio plane's service with the id a source-host looks for, and
+/// the service Volumio devices look for each other by.
+fn advertise(
+    hostname: &str,
+    device_id: &str,
+    identity: &Identity,
+) -> Option<Advertiser> {
     let started = Advertiser::start(hostname, hostname).and_then(|mut m| {
         m.add_service(
             "_evo",
@@ -1847,13 +1935,19 @@ fn advertise(hostname: &str, device_id: &str) -> Option<Advertiser> {
                 ("caps", "multi-room"),
             ],
         )?;
+        let txt = volumio::txt(identity);
+        let txt: Vec<(&str, &str)> =
+            txt.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        m.add_service(volumio::SERVICE, "_tcp", volumio::PORT, &txt)?;
         Ok(m)
     });
     match started {
         Ok(m) => {
             info!(
-                "mdns: {hostname}.local, _evo._tcp on port {} as {device_id}",
-                org_evoframework_multiroom_receiver::CONTROL_PORT
+                "mdns: {hostname}.local, _evo._tcp on port {} as {device_id}, {}._tcp on port {}",
+                org_evoframework_multiroom_receiver::CONTROL_PORT,
+                volumio::SERVICE,
+                volumio::PORT
             );
             Some(m)
         }
