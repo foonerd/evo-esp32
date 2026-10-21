@@ -79,6 +79,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::{MetadataOptions, StandardTag};
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
+pub mod ahead;
 pub mod stream;
 use evo_esp32_sdk::contract::audio::playback::StreamOpener;
 use stream::Live;
@@ -723,7 +724,16 @@ fn open(
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
         }
-        Box::new(file)
+        // The card is read ahead on a thread of its own, so the decoder
+        // never waits on it while there is something in the ring.
+        let len = file
+            .metadata()
+            .map_err(|e| CustodyError(format!("{}: {e}", path.display())))?
+            .len();
+        Box::new(
+            ahead::ReadAhead::new(file, len)
+                .map_err(|e| CustodyError(format!("reader: {e}")))?,
+        )
     };
     let mss =
         MediaSourceStream::new(source, MediaSourceStreamOptions::default());
