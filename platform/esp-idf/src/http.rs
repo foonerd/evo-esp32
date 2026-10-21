@@ -7,8 +7,9 @@
 //! The request asks for the station's metadata (`Icy-MetaData: 1`) and
 //! follows redirects; the response's headers are kept for the decoder
 //! to read the content type, the station's name, its bitrate and the
-//! metadata interval. A read that gets nothing for the timeout is the
-//! transport giving up, which the stream says.
+//! metadata interval. A file on a server is opened at an offset with a
+//! `Range` header, for the decoder's seeks. A read that gets nothing
+//! for the timeout is the transport giving up, which the stream says.
 
 use std::time::Duration;
 
@@ -45,31 +46,51 @@ unsafe impl Send for HttpStream {}
 
 impl StreamOpener for HttpOpener {
     fn open(&self, uri: &str) -> Result<Box<dyn ByteStream>, String> {
-        let mut connection = EspHttpConnection::new(&Configuration {
-            buffer_size: Some(BUFFER),
-            buffer_size_tx: Some(BUFFER_TX),
-            timeout: Some(TIMEOUT),
-            follow_redirects_policy: FollowRedirectsPolicy::FollowAll,
-            crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
-            ..Default::default()
-        })
-        .map_err(|e| format!("http client: {e}"))?;
-        connection
-            .initiate_request(
-                Method::Get,
-                uri,
-                &[("Icy-MetaData", "1"), ("User-Agent", USER_AGENT)],
-            )
-            .map_err(|e| format!("{uri}: {e}"))?;
-        connection
-            .initiate_response()
-            .map_err(|e| format!("{uri}: {e}"))?;
-        let status = connection.status();
-        if !(200..300).contains(&status) {
-            return Err(format!("{uri}: HTTP {status}"));
-        }
-        Ok(Box::new(HttpStream { connection }))
+        request(uri, 0)
     }
+
+    fn open_at(
+        &self,
+        uri: &str,
+        offset: u64,
+    ) -> Result<Box<dyn ByteStream>, String> {
+        request(uri, offset)
+    }
+}
+
+/// GET `uri`, from `offset` when it is not zero (`Range`), which the
+/// server must honour with a 206: a 200 to a range is the whole file
+/// from the start, not the place asked for.
+fn request(uri: &str, offset: u64) -> Result<Box<dyn ByteStream>, String> {
+    let mut connection = EspHttpConnection::new(&Configuration {
+        buffer_size: Some(BUFFER),
+        buffer_size_tx: Some(BUFFER_TX),
+        timeout: Some(TIMEOUT),
+        follow_redirects_policy: FollowRedirectsPolicy::FollowAll,
+        crt_bundle_attach: Some(sys::esp_crt_bundle_attach),
+        ..Default::default()
+    })
+    .map_err(|e| format!("http client: {e}"))?;
+    let range = format!("bytes={offset}-");
+    let mut headers: Vec<(&str, &str)> =
+        vec![("Icy-MetaData", "1"), ("User-Agent", USER_AGENT)];
+    if offset > 0 {
+        headers.push(("Range", &range));
+    }
+    connection
+        .initiate_request(Method::Get, uri, &headers)
+        .map_err(|e| format!("{uri}: {e}"))?;
+    connection
+        .initiate_response()
+        .map_err(|e| format!("{uri}: {e}"))?;
+    let status = connection.status();
+    if offset > 0 && status != 206 {
+        return Err(format!("{uri}: HTTP {status} to a range from {offset}"));
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("{uri}: HTTP {status}"));
+    }
+    Ok(Box::new(HttpStream { connection }))
 }
 
 impl ByteStream for HttpStream {

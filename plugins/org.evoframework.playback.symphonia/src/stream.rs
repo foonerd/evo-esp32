@@ -73,7 +73,8 @@ pub struct StreamInfo {
 }
 
 impl StreamInfo {
-    fn from(stream: &dyn ByteStream) -> Self {
+    /// What the response's headers say.
+    pub fn from(stream: &dyn ByteStream) -> Self {
         Self {
             content_type: stream
                 .header("content-type")

@@ -12,20 +12,29 @@
 //! only when the ring is empty. A seek within what the ring holds is
 //! taken from the ring; a seek beyond it empties the ring and moves the
 //! reader. The ring is one allocation, large, so a distribution that
-//! places by size keeps it out of its scarce memory.
+//! places by size keeps it out of its scarce memory. The source is any
+//! seekable reader: the card's file, or a file on a server reached by
+//! ranged requests ([`netfile`](crate::netfile)), whose waits are the
+//! network's.
 
 use std::collections::VecDeque;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use symphonia::core::io::MediaSource;
 
-/// What the ring holds at most: 256 KB, about a second of a 96 kHz
-/// FLAC, twenty of an MP3. The ring is one allocation, large, so a
-/// device that places by size puts it in its bulk memory.
-const CAPACITY: usize = 256 * 1024;
+/// What the ring holds at most: 384 KB, of which [`BEHIND`] may be
+/// behind the decoder — so at least 256 KB ahead, about a second of a
+/// 96 kHz FLAC, twenty of an MP3. The ring is one allocation, large, so
+/// a device that places by size puts it in its bulk memory.
+const CAPACITY: usize = 384 * 1024;
+/// How much of what the decoder has already taken the ring keeps, so a
+/// seek back that far (the probe returning to the start after reading
+/// through its 64 KB stream buffer, a FLAC seek refining its landing)
+/// is served from memory and does not move the source — which for a
+/// file on a server is a connection.
+const BEHIND: usize = 128 * 1024;
 /// What the reader asks the file for at a time: sixteen of the card's
 /// blocks in one command. Small enough that a device which places its
 /// allocations by size keeps the buffer in memory the card's DMA can
@@ -35,14 +44,19 @@ const CHUNK: usize = 8 * 1024;
 /// The card's block: reads are asked for in whole blocks from a whole
 /// block, which the file system passes straight to the card.
 const BLOCK: usize = 512;
-/// The reader's stack: the file system and the card's driver.
+/// The reader's stack: the file system and the card's driver, or a
+/// network transport's read.
 const STACK: usize = 12 * 1024;
 
 struct State {
-    /// Bytes read from the file and not yet taken, in file order.
+    /// Bytes read from the file, in file order: those behind `head`
+    /// the decoder has taken and may come back for, those from `head`
+    /// it has not.
     ring: VecDeque<u8>,
     /// The file offset of the ring's first byte.
     base: u64,
+    /// Where in the ring the decoder's next byte is.
+    head: usize,
     /// The reader reached the end of the file (at `base + ring.len()`).
     eof: bool,
     /// The reader could not read; the decoder gets this.
@@ -53,6 +67,33 @@ struct State {
     generation: u32,
     /// The decoder is gone; the reader stops.
     stop: bool,
+}
+
+impl State {
+    /// Bytes the decoder has not taken yet.
+    fn available(&self) -> usize {
+        self.ring.len() - self.head
+    }
+
+    /// Let go of what lies further behind the decoder than the window
+    /// keeps, making room for the reader.
+    fn trim(&mut self) {
+        if self.head > BEHIND {
+            let drop = self.head - BEHIND;
+            self.ring.drain(..drop);
+            self.base += drop as u64;
+            self.head = BEHIND;
+        }
+    }
+
+    /// Start the ring afresh at `at`.
+    fn restart(&mut self, at: u64) {
+        self.ring.clear();
+        self.base = at;
+        self.head = 0;
+        self.eof = false;
+        self.error = None;
+    }
 }
 
 struct Shared {
@@ -72,13 +113,45 @@ pub struct ReadAhead {
     pos: u64,
 }
 
+/// A look at the ring from outside the decoder: whether a read would
+/// find enough not to wait. For a source whose waits are the network's,
+/// the tick asks before it decodes.
+#[derive(Clone)]
+pub struct Watch {
+    shared: Arc<Shared>,
+    low: usize,
+}
+
+impl Watch {
+    /// The ring holds at least the low-water mark, or the source is at
+    /// its end or in error (both of which a read returns at once).
+    pub fn ready(&self) -> bool {
+        let s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.available() >= self.low || s.eof || s.error.is_some()
+    }
+}
+
 impl ReadAhead {
-    /// Start reading `file` from its start; `len` is the file's length.
-    pub fn new(mut file: File, len: u64) -> std::io::Result<Self> {
+    /// A watch on the ring with `low` as its low-water mark.
+    pub fn watch(&self, low: usize) -> Watch {
+        Watch {
+            shared: Arc::clone(&self.shared),
+            low: low.min(CAPACITY - BEHIND),
+        }
+    }
+}
+
+impl ReadAhead {
+    /// Start reading `source` from its start; `len` is its length.
+    pub fn new<S>(mut source: S, len: u64) -> std::io::Result<Self>
+    where
+        S: Read + Seek + Send + 'static,
+    {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 ring: VecDeque::with_capacity(CAPACITY),
                 base: 0,
+                head: 0,
                 eof: false,
                 error: None,
                 seek_to: None,
@@ -92,7 +165,7 @@ impl ReadAhead {
         thread::Builder::new()
             .name("read".into())
             .stack_size(STACK)
-            .spawn(move || read_ahead(&mut file, &reader))?;
+            .spawn(move || read_ahead(&mut source, &reader))?;
         Ok(Self {
             shared,
             len,
@@ -101,9 +174,9 @@ impl ReadAhead {
     }
 }
 
-/// The reader: fill the ring from the file while there is room, wait
+/// The reader: fill the ring from the source while there is room, wait
 /// when there is none, move when asked, stop when told.
-fn read_ahead(file: &mut File, shared: &Shared) {
+fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared) {
     // The buffer is taken at a four-byte boundary within a slightly
     // larger allocation: the card's driver wants that alignment for a
     // direct transfer, and a byte vector promises none.
@@ -118,15 +191,13 @@ fn read_ahead(file: &mut File, shared: &Shared) {
                     return;
                 }
                 if let Some(to) = s.seek_to.take() {
-                    s.ring.clear();
-                    s.base = to;
-                    s.eof = false;
-                    s.error = None;
+                    s.restart(to);
                     if let Err(e) = file.seek(SeekFrom::Start(to)) {
                         s.error = Some(format!("seek: {e}"));
                         shared.filled.notify_all();
                     }
                 }
+                s.trim();
                 let room = CAPACITY.saturating_sub(s.ring.len());
                 if s.eof || s.error.is_some() || room < BLOCK {
                     s = shared
@@ -163,15 +234,22 @@ impl Read for ReadAhead {
         }
         let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if !s.ring.is_empty() {
-                let n = buf.len().min(s.ring.len());
+            if s.available() > 0 {
+                let n = buf.len().min(s.available());
+                let head = s.head;
                 let (front, back) = s.ring.as_slices();
-                let from_front = n.min(front.len());
-                buf[..from_front].copy_from_slice(&front[..from_front]);
-                buf[from_front..n].copy_from_slice(&back[..n - from_front]);
-                s.ring.drain(..n);
-                s.base += n as u64;
+                if head < front.len() {
+                    let from_front = n.min(front.len() - head);
+                    buf[..from_front]
+                        .copy_from_slice(&front[head..head + from_front]);
+                    buf[from_front..n].copy_from_slice(&back[..n - from_front]);
+                } else {
+                    let at = head - front.len();
+                    buf[..n].copy_from_slice(&back[at..at + n]);
+                }
+                s.head += n;
                 self.pos += n as u64;
+                s.trim();
                 self.shared.wanted.notify_all();
                 return Ok(n);
             }
@@ -200,18 +278,14 @@ impl Seek for ReadAhead {
         let mut s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         let held = s.base..s.base + s.ring.len() as u64;
         if held.contains(&target) || (target == held.end && s.eof) {
-            // Within the ring: drop what lies before the target.
-            let skip = (target - s.base) as usize;
-            s.ring.drain(..skip);
-            s.base = target;
+            // Within the ring, behind or ahead of the decoder: move the
+            // head.
+            s.head = (target - s.base) as usize;
         } else {
             // The reader may be mid-read for the old place: the
             // generation moves now, so what it brings back is dropped.
             s.seek_to = Some(target);
-            s.ring.clear();
-            s.base = target;
-            s.eof = false;
-            s.error = None;
+            s.restart(target);
             s.generation = s.generation.wrapping_add(1);
         }
         self.pos = target;
@@ -242,6 +316,7 @@ impl Drop for ReadAhead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
 
     fn file_of(bytes: &[u8]) -> (File, u64, std::path::PathBuf) {
@@ -300,5 +375,56 @@ mod tests {
         assert_eq!(ahead.read(&mut at).unwrap(), 0);
         drop(ahead);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A source that counts how often it is moved.
+    struct Counted {
+        inner: std::io::Cursor<Vec<u8>>,
+        seeks: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for Counted {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.seeks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.seek(pos)
+        }
+    }
+
+    #[test]
+    fn a_seek_back_within_the_window_does_not_move_the_source() {
+        let bytes = pattern(CAPACITY + 50_000);
+        let seeks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source = Counted {
+            inner: std::io::Cursor::new(bytes.clone()),
+            seeks: Arc::clone(&seeks),
+        };
+        let mut ahead = ReadAhead::new(source, bytes.len() as u64).unwrap();
+        let watch = ahead.watch(16 * 1024);
+        // Read past the window's size, then come back to the start: the
+        // probe's habit. The source is not moved.
+        let mut taken = vec![0u8; BEHIND / 2];
+        ahead.read_exact(&mut taken).unwrap();
+        assert_eq!(ahead.seek(SeekFrom::Start(0)).unwrap(), 0);
+        let mut head = [0u8; 64];
+        ahead.read_exact(&mut head).unwrap();
+        assert_eq!(&head[..], &bytes[..64]);
+        assert_eq!(seeks.load(std::sync::atomic::Ordering::Relaxed), 0);
+        // Far beyond what is held: the source moves once.
+        let far = bytes.len() as u64 - 1000;
+        ahead.seek(SeekFrom::Start(far)).unwrap();
+        ahead.read_exact(&mut head).unwrap();
+        assert_eq!(&head[..], &bytes[far as usize..far as usize + 64]);
+        assert_eq!(seeks.load(std::sync::atomic::Ordering::Relaxed), 1);
+        // At the end the watch says ready whatever the ring holds.
+        let mut rest = Vec::new();
+        ahead.read_to_end(&mut rest).unwrap();
+        assert!(watch.ready());
     }
 }

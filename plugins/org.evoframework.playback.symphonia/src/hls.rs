@@ -467,6 +467,21 @@ impl StreamOpener for Aware {
         segments.segment = first;
         Ok(Box::new(segments))
     }
+
+    fn open_at(
+        &self,
+        uri: &str,
+        offset: u64,
+    ) -> Result<Box<dyn ByteStream>, String> {
+        // A station has no place to seek to; a file is the transport's.
+        if offset == 0 {
+            return self.open(uri);
+        }
+        if is_playlist(uri, None) {
+            return Err(format!("{uri}: a live playlist has no offset"));
+        }
+        self.0.open_at(uri, offset)
+    }
 }
 
 #[cfg(test)]

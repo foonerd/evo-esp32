@@ -81,6 +81,7 @@ use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 pub mod ahead;
 pub mod hls;
+pub mod netfile;
 pub mod stream;
 pub mod ts;
 use evo_esp32_sdk::contract::audio::playback::StreamOpener;
@@ -112,6 +113,10 @@ const OPEN_STACK: usize = 256 * 1024;
 /// loop that also reads the touch and paints, and a tick is at least
 /// one packet (a FLAC block is up to 93 ms of audio at 44.1 kHz).
 const TICK_BUDGET_MS: u64 = 50;
+/// What a file on a server must have in its read-ahead ring before the
+/// tick decodes from it: a 96 kHz FLAC frame is up to 24 KB, and a read
+/// that finds less would block the loop on the network.
+const NETWORK_LOW_WATER: usize = 64 * 1024;
 
 static STOCKS: [Stocking; 1] = [Stocking {
     rack: shelf::PLAYBACK,
@@ -129,6 +134,9 @@ struct Stream {
     seek_mode: SeekMode,
     /// A stream from the network: its buffer's state and its titles.
     live: Option<Live>,
+    /// A file on a server: a look at its read-ahead ring, so the tick
+    /// waits for the network rather than blocking on it.
+    ahead: Option<ahead::Watch>,
 }
 
 /// A network stream being reached on its thread: what the thread will
@@ -536,7 +544,9 @@ impl Warden for PlaybackSymphonia {
             }
             // A stream from the network is decoded only from what has
             // arrived; short of that, the tick waits for the fetcher.
-            if stream.live.as_mut().is_some_and(|l| !l.ready()) {
+            if stream.live.as_mut().is_some_and(|l| !l.ready())
+                || stream.ahead.as_ref().is_some_and(|a| !a.ready())
+            {
                 break Progress::Idle(BUFFERING_IDLE_MS);
             }
             match next_frames(stream, pending) {
@@ -689,6 +699,8 @@ fn decodable(content_type: &str) -> bool {
 /// Open a URI: a `file://` on the host, or an `http://`/`https://`
 /// stream through the opener; probe it, pick its default audio track,
 /// make a decoder, and report the format the stream will come out in.
+/// A network response with a length and ranges is a file on a server,
+/// read and sought like the card's; one without is a station.
 fn open(
     uri: &str,
     codecs: &CodecRegistry,
@@ -696,6 +708,7 @@ fn open(
 ) -> Result<(Stream, Format), CustodyError> {
     let mut hint = Hint::new();
     let mut live = None;
+    let mut ahead_watch = None;
     let source: Box<dyn symphonia::core::io::MediaSource> = if is_network(uri) {
         let opener = opener.ok_or_else(|| {
             CustodyError("no transport for a network stream".into())
@@ -710,21 +723,34 @@ fn open(
                 )));
             }
         }
-        let reopen = stream::Reopen {
-            opener: Arc::clone(opener),
-            uri: uri.to_string(),
-        };
-        let (buffered, handle) = stream::start(bytes, Some(reopen))
-            .map_err(|e| CustodyError(format!("buffer: {e}")))?;
-        if let Some(ext) = handle.info.extension_hint() {
+        let info = stream::StreamInfo::from(bytes.as_ref());
+        if let Some(ext) = info.extension_hint() {
             hint.with_extension(ext);
-        } else if let Some(ext) =
-            uri.rsplit('.').next().filter(|e| e.len() <= 4)
+        } else if let Some(ext) = uri
+            .split(['?', '#'])
+            .next()
+            .and_then(|p| p.rsplit('.').next())
+            .filter(|e| e.len() <= 4 && !e.contains('/'))
         {
             hint.with_extension(ext);
         }
-        live = Some(handle);
-        Box::new(buffered)
+        if let Some(len) = netfile::seekable_length(bytes.as_ref()) {
+            let file =
+                netfile::NetFile::new(Arc::clone(opener), uri, bytes, len);
+            let reader = ahead::ReadAhead::new(file, len)
+                .map_err(|e| CustodyError(format!("reader: {e}")))?;
+            ahead_watch = Some(reader.watch(NETWORK_LOW_WATER));
+            Box::new(reader)
+        } else {
+            let reopen = stream::Reopen {
+                opener: Arc::clone(opener),
+                uri: uri.to_string(),
+            };
+            let (buffered, handle) = stream::start(bytes, Some(reopen))
+                .map_err(|e| CustodyError(format!("buffer: {e}")))?;
+            live = Some(handle);
+            Box::new(buffered)
+        }
     } else {
         let path = file_path(uri)?;
         let file = File::open(&path)
@@ -795,6 +821,7 @@ fn open(
         decoder,
         seek_mode,
         live,
+        ahead: ahead_watch,
     };
     Ok((stream, format))
 }
@@ -958,6 +985,7 @@ pub fn file_track(path: &Path) -> Track {
         duration_ms: None,
         sample_rate: None,
         art: None,
+        live: false,
     }
 }
 
