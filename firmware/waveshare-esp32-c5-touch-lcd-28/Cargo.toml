@@ -39,6 +39,7 @@ evo-esp32-volumio = { path = "../../distributions/volumio" }
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
 org-evoframework-source-dlna = { path = "../../plugins/org.evoframework.source.dlna" }
 org-evoframework-source-smb = { path = "../../plugins/org.evoframework.source.smb" }
+org-evoframework-source-nfs = { path = "../../plugins/org.evoframework.source.nfs" }
 # AAC's demuxer, not Symphonia's AAC decoder (it overflows the main
 # task's stack); Espressif's decodes, registered by the platform crate.
 org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia", default-features = false, features = ["flac", "mp3", "pcm", "vorbis", "aac"] }

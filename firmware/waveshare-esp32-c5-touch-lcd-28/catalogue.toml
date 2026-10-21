@@ -24,6 +24,11 @@ name = "smb"
 shape = 1
 description = "The SMB shares named on the card, each a tree of folders and audio files read by position."
 
+[[racks.shelves]]
+name = "nfs"
+shape = 1
+description = "The NFS exports named on the card, each a tree of folders and audio files read by offset."
+
 [[racks]]
 name = "playback"
 family = "domain"

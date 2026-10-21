@@ -49,6 +49,7 @@ mod sink;
 #[global_allocator]
 static ALLOC: alloc::Placed = alloc::Placed;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use companion_platform_esp_idf::Card;
@@ -101,6 +102,7 @@ use org_evoframework_snapcast_receiver::{
 };
 use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::SourceFiles;
+use org_evoframework_source_nfs::{NfsOpener, Share as NfsShare, SourceNfs};
 use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
 use sink::{I2sSink, RateFollower};
 
@@ -362,14 +364,14 @@ fn main() -> anyhow::Result<()> {
         hostname.clone(),
         env!("CARGO_PKG_VERSION"),
     );
-    let shares = shares(&config.settings);
+    let (shares, exports) = shares(&config.settings);
     let mut steward = bring_up(
         sink::Shared::new(sink),
         &link,
         room_settings,
         &snap_link,
         snap_settings,
-        shares,
+        (shares, exports),
         now(),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -1388,6 +1390,7 @@ fn descriptions() -> Vec<PluginDescription> {
         SourceFiles::new(MUSIC).describe(),
         SourceDlna::new().describe(),
         SourceSmb::new(Vec::new()).describe(),
+        SourceNfs::new(Vec::new()).describe(),
         PlaybackSymphonia::new(Box::new(Silent)).describe(),
         MultiroomReceiver::new(
             Box::new(Silent),
@@ -1418,23 +1421,23 @@ impl evo_esp32_sdk::contract::audio::playback::FrameSink for Silent {
     fn stop(&mut self) {}
 }
 
-/// The shares the card names that this build reaches: `smb://` and
-/// `smb1://` ones; an `nfs://` share is logged and left for the build
-/// that speaks it.
-fn shares(settings: &evo_esp32_config::Settings) -> Vec<Share> {
+/// The shares the card names: the SMB ones (`smb://`, `smb1://`) and
+/// the NFS exports (`nfs://`).
+fn shares(
+    settings: &evo_esp32_config::Settings,
+) -> (Vec<Share>, Vec<NfsShare>) {
     let mut out = Vec::new();
+    let mut exports = Vec::new();
     for s in &settings.shares {
         let Some(url) = &s.url else { continue };
-        if !url.starts_with("smb://") && !url.starts_with("smb1://") {
-            warn!(
-                "share{}: {} is not reached by this build yet",
-                if s.index == 1 {
-                    String::new()
-                } else {
-                    s.index.to_string()
-                },
-                url.split("://").next().unwrap_or(url)
-            );
+        if url.starts_with("nfs://") {
+            match NfsShare::parse(url) {
+                Ok(share) => {
+                    info!("share: {} ({})", share.name, url);
+                    exports.push(share);
+                }
+                Err(e) => warn!("share: {e}"),
+            }
             continue;
         }
         match Share::parse(
@@ -1450,7 +1453,7 @@ fn shares(settings: &evo_esp32_config::Settings) -> Vec<Share> {
             Err(e) => warn!("share: {e}"),
         }
     }
-    out
+    (out, exports)
 }
 
 /// Build the fabric: steward, plugins, checked against the catalogue.
@@ -1462,7 +1465,7 @@ fn bring_up(
     room: RoomSettings,
     snap_link: &SnapLink,
     snap: SnapSettings,
-    shares: Vec<Share>,
+    (shares, exports): (Vec<Share>, Vec<NfsShare>),
     now: Ticks,
 ) -> Result<Steward, String> {
     let catalogue = catalogue();
@@ -1481,6 +1484,19 @@ fn bring_up(
     steward
         .admit_respondent(Box::new(SourceSmb::new(shares.clone())), now)
         .map_err(|e| e.to_string())?;
+    // Exports marked `secure` take mounts from reserved ports only;
+    // the chip may bind one.
+    let dialer: Arc<dyn org_evoframework_source_nfs::Dialer> =
+        Arc::new(evo_esp32_platform_esp_idf::dial::ReservedPort);
+    steward
+        .admit_respondent(
+            Box::new(
+                SourceNfs::new(exports.clone())
+                    .with_dialer(Arc::clone(&dialer)),
+            ),
+            now,
+        )
+        .map_err(|e| e.to_string())?;
     steward
         .admit_warden(
             Box::new(
@@ -1490,7 +1506,10 @@ fn bring_up(
                 )
                 .with_opener(Box::new(HttpOpener))
                 .with_file_opener(Box::new(SmbOpener::new(shares.clone())))
-                .with_file_opener(Box::new(SmbOpener::smb1(shares))),
+                .with_file_opener(Box::new(SmbOpener::smb1(shares)))
+                .with_file_opener(Box::new(
+                    NfsOpener::new(exports).with_dialer(dialer),
+                )),
             ),
             now,
         )
@@ -2332,9 +2351,11 @@ impl Browse {
                 let mut listed = vec![(p.source.clone(), listing)];
                 if is_network(p) {
                     self.servers = listed[0].1.entries.len();
-                    match list_folder(steward, &shelf::source_smb(), "", now) {
-                        Ok(l) => listed.push((shelf::source_smb(), l)),
-                        Err(e) => warn!("library: {e}"),
+                    for source in [shelf::source_smb(), shelf::source_nfs()] {
+                        match list_folder(steward, &source, "", now) {
+                            Ok(l) => listed.push((source, l)),
+                            Err(e) => warn!("library: {e}"),
+                        }
                     }
                 }
                 for (source, listing) in listed {
