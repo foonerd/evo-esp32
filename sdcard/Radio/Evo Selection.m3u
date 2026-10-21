@@ -39,9 +39,9 @@ http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/si
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_two.m3u8
 #EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s24941/images/logod.png",BBC Radio 3
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_three.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_four/blocks-colour_600x600.png",BBC Radio 4
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s25419/images/logod.png",BBC Radio 4
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_fourfm.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_four_extra/blocks-colour_600x600.png",BBC Radio 4 Extra
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s6839/images/logod.png",BBC Radio 4 Extra
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_four_extra.m3u8
 #EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s24943/images/logod.png",BBC Radio 5 Live
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_five_live.m3u8
