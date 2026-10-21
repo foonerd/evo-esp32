@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- SMB1 for the old box in the kitchen, by name only. A share written
+  `smb1://host/share` is spoken in NT LM 0.12 (Unicode, 32-bit
+  status, NTLMv2 under SPNEGO where the server has extended security
+  and in the session setup's own fields where it has not, the MAC
+  signature when the server requires it; TRANS2 FIND for the folders,
+  gathered across however many replies a small server splits them
+  into; READ_ANDX by offset, large reads where the server allows
+  them). An `smb://` share never falls back to it: a server that
+  closes on the SMB2 negotiate is reported as "an SMB1-only box? name
+  it smb1://", and an `smb1://` share on a server without the old
+  dialect is told so. Measured on the desk against a Samba speaking
+  only NT1: guest and credentialed shares list and play, a FLAC
+  opened from 30 s lands to the second.
+
 - SMB shares in the library. A new source plugin,
   `plugins/org.evoframework.source.smb`, lists the shares the card
   names and reads their files, with a client for SMB 2.0.2 and 2.1
@@ -15,7 +29,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interim notices a slow server sends; nothing linked, the same code
   on the device and the host. SMB1 is never spoken on an `smb://`
   share, so an old box cannot be reached by a downgrade — `smb1://` is
-  for a later build, as is `nfs://`. The SDK gains the shape a share's
+  its own name (above), as `nfs://` will be. The SDK gains the shape a share's
   file reads as (`ByteFile`: a length and reads by position) and the
   opener a distribution hands the decoder per scheme (`FileOpener`);
   the Symphonia plugin reads such a file through its read-ahead ring,
