@@ -51,6 +51,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   free internal block, the medium band's split between SRAM and PSRAM,
   how many allocations the floor has diverted, and the codecs' split;
   each codec allocation is logged with its size and where it went.
+- The core's headroom while a station plays. The face's cadence at
+  rest is 100 ms rather than 40 ms (40 ms while a frame is being
+  painted or for a second after a touch): each look reads the fabric's
+  state, and at 40 ms that was 7–10 % of the core, now 4 %. A logo in
+  PNG is decoded with a millisecond's pause every sixteen rows, so the
+  idle task gets its turn beside a decoder near the edge of the core:
+  a 600-pixel logo opening over an HE-AAC station had kept it off the
+  core for seconds (the task watchdog said so, every five seconds for
+  the first fifteen of a BBC station).
 
 ## [0.1.2] - 2026-10-21
 

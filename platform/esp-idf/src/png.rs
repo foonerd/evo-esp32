@@ -19,6 +19,11 @@ const MAX_SIDE: u32 = 2048;
 const INTERLACED_MAX_SIDE: u32 = 512;
 /// What the decoder may hold at once, beyond the picture itself.
 const LIMIT: usize = 4 * 1024 * 1024;
+/// Rows decoded between two breaths. The decoder runs on a thread above
+/// the idle task; a large logo beside a decoder near the edge of the
+/// core kept the idle task off it for seconds (the task watchdog said
+/// so), and a millisecond every so many rows gives it its turn.
+const BREATH_ROWS: u32 = 16;
 
 /// Decode `png`, compositing any transparency onto `under`, shrunk on
 /// the way to at most `target` pixels a side: the rows come out of the
@@ -44,12 +49,15 @@ pub fn decode(png: &[u8], under: u16, target: u32) -> Result<Image, String> {
     let target = target.max(1);
     // Every `k` source pixels a side become one.
     let k = width.max(height).div_ceil(target).max(1);
-    let (out_w, out_h) = (width.div_ceil(k) as usize, height.div_ceil(k) as usize);
+    let (out_w, out_h) =
+        (width.div_ceil(k) as usize, height.div_ceil(k) as usize);
     let (color, _) = reader.output_color_type();
     let samples = color.samples();
     let (ur, ug, ub) = expand(under);
     let over = |c: u8, a: u8, u: u8| {
-        (u32::from(c) * u32::from(a) + u32::from(u) * (255 - u32::from(a)) + 127)
+        (u32::from(c) * u32::from(a)
+            + u32::from(u) * (255 - u32::from(a))
+            + 127)
             / 255
     };
     // One output row's running sums: r, g, b and the count behind each.
@@ -110,16 +118,16 @@ pub fn decode(png: &[u8], under: u16, target: u32) -> Result<Image, String> {
             if rows_in % k == 0 {
                 flush(&mut sums, &mut pixels);
             }
+            if rows_in % BREATH_ROWS == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
     if rows_in % k != 0 {
         flush(&mut sums, &mut pixels);
     }
     if pixels.len() != out_w * out_h {
-        return Err(format!(
-            "{} pixels out for {out_w}x{out_h}",
-            pixels.len()
-        ));
+        return Err(format!("{} pixels out for {out_w}x{out_h}", pixels.len()));
     }
     Ok(Image {
         width: out_w as u16,

@@ -132,6 +132,13 @@ const TICK: Duration = Duration::from_millis(5);
 const IDLE_EVERY: Duration = Duration::from_millis(250);
 /// The face's cadence: the companion steps its ticker every 40 ms.
 const FACE_TICK: Duration = Duration::from_millis(40);
+/// The face's cadence at rest: no frame in progress and no finger on
+/// the panel for a second. Each look reads the fabric's state (two
+/// projections cloned and decoded), 7–10 % of the core at 40 ms; a
+/// change of track or status then shows within a tenth of a second.
+const FACE_REST: Duration = Duration::from_millis(100);
+/// How long after a touch the face keeps its quick cadence.
+const FACE_AWAKE: Duration = Duration::from_secs(1);
 /// The panel's rotation, degrees; the companion's default.
 const ROTATION: u16 = 0;
 /// Backlight, 0 to 100.
@@ -522,6 +529,7 @@ fn main() -> anyhow::Result<()> {
     memory("after the art fetcher");
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
+    let mut last_touch = Instant::now() - FACE_AWAKE;
     let mut last_net = Instant::now() - FACE_TICK;
     let mut painting = false;
     let mut frame_started: Option<Instant> = None;
@@ -545,6 +553,7 @@ fn main() -> anyhow::Result<()> {
         if board.touch_int.is_low() || tracker.down() {
             match board.touch.report() {
                 Ok(r) => {
+                    last_touch = Instant::now();
                     let p = face.layout().map_touch(r.x, r.y);
                     if let Some(intent) =
                         tracker.sample(|p| face.hit(p), r.touching(), p, t.0)
@@ -1052,7 +1061,12 @@ fn main() -> anyhow::Result<()> {
         // Audio first: a paint stage can take 90 ms, and while the decoder
         // is short of lead the loop decodes instead of painting.
         let audio_short = lead.ms().is_some_and(|ms| ms < LOW_LEAD_MS);
-        if !audio_short && (painting || last_face.elapsed() >= FACE_TICK) {
+        let face_tick = if last_touch.elapsed() < FACE_AWAKE {
+            FACE_TICK
+        } else {
+            FACE_REST
+        };
+        if !audio_short && (painting || last_face.elapsed() >= face_tick) {
             last_face = Instant::now();
             let output = output_state(&steward);
             if let Some(out) = &output {
