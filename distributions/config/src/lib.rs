@@ -53,6 +53,11 @@ pub const KEYS: &[&str] = &[
     "snapserver",
 ];
 
+/// The schemes a `share` may name.
+pub const SHARE_SCHEMES: &[&str] = &["smb://", "smb1://", "nfs://"];
+/// The most shares the file may name: `share` and `share2` to `share9`.
+pub const SHARES: usize = 9;
+
 /// Values from the file, each `None` where the file did not say or said
 /// something the key could not take (reported in [`Parsed::invalid`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -90,6 +95,27 @@ pub struct Settings {
     /// port 1704 when not given. Not set, the player looks for one on
     /// the network.
     pub snapserver: Option<String>,
+    /// The network shares the library lists, in the file's numbering:
+    /// `share` (1) and `share2` to `share9`, each with its credentials
+    /// from `share_user`, `share_password`, `share_domain` (`share2_user`
+    /// and so on). A numbered credential with no share of that number
+    /// is dropped.
+    pub shares: Vec<ShareSetting>,
+}
+
+/// One network share: where it is and as whom.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShareSetting {
+    /// Its number in the file: 1 for `share`, 2 for `share2`.
+    pub index: u8,
+    /// `smb://host/share/folder`, `smb1://…` or `nfs://host/export/…`.
+    pub url: Option<String>,
+    /// The account; none is a guest.
+    pub user: Option<String>,
+    /// Its password.
+    pub password: Option<String>,
+    /// The account's domain, for SMB.
+    pub domain: Option<String>,
 }
 
 /// What happens at the end of the queue.
@@ -193,16 +219,89 @@ pub fn parse(text: &str) -> Parsed {
             continue;
         };
         let key = k.trim().to_ascii_lowercase();
+        let value = unquote(v.trim());
+        if let Some((index, field)) = share_key(&key) {
+            if !take_share(&mut out.settings, index, field, value) {
+                out.invalid.push((i + 1, key, value.to_string()));
+            }
+            continue;
+        }
         if !KEYS.contains(&key.as_str()) {
             out.unknown.push((i + 1, key));
             continue;
         }
-        let value = unquote(v.trim());
         if !take(&mut out.settings, &key, value) {
             out.invalid.push((i + 1, key, value.to_string()));
         }
     }
+    // A credential whose share was never named has nothing to go with.
+    out.settings.shares.retain(|s| s.url.is_some());
+    out.settings.shares.sort_by_key(|s| s.index);
     out
+}
+
+/// `share`, `share_user`, `share7_password`: the share's number and
+/// the field named.
+fn share_key(key: &str) -> Option<(u8, &'static str)> {
+    let rest = key.strip_prefix("share")?;
+    let (digits, field) = match rest.split_once('_') {
+        Some((d, f)) => (d, f),
+        None => (rest, ""),
+    };
+    let index = match digits {
+        "" => 1,
+        d => d
+            .parse::<u8>()
+            .ok()
+            .filter(|n| (2..=SHARES as u8).contains(n))?,
+    };
+    let field = match field {
+        "" => "",
+        "user" => "user",
+        "password" => "password",
+        "domain" => "domain",
+        _ => return None,
+    };
+    Some((index, field))
+}
+
+fn take_share(
+    settings: &mut Settings,
+    index: u8,
+    field: &str,
+    value: &str,
+) -> bool {
+    let text = (!value.is_empty()).then(|| value.to_string());
+    if field.is_empty()
+        && !value.is_empty()
+        && !SHARE_SCHEMES.iter().any(|s| {
+            value.strip_prefix(s).is_some_and(|rest| {
+                rest.split_once('/').is_some_and(|(h, p)| {
+                    !h.is_empty() && !p.trim_matches('/').is_empty()
+                })
+            })
+        })
+    {
+        return false;
+    }
+    let share = match settings.shares.iter_mut().find(|s| s.index == index) {
+        Some(s) => s,
+        None => {
+            settings.shares.push(ShareSetting {
+                index,
+                ..ShareSetting::default()
+            });
+            settings.shares.last_mut().expect("just pushed")
+        }
+    };
+    match field {
+        "" => share.url = text,
+        "user" => share.user = text,
+        // An empty password is a password.
+        "password" => share.password = Some(value.to_string()),
+        _ => share.domain = text,
+    }
+    true
 }
 
 /// Put `value` for `key` into `settings`; false if the key cannot take it.
@@ -434,11 +533,33 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
     if let Some(v) = &s.snapserver {
         applied.push(("snapserver", v.clone()));
     }
-    if applied.is_empty() {
+    if applied.is_empty() && s.shares.is_empty() {
         lines.push("read: no settings in the file".to_string());
     } else {
         for (k, v) in applied {
             lines.push(format!("read: {k} = {v}"));
+        }
+    }
+    for share in &s.shares {
+        let suffix = if share.index == 1 {
+            String::new()
+        } else {
+            share.index.to_string()
+        };
+        if let Some(v) = &share.url {
+            lines.push(format!("read: share{suffix} = {v}"));
+        }
+        if let Some(v) = &share.user {
+            lines.push(format!("read: share{suffix}_user = {v}"));
+        }
+        if let Some(v) = &share.password {
+            lines.push(format!(
+                "read: share{suffix}_password = ({} characters, not shown)",
+                v.chars().count()
+            ));
+        }
+        if let Some(v) = &share.domain {
+            lines.push(format!("read: share{suffix}_domain = {v}"));
         }
     }
     for (n, k) in &parsed.unknown {
@@ -487,6 +608,48 @@ mod tests {
         );
         assert_eq!(p.settings.volume, Some(7));
         assert_eq!(p.settings.style, None, "empty clears");
+    }
+
+    #[test]
+    fn shares_come_numbered_with_their_credentials() {
+        let p = parse(
+            "share = smb://nas.local/Music\nshare_user = alice\nshare_password = secret\nshare3 = nfs://192.0.2.5/export/music\nshare2 = smb1://oldbox/music/Albums\nshare2_user = guest\nshare2_password =\nshare9_user = nobody\n",
+        );
+        assert!(p.is_clean(), "{p:?}");
+        let s = &p.settings.shares;
+        assert_eq!(s.len(), 3);
+        assert_eq!(
+            (s[0].index, s[0].url.as_deref()),
+            (1, Some("smb://nas.local/Music"))
+        );
+        assert_eq!(s[0].user.as_deref(), Some("alice"));
+        assert_eq!(s[0].password.as_deref(), Some("secret"));
+        assert_eq!(
+            (s[1].index, s[1].url.as_deref()),
+            (2, Some("smb1://oldbox/music/Albums"))
+        );
+        assert_eq!(s[1].password.as_deref(), Some(""));
+        assert_eq!((s[2].index, s[2].user.as_deref()), (3, None));
+        let report = status_lines(&p);
+        assert!(report
+            .iter()
+            .any(|l| l == "read: share = smb://nas.local/Music"));
+        assert!(report
+            .iter()
+            .any(|l| l == "read: share_password = (6 characters, not shown)"));
+        assert!(report.iter().any(|l| l == "read: share2_user = guest"));
+        assert!(!report.iter().any(|l| l.contains("secret")));
+    }
+
+    #[test]
+    fn a_share_needs_a_scheme_a_host_and_a_path() {
+        let p = parse("share = //nas/music\nshare2 = smb://nas\nshare3 = ftp://x/y\nshare4 = smb:///music\nshare5 = smb://nas/music\n");
+        assert_eq!(p.invalid.len(), 4, "{p:?}");
+        assert_eq!(p.settings.shares.len(), 1);
+        assert_eq!(p.settings.shares[0].index, 5);
+        // share10 and share_other are not keys.
+        let p = parse("share10 = smb://a/b\nshare_other = x\n");
+        assert_eq!(p.unknown.len(), 2);
     }
 
     #[test]

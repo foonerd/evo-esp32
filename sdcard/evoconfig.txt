@@ -54,6 +54,18 @@ start =
 # it streams and the card plays again when it stops.
 snapserver =
 
+# A network share the library lists under Network, beside the media
+# servers it finds by itself. The protocol is in the address:
+#   share = smb://nas.local/Music            SMB 2 or later (a NAS, a PC)
+#   share = smb1://oldbox/music              SMB 1 only, for an old box
+#   share = nfs://192.168.1.5/export/music   NFS
+# A folder within the share may follow. The user and password are for
+# SMB; leave the user empty for a guest share. A second share is share2,
+# share2_user, share2_password, and so on up to share9.
+share =
+share_user =
+share_password =
+
 # The DAC board on the header, when the player cannot tell by itself
 # (a board with no I2C part, such as a PCM5102A) or to override what it
 # found; the names are on the wiki's Audio out page. And where the
