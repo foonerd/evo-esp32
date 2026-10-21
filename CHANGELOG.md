@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-21
+
 - NFS exports in the library. A new source plugin,
   `plugins/org.evoframework.source.nfs`, lists the exports the card
   names (`share = nfs://host/export/folder`) and reads their files,

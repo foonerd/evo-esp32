@@ -1,7 +1,7 @@
 [package]
 name = "evo-esp32-platform-esp-idf"
 description = "evo-esp32 on ESP-IDF: what every Espressif firmware distribution shares. Espressif's MP3 decoder (esp_audio_codec, fixed point) as a Symphonia codec, preferred over the floating-point one on chips without an FPU; Espressif's JPEG decoder (esp_jpeg, TJpgDec) for album art."
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "BUSL-1.1"
 repository = "https://github.com/foonerd/evo-esp32"

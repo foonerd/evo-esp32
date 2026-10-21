@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-catalogue"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -785,11 +785,11 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-config"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "evo-esp32-face"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ab_glyph",
  "embedded-graphics",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-platform-esp-idf"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "esp-idf-svc",
  "evo-esp32-sdk",
@@ -812,11 +812,11 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-queue"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "evo-esp32-sdk"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-steward"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
  "serde_json",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-volumio"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "log",
  "serde_json",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "companion-board-waveshare-esp32-c5-touch-lcd-28",
@@ -1398,14 +1398,14 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "org-evoframework-delivery-null"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
 ]
 
 [[package]]
 name = "org-evoframework-multiroom-receiver"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "base64",
  "evo-esp32-sdk",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-playback-symphonia"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -1425,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-snapcast-receiver"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -1436,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-dlna"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -1444,14 +1444,14 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-files"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
 ]
 
 [[package]]
 name = "org-evoframework-source-nfs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
  "getrandom",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-smb"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "evo-esp32-sdk",
  "getrandom",
