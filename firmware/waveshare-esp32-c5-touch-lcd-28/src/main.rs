@@ -101,6 +101,7 @@ use org_evoframework_snapcast_receiver::{
 };
 use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::SourceFiles;
+use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
 use sink::{I2sSink, RateFollower};
 
 mod generated {
@@ -361,12 +362,14 @@ fn main() -> anyhow::Result<()> {
         hostname.clone(),
         env!("CARGO_PKG_VERSION"),
     );
+    let shares = shares(&config.settings);
     let mut steward = bring_up(
         sink::Shared::new(sink),
         &link,
         room_settings,
         &snap_link,
         snap_settings,
+        shares,
         now(),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -1384,6 +1387,7 @@ fn descriptions() -> Vec<PluginDescription> {
     vec![
         SourceFiles::new(MUSIC).describe(),
         SourceDlna::new().describe(),
+        SourceSmb::new(Vec::new()).describe(),
         PlaybackSymphonia::new(Box::new(Silent)).describe(),
         MultiroomReceiver::new(
             Box::new(Silent),
@@ -1414,6 +1418,41 @@ impl evo_esp32_sdk::contract::audio::playback::FrameSink for Silent {
     fn stop(&mut self) {}
 }
 
+/// The shares the card names that this build reaches: `smb://` ones;
+/// an `smb1://` or `nfs://` share is logged and left for the build
+/// that speaks it.
+fn shares(settings: &evo_esp32_config::Settings) -> Vec<Share> {
+    let mut out = Vec::new();
+    for s in &settings.shares {
+        let Some(url) = &s.url else { continue };
+        if !url.starts_with("smb://") {
+            warn!(
+                "share{}: {} is not reached by this build yet",
+                if s.index == 1 {
+                    String::new()
+                } else {
+                    s.index.to_string()
+                },
+                url.split("://").next().unwrap_or(url)
+            );
+            continue;
+        }
+        match Share::parse(
+            url,
+            s.user.as_deref(),
+            s.password.as_deref(),
+            s.domain.as_deref(),
+        ) {
+            Ok(share) => {
+                info!("share: {} ({})", share.name, url);
+                out.push(share);
+            }
+            Err(e) => warn!("share: {e}"),
+        }
+    }
+    out
+}
+
 /// Build the fabric: steward, plugins, checked against the catalogue.
 /// The sink is shared between the decoder and the two network
 /// receivers; the loop grants one of them custody at a time.
@@ -1423,6 +1462,7 @@ fn bring_up(
     room: RoomSettings,
     snap_link: &SnapLink,
     snap: SnapSettings,
+    shares: Vec<Share>,
     now: Ticks,
 ) -> Result<Steward, String> {
     let catalogue = catalogue();
@@ -1439,13 +1479,17 @@ fn bring_up(
         .admit_respondent(Box::new(SourceDlna::new()), now)
         .map_err(|e| e.to_string())?;
     steward
+        .admit_respondent(Box::new(SourceSmb::new(shares.clone())), now)
+        .map_err(|e| e.to_string())?;
+    steward
         .admit_warden(
             Box::new(
                 PlaybackSymphonia::with_codecs(
                     Box::new(sink.clone()),
                     codecs(),
                 )
-                .with_opener(Box::new(HttpOpener)),
+                .with_opener(Box::new(HttpOpener))
+                .with_file_opener(Box::new(SmbOpener::new(shares))),
             ),
             now,
         )
@@ -1872,10 +1916,10 @@ fn background(face: &Face) -> u16 {
     evo_esp32_face::art::raw(face.theme().background)
 }
 
-/// A track reached over the network, station or file: it waits for the
-/// link.
+/// A track reached over the network, station or file on a server or a
+/// share: it waits for the link.
 fn needs_network(track: &Track) -> bool {
-    track.uri.starts_with("http://") || track.uri.starts_with("https://")
+    track.uri.contains("://") && !track.uri.starts_with("file://")
 }
 
 /// Pause, resume or seek the track in custody.
@@ -2231,6 +2275,8 @@ struct Browse {
     folders: Vec<(String, Place)>,
     /// The folder in view's tracks, in order.
     tracks: Vec<Track>,
+    /// On the Network page, how many servers the search had found.
+    servers: usize,
 }
 
 impl Browse {
@@ -2279,33 +2325,46 @@ impl Browse {
                     };
                 self.folders.clear();
                 self.tracks.clear();
-                entries.reserve(listing.entries.len());
-                for e in listing.entries {
-                    match e {
-                        Entry::Folder { name, path } => {
-                            entries.push(evo_esp32_face::Entry {
-                                name: name.clone(),
-                                folder: true,
-                                uri: None,
-                                playable: true,
-                            });
-                            self.folders.push((
-                                name.clone(),
-                                Place {
-                                    source: p.source.clone(),
-                                    path,
-                                    name,
-                                },
-                            ));
-                        }
-                        Entry::Track(t) => {
-                            entries.push(evo_esp32_face::Entry {
-                                name: t.title.clone(),
-                                folder: false,
-                                uri: Some(t.uri.clone()),
-                                playable: within_ceiling(&t),
-                            });
-                            self.tracks.push(t);
+                self.servers = 0;
+                // The Network page: the servers found, then the shares
+                // the card names, from their two sources.
+                let mut listed = vec![(p.source.clone(), listing)];
+                if is_network(p) {
+                    self.servers = listed[0].1.entries.len();
+                    match list_folder(steward, &shelf::source_smb(), "", now) {
+                        Ok(l) => listed.push((shelf::source_smb(), l)),
+                        Err(e) => warn!("library: {e}"),
+                    }
+                }
+                for (source, listing) in listed {
+                    entries.reserve(listing.entries.len());
+                    for e in listing.entries {
+                        match e {
+                            Entry::Folder { name, path } => {
+                                entries.push(evo_esp32_face::Entry {
+                                    name: name.clone(),
+                                    folder: true,
+                                    uri: None,
+                                    playable: true,
+                                });
+                                self.folders.push((
+                                    name.clone(),
+                                    Place {
+                                        source: source.clone(),
+                                        path,
+                                        name,
+                                    },
+                                ));
+                            }
+                            Entry::Track(t) => {
+                                entries.push(evo_esp32_face::Entry {
+                                    name: t.title.clone(),
+                                    folder: false,
+                                    uri: Some(t.uri.clone()),
+                                    playable: within_ceiling(&t),
+                                });
+                                self.tracks.push(t);
+                            }
                         }
                     }
                 }
@@ -2354,10 +2413,14 @@ impl Browse {
     /// The network's servers take a moment to answer the search: while
     /// the Network page stands empty, list it again.
     fn waiting_for_servers(&self) -> bool {
-        self.here.as_ref().is_some_and(|p| {
-            p.source == shelf::source_dlna() && p.path.is_empty()
-        }) && self.folders.is_empty()
+        self.here.as_ref().is_some_and(is_network) && self.servers == 0
     }
+}
+
+/// Whether `place` is the Network page: the DLNA source's root, where
+/// the shares are listed too.
+fn is_network(place: &Place) -> bool {
+    place.source == shelf::source_dlna() && place.path.is_empty()
 }
 
 /// What the settings page says about this player.

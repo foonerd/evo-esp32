@@ -19,6 +19,11 @@ name = "dlna"
 shape = 1
 description = "The DLNA media servers on the network, each a tree of folders and tracks."
 
+[[racks.shelves]]
+name = "smb"
+shape = 1
+description = "The SMB shares named on the card, each a tree of folders and audio files read by position."
+
 [[racks]]
 name = "playback"
 family = "domain"
