@@ -24,6 +24,7 @@ org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.p
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
 org-evoframework-source-dlna = { path = "../../plugins/org.evoframework.source.dlna" }
 org-evoframework-source-smb = { path = "../../plugins/org.evoframework.source.smb" }
+org-evoframework-source-nfs = { path = "../../plugins/org.evoframework.source.nfs" }
 serde_json = { workspace = true, features = ["std"] }
 
 [build-dependencies]

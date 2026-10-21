@@ -45,6 +45,7 @@ use org_evoframework_delivery_null::DeliveryNull;
 use org_evoframework_playback_symphonia::PlaybackSymphonia;
 use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::SourceFiles;
+use org_evoframework_source_nfs::{NfsOpener, Share as NfsShare, SourceNfs};
 use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
 use sink::PacedWav;
 
@@ -107,7 +108,8 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
                     those called Music first
   --iface ADDR      the address of the interface the search goes out of,
                     on a host with several
-  --share URL       a network share, smb://host/share[/folder]; with
+  --share URL       a network share, smb://host/share[/folder] or
+                    nfs://host/export[/folder]; with
                     --share-user and --share-password where it needs them.
                     --play-share plays its first track found walking it
   --play-share      play from the share rather than the directory
@@ -253,6 +255,7 @@ fn descriptions(dir: &std::path::Path) -> Vec<PluginDescription> {
         SourceFiles::new(dir).describe(),
         SourceDlna::new().describe(),
         SourceSmb::new(Vec::new()).describe(),
+        SourceNfs::new(Vec::new()).describe(),
         PlaybackSymphonia::new(Box::new(PacedWav::new(None))).describe(),
         DeliveryNull::new().describe(),
     ]
@@ -264,6 +267,7 @@ fn bring_up(
     dir: &std::path::Path,
     iface: Option<std::net::Ipv4Addr>,
     shares: Vec<Share>,
+    exports: Vec<NfsShare>,
     wav: Option<PathBuf>,
     now: Ticks,
 ) -> Result<Steward, String> {
@@ -290,12 +294,16 @@ fn bring_up(
         .admit_respondent(Box::new(SourceSmb::new(shares.clone())), now)
         .map_err(|e| e.to_string())?;
     steward
+        .admit_respondent(Box::new(SourceNfs::new(exports.clone())), now)
+        .map_err(|e| e.to_string())?;
+    steward
         .admit_warden(
             Box::new(
                 PlaybackSymphonia::new(Box::new(PacedWav::new(wav)))
                     .with_opener(Box::new(http::PlainHttp))
                     .with_file_opener(Box::new(SmbOpener::new(shares.clone())))
-                    .with_file_opener(Box::new(SmbOpener::smb1(shares))),
+                    .with_file_opener(Box::new(SmbOpener::smb1(shares)))
+                    .with_file_opener(Box::new(NfsOpener::new(exports))),
             ),
             now,
         )
@@ -571,29 +579,43 @@ fn main() {
         return;
     }
 
-    let shares = match &cli.share {
-        Some(url) => match Share::parse(
-            url,
-            cli.share_user.as_deref(),
-            cli.share_password.as_deref(),
-            None,
-        ) {
-            Ok(s) => vec![s],
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(2);
-            }
-        },
-        None => Vec::new(),
-    };
-    let mut steward =
-        match bring_up(&cli.dir, cli.iface, shares, cli.wav.clone(), now()) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
+    let (mut shares, mut exports) = (Vec::new(), Vec::new());
+    if let Some(url) = &cli.share {
+        let parsed = if url.starts_with("nfs://") {
+            NfsShare::parse(url).map(|s| exports.push(s))
+        } else {
+            Share::parse(
+                url,
+                cli.share_user.as_deref(),
+                cli.share_password.as_deref(),
+                None,
+            )
+            .map(|s| shares.push(s))
         };
+        if let Err(e) = parsed {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+    let play_from = if exports.is_empty() {
+        shelf::source_smb()
+    } else {
+        shelf::source_nfs()
+    };
+    let mut steward = match bring_up(
+        &cli.dir,
+        cli.iface,
+        shares,
+        exports,
+        cli.wav.clone(),
+        now(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     println!(
         "steward up with {} plugins: {}",
         steward.plugins().count(),
@@ -605,12 +627,7 @@ fn main() {
     );
 
     let track = if cli.play_share {
-        match first_track(
-            &mut steward,
-            shelf::source_smb(),
-            String::new(),
-            now(),
-        ) {
+        match first_track(&mut steward, play_from, String::new(), now()) {
             Ok(Some(t)) => t,
             Ok(None) => {
                 eprintln!("no track found on the share");
@@ -816,9 +833,15 @@ mod tests {
         // 300 ms at 8 kHz: short enough to play out within the test.
         sink::write_tone(&dir.join("song.wav"), 8000, 300).unwrap();
         let heard = dir.join("heard.wav");
-        let mut s =
-            bring_up(&dir, None, Vec::new(), Some(heard.clone()), Ticks(0))
-                .unwrap();
+        let mut s = bring_up(
+            &dir,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Some(heard.clone()),
+            Ticks(0),
+        )
+        .unwrap();
         let track =
             first_track(&mut s, shelf::source_files(), String::new(), Ticks(0))
                 .unwrap()
