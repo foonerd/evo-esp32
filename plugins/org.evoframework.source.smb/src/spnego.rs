@@ -10,14 +10,16 @@ const OID_NTLMSSP: &[u8] =
 /// The DER length octets for `n`.
 fn length(n: usize) -> Vec<u8> {
     if n < 0x80 {
-        vec![n as u8]
-    } else {
-        let bytes = n.to_be_bytes();
-        let first = bytes.iter().position(|&b| b != 0).unwrap_or(7);
-        let mut out = vec![0x80 | (8 - first) as u8];
-        out.extend_from_slice(&bytes[first..]);
-        out
+        return vec![n as u8];
     }
+    // Long form: a count byte, then the length big-endian without
+    // leading zeros. Written over u64 so the count does not depend on
+    // the width of usize (4 on the chip, 8 on a desktop).
+    let bytes = (n as u64).to_be_bytes();
+    let first = bytes.iter().position(|&b| b != 0).unwrap_or(7);
+    let mut out = vec![0x80 | (bytes.len() - first) as u8];
+    out.extend_from_slice(&bytes[first..]);
+    out
 }
 
 /// A tag with its content.
@@ -156,6 +158,19 @@ fn read_tlv(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lengths_encode_as_der_on_any_width() {
+        assert_eq!(length(0), [0x00]);
+        assert_eq!(length(0x7f), [0x7f]);
+        assert_eq!(length(0x80), [0x81, 0x80]);
+        assert_eq!(length(300), [0x82, 0x01, 0x2c]);
+        assert_eq!(length(419), [0x82, 0x01, 0xa3]);
+        assert_eq!(length(70_000), [0x83, 0x01, 0x11, 0x70]);
+        let long = tlv(0x04, &[9u8; 419]);
+        let (tag, body, rest) = read_tlv(&long).unwrap();
+        assert_eq!((tag, body.len(), rest.len()), (0x04, 419, 0));
+    }
 
     #[test]
     fn init_wraps_the_mechanism_and_token() {

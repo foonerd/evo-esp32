@@ -255,6 +255,11 @@ impl Session {
             dialect >= DIALECT_2_1 && capabilities & CAP_LARGE_MTU != 0;
         self.max_transact = get32(body, 28).max(1024);
         self.max_read = get32(body, 32).max(1024);
+        log::debug!(
+            "smb2: dialect {dialect:#06x}, capabilities {capabilities:#x}, security mode {security_mode:#x}, max read {}, max transact {}",
+            self.max_read,
+            self.max_transact
+        );
         Ok(Negotiated {
             signing_required: security_mode & SECURITY_MODE_SIGNING_REQUIRED
                 != 0,
@@ -533,6 +538,21 @@ impl Session {
                     return Err(Error::Signature);
                 }
             }
+            // The statuses a caller expects are not worth a line.
+            if !matches!(
+                reply.status,
+                status::SUCCESS
+                    | status::MORE_PROCESSING_REQUIRED
+                    | status::END_OF_FILE
+                    | status::NO_MORE_FILES
+            ) {
+                log::warn!(
+                    "smb2: {} answered {} ({:#010x})",
+                    command_name(command),
+                    wire::status_name(reply.status),
+                    reply.status
+                );
+            }
             return Ok(reply);
         }
     }
@@ -577,6 +597,21 @@ impl Drop for Session {
 struct Negotiated {
     signing_required: bool,
     server_time: u64,
+}
+
+fn command_name(command: u16) -> &'static str {
+    match command {
+        wire::NEGOTIATE => "negotiate",
+        wire::SESSION_SETUP => "session setup",
+        wire::LOGOFF => "logoff",
+        wire::TREE_CONNECT => "tree connect",
+        wire::TREE_DISCONNECT => "tree disconnect",
+        wire::CREATE => "create",
+        wire::CLOSE => "close",
+        wire::READ => "read",
+        wire::QUERY_DIRECTORY => "query directory",
+        _ => "command",
+    }
 }
 
 pub(crate) fn resolve(host: &str, port: u16) -> Result<SocketAddr, Error> {
