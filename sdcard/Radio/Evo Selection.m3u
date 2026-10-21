@@ -27,23 +27,23 @@ https://stream-ar.hellorayo.co.uk/absolute90shigh.aac?direct=true&aw_0_1st.skey=
 https://stream-ar.hellorayo.co.uk/absoluteclassicrockhigh.aac?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s16679/images/logod.png",Absolute Radio
 https://stream-ar.hellorayo.co.uk/absoluteradiohigh.aac?direct=true&aw_0_1st.skey=1602676850
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_1xtra/blocks-colour_600x600.png",BBC 1Xtra
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s20277/images/logod.png",BBC 1Xtra
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_1xtra.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_6music/blocks-colour_600x600.png",BBC 6 Music
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s44491/images/logod.png",BBC 6 Music
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_6music.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_asian_network/blocks-colour_600x600.png",BBC Asian Network
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s44490/images/logod.png",BBC Asian Network
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_asian_network.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_one/blocks-colour_600x600.png",BBC Radio 1
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s24939/images/logod.png",BBC Radio 1
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_one.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_two/blocks-colour_600x600.png",BBC Radio 2
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s24940/images/logod.png",BBC Radio 2
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_two.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_three/blocks-colour_600x600.png",BBC Radio 3
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s24941/images/logod.png",BBC Radio 3
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_three.m3u8
 #EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_four/blocks-colour_600x600.png",BBC Radio 4
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_fourfm.m3u8
 #EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_four_extra/blocks-colour_600x600.png",BBC Radio 4 Extra
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_four_extra.m3u8
-#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_five_live/blocks-colour_600x600.png",BBC Radio 5 Live
+#EXTINF:-1 tvg-logo="http://cdn-profiles.tunein.com/s24943/images/logod.png",BBC Radio 5 Live
 http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_five_live.m3u8
 #EXTINF:-1 tvg-logo="https://cdn-radiotime-logos.tunein.com/s24948d.png",BBC World Service
 http://stream.live.vc.bbcmedia.co.uk/bbc_world_service

@@ -65,8 +65,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   seconds is the schedule working, not a fault; it had fired at every
   BBC station's open. The loop not turning for five seconds is the
   fault, and is what is watched now. Measured on the board: HE-AAC main
-  task 82 % → 77–79 %, idle 6–8 % → 10–11 %, real time throughout.
-
+  task 82 % → 77–79 %, idle 6–8 % → 10–11 %, real time throughout. The
+  shipped list takes seven of the BBC's logos from TuneIn's 300-pixel
+  PNGs over plain HTTP (the BBC's own are 600 pixels on transparency
+  over TLS, 8–17 s to decode beside that decoder); Radio 4 and 4 Extra
+  keep the BBC's, the only source verified for them.
 
 ## [0.1.2] - 2026-10-21
 
