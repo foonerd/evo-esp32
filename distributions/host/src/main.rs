@@ -197,38 +197,57 @@ fn bring_up(
     Ok(steward)
 }
 
-/// Ask the source for the root and pick the first track it lists.
+/// Ask the source for the root and pick the first track it lists,
+/// going down the first folder where a level has none (a directory
+/// holding one playlist plays that playlist's first station).
 fn first_track(
     steward: &mut Steward,
     now: Ticks,
 ) -> Result<Option<Track>, String> {
-    let response = steward
-        .request(
-            &Request {
-                cid: CorrelationId(1),
-                shelf: shelf::source_files(),
-                verb: LIST.into(),
-                subject: None,
-                args: to_value(&ListArgs::default()),
-            },
-            now,
-        )
-        .map_err(|e| format!("{e:?}"))?;
-    let listing: Listing = match response.outcome {
-        Ok(v) => from_value(&v)?,
-        Err(f) => return Err(format!("list: {f:?}")),
-    };
-    println!("source/files lists {} entries:", listing.entries.len());
-    for e in &listing.entries {
-        match e {
-            Entry::Folder { name, .. } => println!("  {name}/"),
-            Entry::Track(t) => println!("  {}", t.title),
+    let mut path = String::new();
+    for cid in 1..8 {
+        let response = steward
+            .request(
+                &Request {
+                    cid: CorrelationId(cid),
+                    shelf: shelf::source_files(),
+                    verb: LIST.into(),
+                    subject: None,
+                    args: to_value(&ListArgs { path: path.clone() }),
+                },
+                now,
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        let listing: Listing = match response.outcome {
+            Ok(v) => from_value(&v)?,
+            Err(f) => return Err(format!("list: {f:?}")),
+        };
+        println!(
+            "source/files lists {} entries in {:?}:",
+            listing.entries.len(),
+            listing.path
+        );
+        for e in &listing.entries {
+            match e {
+                Entry::Folder { name, .. } => println!("  {name}/"),
+                Entry::Track(t) => println!("  {}", t.title),
+            }
+        }
+        let mut first_folder = None;
+        for e in listing.entries {
+            match e {
+                Entry::Track(t) => return Ok(Some(t)),
+                Entry::Folder { path, .. } => {
+                    first_folder.get_or_insert(path);
+                }
+            }
+        }
+        match first_folder {
+            Some(p) => path = p,
+            None => return Ok(None),
         }
     }
-    Ok(listing.entries.into_iter().find_map(|e| match e {
-        Entry::Track(t) => Some(t),
-        Entry::Folder { .. } => None,
-    }))
+    Ok(None)
 }
 
 /// A frame of the face for every rotation, style and theme, from one
@@ -443,7 +462,7 @@ fn main() {
     println!("playing {:?} under custody {}", track.title, handle.0);
     let _ = steward.request(
         &Request {
-            cid: CorrelationId(2),
+            cid: CorrelationId(10),
             shelf: shelf::delivery_output(),
             verb: delivery::VOLUME.into(),
             subject: None,

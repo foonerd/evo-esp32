@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- HTTP Live Streaming. `plugins/org.evoframework.playback.symphonia`
+  gains `hls` and `ts`: a station whose address answers with a
+  playlist (by content type, or a `.m3u8` name) is read as one stream
+  — a master playlist is followed to the audio variant nearest
+  160 kb/s from below, the media playlist is walked from three
+  segments behind the live edge and refreshed as the station goes on,
+  each MPEG-TS segment is demuxed to its audio elementary stream (AAC
+  in ADTS, or MPEG audio) and handed to the decoder as if the station
+  were one long response, with the content type the segments carry
+  and the variant's bitrate as `icy-br`. Segments in fragmented MP4
+  (`#EXT-X-MAP`) are refused by name. The plugin wraps whatever
+  transport the distribution gives it (`hls::Aware`), so the firmware
+  and the host tool both play HLS with no change of their own. The
+  shipped Radio list gains the BBC's ten national stations (1Xtra,
+  6 Music, Asian Network, Radio 1 to 4, 4 Extra, 5 Live) by their
+  stable manifests on `a.files.bbci.co.uk`, 96 kb/s HE-AAC, which
+  play anywhere; the Akamai pools they point into rotate, which is
+  why the pools are not listed. The host tool plays the first track of
+  the first folder when the directory given has none of its own (a
+  directory holding one playlist plays that playlist's first station),
+  and with Symphonia's AAC decoder (the `aac-symphonia` feature, the
+  host's) the thread that opens a stream gets 256 KB of stack, since
+  that decoder is built on the stack before it is boxed.
+
 ## [0.1.2] - 2026-10-21
 
 - The player as a Volumio device. `distributions/volumio`

@@ -80,7 +80,9 @@ use symphonia::core::meta::{MetadataOptions, StandardTag};
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 pub mod ahead;
+pub mod hls;
 pub mod stream;
+pub mod ts;
 use evo_esp32_sdk::contract::audio::playback::StreamOpener;
 use stream::Live;
 
@@ -98,7 +100,12 @@ const OPENING_IDLE_MS: u32 = 50;
 /// The stack of the thread that reaches a network stream: the TLS
 /// handshake runs on it, and the probe. Placed by the distribution
 /// (PSRAM on the board).
+#[cfg(not(feature = "aac-symphonia"))]
 const OPEN_STACK: usize = 32 * 1024;
+/// With Symphonia's AAC decoder, which is built on the stack before
+/// it is boxed, the probe needs far more; a host has it to spare.
+#[cfg(feature = "aac-symphonia")]
+const OPEN_STACK: usize = 256 * 1024;
 /// The most audio one tick decodes, in milliseconds. Past this the
 /// warden yields even if the sink would take more: a sink that runs the
 /// decoder ahead of the ear would otherwise take whole ticks of the
@@ -227,9 +234,10 @@ impl PlaybackSymphonia {
     }
 
     /// With a way to reach `http://` and `https://` tracks: the
-    /// distribution's transport.
+    /// distribution's transport. A URI that answers with an HLS playlist
+    /// is played segment by segment through it ([`hls`]).
     pub fn with_opener(mut self, opener: Box<dyn StreamOpener>) -> Self {
-        self.opener = Some(Arc::from(opener));
+        self.opener = Some(Arc::new(hls::Aware(Arc::from(opener))));
         self
     }
 

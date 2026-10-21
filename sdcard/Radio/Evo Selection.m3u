@@ -8,13 +8,16 @@
 #
 # A selection of UK stations, with a few from further afield, drawn
 # from the radio-browser.info and TuneIn directories and checked on
-# 20 October 2026: every stream answered, every logo decoded. The
-# streams and logos are the broadcasters' own. The player decodes MP3,
-# AAC (AAC-LC and HE-AAC), FLAC and Ogg Vorbis from the air. Where a
-# broadcaster offers both a 48k HE-AAC and a 112k MP3 feed (the Bauer
-# brands), the MP3 is listed: it sounds no worse and asks less of the
-# board. The BBC's domestic stations are HLS, which no evo-esp32 plays
-# yet; the World Service still has a plain stream and is here.
+# 20 October 2026 (the BBC's on the 21st): every stream answered,
+# every logo decoded. The streams and logos are the broadcasters' own.
+# The player decodes MP3, AAC (AAC-LC and HE-AAC), FLAC and Ogg Vorbis
+# from the air, as one stream or as HLS (a playlist of short segments
+# in MPEG-TS, the way the BBC broadcasts). Where a broadcaster offers
+# both a 48k HE-AAC and a 112k MP3 feed (the Bauer brands), the MP3 is
+# listed: it sounds no worse and asks less of the board. The BBC's
+# stations are listed by their international feeds, 96k HE-AAC, which
+# play anywhere; a listener in the UK can change nonuk to uk and
+# low_sbr to high_sbr in a BBC URL for the 320k AAC-LC feed.
 
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s333913/images/logod.png",Absolute 80s
 https://stream-ar.hellorayo.co.uk/absolute80shigh.aac?direct=true&aw_0_1st.skey=1602676850
@@ -24,6 +27,24 @@ https://stream-ar.hellorayo.co.uk/absolute90shigh.aac?direct=true&aw_0_1st.skey=
 https://stream-ar.hellorayo.co.uk/absoluteclassicrockhigh.aac?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s16679/images/logod.png",Absolute Radio
 https://stream-ar.hellorayo.co.uk/absoluteradiohigh.aac?direct=true&aw_0_1st.skey=1602676850
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_1xtra/blocks-colour_600x600.png",BBC 1Xtra
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_1xtra.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_6music/blocks-colour_600x600.png",BBC 6 Music
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_6music.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_asian_network/blocks-colour_600x600.png",BBC Asian Network
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_asian_network.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_one/blocks-colour_600x600.png",BBC Radio 1
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_one.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_two/blocks-colour_600x600.png",BBC Radio 2
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_two.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_three/blocks-colour_600x600.png",BBC Radio 3
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_three.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_four/blocks-colour_600x600.png",BBC Radio 4
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_fourfm.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_four_extra/blocks-colour_600x600.png",BBC Radio 4 Extra
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_four_extra.m3u8
+#EXTINF:-1 tvg-logo="https://sounds.files.bbci.co.uk/3.7.0/networks/bbc_radio_five_live/blocks-colour_600x600.png",BBC Radio 5 Live
+http://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/hls/nonuk/audio_syndication_low_sbr_v1/ak/bbc_radio_five_live.m3u8
 #EXTINF:-1 tvg-logo="https://cdn-radiotime-logos.tunein.com/s24948d.png",BBC World Service
 http://stream.live.vc.bbcmedia.co.uk/bbc_world_service
 #EXTINF:-1 tvg-logo="https://www.capitalfm.com/assets_v4r/capital/img/favicon-196x196.png",Capital Chill
