@@ -149,6 +149,7 @@ dependencies = [
  "evo-esp32-face",
  "evo-esp32-sdk",
  "evo-esp32-steward",
+ "log",
  "org-evoframework-delivery-null",
  "org-evoframework-playback-symphonia",
  "org-evoframework-source-files",

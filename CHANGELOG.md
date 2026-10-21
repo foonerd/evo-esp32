@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Files on a server play and seek like the card's. A track reached
+  over HTTP is a file when the server gives its length and does
+  ranges (a DLNA server's item, a share behind a web server), and a
+  station only when it does not: the Symphonia plugin reads such a
+  file through the read-ahead ring, seeks it with `Range` requests
+  (`netfile`: the connection is kept across seeks and serves a short
+  hop forward by reading through; the file's first 64 KB and its last
+  4 KB are kept, so the probe's look at the end and return to the start
+  cost one short request, not two connections; a connection that ends
+  early is taken up again at the place), and the tick waits on the ring
+  rather than blocking the loop on the network. The ring keeps 128 KB
+  behind the decoder for seeks back. `StreamOpener::open_at` is the
+  contract (both HTTP openers honour it, accepting only a 206 for a
+  range). A track now says whether it is live (`Track::live`) — a
+  playlist entry with no length is, one with a length in seconds
+  (`#EXTINF:243,` or `LengthN=`) is a file with that duration — and
+  the face, the queue and the firmware go by that word rather than by
+  the URI's scheme: a server's track gets the progress ring, seek and
+  the queue's modes. The host tool gains `--start MS` (a seek at open)
+  and a logger (`EVO_LOG=debug`); measured on the desk against nginx: a
+  96 kHz FLAC, a 44.1 kHz FLAC and an MP3 each land on 25 s to the
+  second, the plain open costing two requests and a seek one plus the
+  decoder's bisection where the file has no seek table.
+
 - HTTP Live Streaming. `plugins/org.evoframework.playback.symphonia`
   gains `hls` and `ts`: a station whose address answers with a
   playlist (by content type, or a `.m3u8` name) is read as one stream

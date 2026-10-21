@@ -52,11 +52,56 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/catalogue.rs"));
 }
 
+/// The plugins' `log` lines, to stderr, at the level `EVO_LOG` names.
+mod logger {
+    use log::{Level, LevelFilter, Log, Metadata, Record};
+
+    struct Stderr;
+
+    impl Log for Stderr {
+        fn enabled(&self, m: &Metadata) -> bool {
+            m.level() <= log::max_level()
+        }
+
+        fn log(&self, r: &Record) {
+            if self.enabled(r.metadata()) {
+                let tag = match r.level() {
+                    Level::Error => "E",
+                    Level::Warn => "W",
+                    Level::Info => "I",
+                    Level::Debug => "D",
+                    Level::Trace => "T",
+                };
+                eprintln!("{tag} {}: {}", r.target(), r.args());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    static LOGGER: Stderr = Stderr;
+
+    pub fn install() {
+        let level = match std::env::var("EVO_LOG").as_deref() {
+            Ok("trace") => LevelFilter::Trace,
+            Ok("debug") => LevelFilter::Debug,
+            Ok("warn") => LevelFilter::Warn,
+            Ok("error") => LevelFilter::Error,
+            Ok("off") => LevelFilter::Off,
+            _ => LevelFilter::Info,
+        };
+        if log::set_logger(&LOGGER).is_ok() {
+            log::set_max_level(level);
+        }
+    }
+}
+
 const USAGE: &str = "\
 evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
 
   --dir PATH        the music directory (default .)
   --seconds N       how long to run (default 5)
+  --start MS        start the track this many milliseconds in (a seek at open)
   --panel PATH      write the panel's last frame as a PNG
   --sheet           with the details sheet raised over it
   --rotation DEG    the panel's rotation, 0, 90, 180 or 270 (default 0)
@@ -65,11 +110,15 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
   --gallery DIR     write a frame for every rotation, style and theme there and exit
   --wav PATH        record what the sink let out as a WAV
   --tone PATH       write a 440 Hz test tone (2 s, 44.1 kHz) there and exit
-  --help";
+  --help
+
+The plugins' log goes to stderr; EVO_LOG=debug (or trace, warn, error)
+sets the level, info by default.";
 
 struct Cli {
     dir: PathBuf,
     seconds: u64,
+    start_ms: u64,
     panel: Option<PathBuf>,
     sheet: bool,
     rotation: u16,
@@ -84,6 +133,7 @@ fn parse_args() -> Result<Cli, String> {
     let mut cli = Cli {
         dir: PathBuf::from("."),
         seconds: 5,
+        start_ms: 0,
         panel: None,
         sheet: false,
         rotation: 0,
@@ -111,6 +161,11 @@ fn parse_args() -> Result<Cli, String> {
             "--seconds" => {
                 cli.seconds = value.parse().map_err(|_| {
                     format!("--seconds must be a number, got {value:?}")
+                })?;
+            }
+            "--start" => {
+                cli.start_ms = value.parse().map_err(|_| {
+                    format!("--start must be milliseconds, got {value:?}")
                 })?;
             }
             "--panel" => cli.panel = Some(PathBuf::from(value)),
@@ -266,6 +321,7 @@ fn gallery(dir: &std::path::Path) -> Result<(), String> {
             duration_ms: Some(506_000),
             sample_rate: None,
             art: None,
+            live: false,
         }),
         position_ms: 119_000,
         format: Some(playback::Format {
@@ -387,6 +443,7 @@ fn sample_about() -> About {
 }
 
 fn main() {
+    logger::install();
     let cli = match parse_args() {
         Ok(cli) => cli,
         Err(e) => {
@@ -450,7 +507,7 @@ fn main() {
                 subject: SubjectId::new("playback/now"),
                 instruction: to_value(&Play {
                     track: track.clone(),
-                    start_ms: 0,
+                    start_ms: cli.start_ms,
                 }),
             },
             now(),
@@ -459,7 +516,16 @@ fn main() {
             eprintln!("assign: {e:?}");
             std::process::exit(1);
         });
-    println!("playing {:?} under custody {}", track.title, handle.0);
+    println!(
+        "playing {:?} under custody {}{}",
+        track.title,
+        handle.0,
+        if cli.start_ms > 0 {
+            format!(", from {} ms", cli.start_ms)
+        } else {
+            String::new()
+        }
+    );
     let _ = steward.request(
         &Request {
             cid: CorrelationId(10),

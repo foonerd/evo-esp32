@@ -18,6 +18,7 @@ evo-esp32-catalogue = { path = "../../catalogue" }
 evo-esp32-face = { path = "../face" }
 evo-esp32-sdk = { path = "../../sdk" }
 evo-esp32-steward = { path = "../../steward" }
+log = "0.4"
 org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }
 org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia" }
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
