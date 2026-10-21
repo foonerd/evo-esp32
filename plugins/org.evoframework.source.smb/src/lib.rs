@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod ntlm;
+pub mod smb1;
 pub mod smb2;
 mod spnego;
 mod wire;
@@ -52,6 +53,8 @@ pub use wire::Error;
 pub const NAME: &str = "org.evoframework.source.smb";
 /// The scheme of a share's URI.
 pub const SCHEME: &str = "smb";
+/// The scheme of a share that speaks only SMB1, named so on purpose.
+pub const SCHEME_SMB1: &str = "smb1";
 /// SMB's port.
 pub const PORT: u16 = 445;
 /// The name this client gives the server for itself.
@@ -65,9 +68,29 @@ static STOCKS: [Stocking; 1] = [Stocking {
     shape: shelf::SHAPE,
 }];
 
+/// Which family of the protocol a share is spoken in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// SMB 2.0.2 or 2.1: `smb://`.
+    Smb2,
+    /// SMB1, NT LM 0.12: `smb1://`, never reached from `smb://`.
+    Smb1,
+}
+
+impl Protocol {
+    fn scheme(self) -> &'static str {
+        match self {
+            Protocol::Smb2 => SCHEME,
+            Protocol::Smb1 => SCHEME_SMB1,
+        }
+    }
+}
+
 /// One configured share: where it is, as whom, and what it is called.
 #[derive(Clone)]
 pub struct Share {
+    /// The protocol family its URL named.
+    pub protocol: Protocol,
     /// The server, by name or address.
     pub host: String,
     /// Its port; 445 unless the URL says otherwise.
@@ -91,9 +114,15 @@ impl Share {
         password: Option<&str>,
         domain: Option<&str>,
     ) -> Result<Share, String> {
-        let rest = url
-            .strip_prefix("smb://")
-            .ok_or_else(|| format!("{url}: a share starts with smb://"))?;
+        let (protocol, rest) = if let Some(r) = url.strip_prefix("smb://") {
+            (Protocol::Smb2, r)
+        } else if let Some(r) = url.strip_prefix("smb1://") {
+            (Protocol::Smb1, r)
+        } else {
+            return Err(format!(
+                "{url}: a share starts with smb:// or smb1://"
+            ));
+        };
         let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
         if authority.is_empty() {
             return Err(format!("{url}: no server named"));
@@ -128,6 +157,7 @@ impl Share {
             None => format!("{share} on {host}"),
         };
         Ok(Share {
+            protocol,
             host: host.to_string(),
             port,
             share,
@@ -140,7 +170,7 @@ impl Share {
     /// The URI of `path` within the share (`a/b/file.flac`, or empty
     /// for the share's root).
     pub fn uri(&self, path: &str) -> String {
-        let mut s = format!("smb://{}", self.host);
+        let mut s = format!("{}://{}", self.protocol.scheme(), self.host);
         if self.port != PORT {
             let _ = write!(s, ":{}", self.port);
         }
@@ -162,13 +192,108 @@ impl Share {
         }
     }
 
-    /// Whether `uri` is on this share: same server, port and share.
+    /// Connect in the share's protocol.
+    fn connect(&self) -> Result<Link, Error> {
+        Ok(match self.protocol {
+            Protocol::Smb2 => Link::V2(Session::connect(&self.config())?),
+            Protocol::Smb1 => Link::V1(smb1::Session::connect(&self.config())?),
+        })
+    }
+
+    /// Whether `uri` is on this share: same protocol, server, port and
+    /// share.
     fn holds(&self, uri: &str) -> Option<String> {
         let other = Share::parse(uri, None, None, None).ok()?;
-        (other.host.eq_ignore_ascii_case(&self.host)
+        (other.protocol == self.protocol
+            && other.host.eq_ignore_ascii_case(&self.host)
             && other.port == self.port
             && other.share.eq_ignore_ascii_case(&self.share))
         .then_some(other.folder)
+    }
+}
+
+/// A session in either family, behind the four calls a listing and a
+/// reader make.
+pub enum Link {
+    /// SMB 2.x.
+    V2(Session),
+    /// SMB1.
+    V1(smb1::Session),
+}
+
+/// An open file on either.
+#[derive(Debug, Clone, Copy)]
+pub enum LinkFile {
+    /// On SMB 2.x.
+    V2(smb2::File),
+    /// On SMB1.
+    V1(smb1::File),
+}
+
+impl LinkFile {
+    /// The file's length.
+    pub fn size(&self) -> u64 {
+        match self {
+            LinkFile::V2(f) => f.size,
+            LinkFile::V1(f) => f.size,
+        }
+    }
+}
+
+impl Link {
+    /// The dialect for the log: `0x0210`, or `NT LM 0.12`.
+    pub fn dialect(&self) -> String {
+        match self {
+            Link::V2(s) => format!("{:#06x}", s.dialect),
+            Link::V1(_) => "NT LM 0.12".into(),
+        }
+    }
+
+    /// Whether the session is a guest's.
+    pub fn guest(&self) -> bool {
+        match self {
+            Link::V2(s) => s.guest,
+            Link::V1(s) => s.guest,
+        }
+    }
+
+    /// The entries of the folder at `path`.
+    pub fn list(&mut self, path: &str) -> Result<Vec<smb2::DirEntry>, Error> {
+        match self {
+            Link::V2(s) => s.list(path),
+            Link::V1(s) => s.list(path),
+        }
+    }
+
+    /// Open the file at `path`.
+    pub fn open(&mut self, path: &str) -> Result<LinkFile, Error> {
+        match self {
+            Link::V2(s) => s.open(path).map(LinkFile::V2),
+            Link::V1(s) => s.open(path).map(LinkFile::V1),
+        }
+    }
+
+    /// Read from `file` at `offset`.
+    pub fn read(
+        &mut self,
+        file: &LinkFile,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Error> {
+        match (self, file) {
+            (Link::V2(s), LinkFile::V2(f)) => s.read(f, offset, buf),
+            (Link::V1(s), LinkFile::V1(f)) => s.read(f, offset, buf),
+            _ => Err(Error::Malformed("a file of the other protocol")),
+        }
+    }
+
+    /// Close `file`.
+    pub fn close_file(&mut self, file: &LinkFile) -> Result<(), Error> {
+        match (self, file) {
+            (Link::V2(s), LinkFile::V2(f)) => s.close_file(f),
+            (Link::V1(s), LinkFile::V1(f)) => s.close_file(f),
+            _ => Err(Error::Malformed("a file of the other protocol")),
+        }
     }
 }
 
@@ -216,7 +341,7 @@ pub fn decode_path(path: &str) -> String {
 /// The SMB source.
 pub struct SourceSmb {
     shares: Vec<Share>,
-    sessions: Vec<Option<Session>>,
+    sessions: Vec<Option<Link>>,
     announced: Vec<SubjectId>,
 }
 
@@ -328,14 +453,14 @@ impl SourceSmb {
     fn with_session<T>(
         &mut self,
         index: usize,
-        mut f: impl FnMut(&mut Session) -> Result<T, Error>,
+        mut f: impl FnMut(&mut Link) -> Result<T, Error>,
     ) -> Result<T, Error> {
         for attempt in 0..2 {
             if self.sessions[index].is_none() {
                 let share = &self.shares[index];
-                let session = Session::connect(&share.config())?;
+                let session = share.connect()?;
                 info!(
-                    "smb: {} on {} as {}: dialect {:#06x}{}",
+                    "smb: {} on {} as {}: dialect {}{}",
                     share.share,
                     share.host,
                     share
@@ -343,8 +468,8 @@ impl SourceSmb {
                         .as_ref()
                         .map(|c| c.user.as_str())
                         .unwrap_or("guest"),
-                    session.dialect,
-                    if session.guest {
+                    session.dialect(),
+                    if session.guest() {
                         ", a guest session"
                     } else {
                         ""
@@ -382,7 +507,7 @@ impl SourceSmb {
 
 /// The rate and length a file's header states, from its first bytes.
 fn peek(
-    session: &mut Session,
+    session: &mut Link,
     path: &str,
     name: &str,
 ) -> Result<(Option<u32>, Option<u64>), Error> {
@@ -440,23 +565,36 @@ impl Respondent for SourceSmb {
     }
 }
 
-/// Opens `smb://` files for the playback plugin, with the shares'
-/// credentials where a URI is on a configured share, as a guest
-/// otherwise. One session per open file, on the reader's own thread.
+/// Opens `smb://` (or, as [`SmbOpener::smb1`], `smb1://`) files for
+/// the playback plugin, with the shares' credentials where a URI is on
+/// a configured share, as a guest otherwise. One session per open
+/// file, on the reader's own thread.
 pub struct SmbOpener {
     shares: Vec<Share>,
+    protocol: Protocol,
 }
 
 impl SmbOpener {
-    /// An opener with the shares' credentials to hand.
+    /// The `smb://` opener, with the shares' credentials to hand.
     pub fn new(shares: Vec<Share>) -> Self {
-        Self { shares }
+        Self {
+            shares,
+            protocol: Protocol::Smb2,
+        }
+    }
+
+    /// The `smb1://` opener, for the shares named so.
+    pub fn smb1(shares: Vec<Share>) -> Self {
+        Self {
+            shares,
+            protocol: Protocol::Smb1,
+        }
     }
 }
 
 impl FileOpener for SmbOpener {
     fn scheme(&self) -> &str {
-        SCHEME
+        self.protocol.scheme()
     }
 
     fn open(&self, uri: &str) -> Result<Box<dyn ByteFile>, String> {
@@ -472,7 +610,11 @@ impl FileOpener for SmbOpener {
                 (s, path)
             }
         };
-        let mut session = Session::connect(&share.config())
+        if share.protocol != self.protocol {
+            return Err(format!("{uri}: not this opener's protocol"));
+        }
+        let mut session = share
+            .connect()
             .map_err(|e| format!("{}: {e}", share.host))?;
         let file = session.open(&path).map_err(|e| {
             format!("{}: {e}", path.rsplit('/').next().unwrap_or(&path))
@@ -483,13 +625,13 @@ impl FileOpener for SmbOpener {
 
 /// An open file on a share.
 struct SmbFile {
-    session: Session,
-    file: smb2::File,
+    session: Link,
+    file: LinkFile,
 }
 
 impl ByteFile for SmbFile {
     fn length(&self) -> u64 {
-        self.file.size
+        self.file.size()
     }
 
     fn read_at(
@@ -597,10 +739,11 @@ mod tests {
         let share =
             Share::parse(&url, user.as_deref(), password.as_deref(), None)
                 .unwrap();
-        let mut session = Session::connect(&share.config()).unwrap();
+        let mut session = share.connect().unwrap();
         eprintln!(
-            "connected: dialect {:#06x}, server {:?}, guest {}",
-            session.dialect, session.server_name, session.guest
+            "connected: dialect {}, guest {}",
+            session.dialect(),
+            session.guest()
         );
         let entries = session.list(&share.folder).unwrap();
         for e in &entries {
@@ -621,21 +764,23 @@ mod tests {
             format!("{}/{}", share.folder, first.name)
         };
         let file = session.open(&path).unwrap();
-        assert_eq!(file.size, first.size);
+        assert_eq!(file.size(), first.size);
         let mut head = [0u8; 64];
         let n = session.read(&file, 0, &mut head).unwrap();
         assert_eq!(n, 64);
         let facts = facts_from_header(&first.name, &head);
         eprintln!(
             "  {}: {} bytes, header says {:?}",
-            first.name, file.size, facts
+            first.name,
+            file.size(),
+            facts
         );
         let mut mid = vec![0u8; 70_000];
-        let n = session.read(&file, file.size / 2, &mut mid).unwrap();
-        assert_eq!(n, 65_536, "one credit's worth");
-        let n = session.read(&file, file.size - 10, &mut mid).unwrap();
+        let n = session.read(&file, file.size() / 2, &mut mid).unwrap();
+        assert!(n >= 16_000, "a chunk's worth, got {n}");
+        let n = session.read(&file, file.size() - 10, &mut mid).unwrap();
         assert_eq!(n, 10);
-        let n = session.read(&file, file.size, &mut mid).unwrap();
+        let n = session.read(&file, file.size(), &mut mid).unwrap();
         assert_eq!(n, 0);
         session.close_file(&file).unwrap();
     }

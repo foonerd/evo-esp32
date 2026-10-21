@@ -136,7 +136,21 @@ impl Session {
             server_name: String::new(),
             guest: false,
         };
-        let negotiated = s.negotiate()?;
+        let negotiated = s.negotiate().map_err(|e| match e {
+            // An SMB1-only server drops the connection on an SMB2
+            // negotiate rather than answering it.
+            Error::Io(detail)
+                if detail.contains("closed")
+                    || detail.contains("fill whole buffer")
+                    || detail.contains("reset") =>
+            {
+                Error::Auth(
+                    "no answer to SMB2: an SMB1-only box? name it smb1://"
+                        .into(),
+                )
+            }
+            other => other,
+        })?;
         s.session_setup(cfg, &negotiated)?;
         s.tree_connect(&cfg.host, &cfg.share)?;
         Ok(s)
@@ -565,7 +579,7 @@ struct Negotiated {
     server_time: u64,
 }
 
-fn resolve(host: &str, port: u16) -> Result<SocketAddr, Error> {
+pub(crate) fn resolve(host: &str, port: u16) -> Result<SocketAddr, Error> {
     let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|e| Error::Io(format!("{host}: {e}")))?

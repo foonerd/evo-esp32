@@ -245,6 +245,59 @@ fn ntowf_v2(user: &str, password: &str, domain: &str) -> [u8; 16] {
     hmac_md5(&nt_hash, &[&utf16le(&ident)])
 }
 
+/// The NTLMv2 responses for a session setup that carries them in its
+/// own fields (SMB1 without extended security): against the
+/// negotiate's `server_challenge`, with a target info naming the
+/// server's `domain`.
+pub struct ClassicV2 {
+    /// The LMv2 response, 24 bytes.
+    pub lm_response: Vec<u8>,
+    /// The NTLMv2 response: the proof and the blob it was made over.
+    pub nt_response: Vec<u8>,
+    /// The session base key.
+    pub session_key: [u8; 16],
+}
+
+pub fn classic_v2(
+    creds: &Credentials,
+    server_challenge: &[u8; 8],
+    domain: &str,
+    timestamp: u64,
+    client_challenge: [u8; 8],
+) -> ClassicV2 {
+    let ntowf = ntowf_v2(&creds.user, &creds.password, &creds.domain);
+    let mut info = Vec::new();
+    if !domain.is_empty() {
+        let d = utf16le(domain);
+        info.extend_from_slice(&2u16.to_le_bytes());
+        info.extend_from_slice(&(d.len() as u16).to_le_bytes());
+        info.extend_from_slice(&d);
+    }
+    info.extend_from_slice(&[0u8; 4]);
+    let mut temp = Vec::with_capacity(32 + info.len());
+    temp.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 0]);
+    temp.extend_from_slice(&timestamp.to_le_bytes());
+    temp.extend_from_slice(&client_challenge);
+    temp.extend_from_slice(&[0; 4]);
+    temp.extend_from_slice(&info);
+    temp.extend_from_slice(&[0; 4]);
+    let nt_proof = hmac_md5(&ntowf, &[&server_challenge[..], &temp]);
+    let mut nt_response = Vec::with_capacity(16 + temp.len());
+    nt_response.extend_from_slice(&nt_proof);
+    nt_response.extend_from_slice(&temp);
+    let mut lm_response = Vec::with_capacity(24);
+    lm_response.extend_from_slice(&hmac_md5(
+        &ntowf,
+        &[&server_challenge[..], &client_challenge],
+    ));
+    lm_response.extend_from_slice(&client_challenge);
+    ClassicV2 {
+        lm_response,
+        nt_response,
+        session_key: hmac_md5(&ntowf, &[&nt_proof]),
+    }
+}
+
 fn hmac_md5(key: &[u8], parts: &[&[u8]]) -> [u8; 16] {
     let mut mac =
         HmacMd5::new_from_slice(key).expect("HMAC takes any key length");
