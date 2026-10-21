@@ -1,0 +1,25 @@
+[package]
+name = "org-evoframework-source-smb"
+description = "A source over SMB shares on the network: a client for SMB 2.0.2 and 2.1 in plain Rust (NTLMv2 under SPNEGO, HMAC-SHA256 signing), the share's folders listed and its files read by position, so the decoder seeks for free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+org-evoframework-source-files = { path = "../org.evoframework.source.files" }
+log = "0.4"
+md4 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.4"
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }

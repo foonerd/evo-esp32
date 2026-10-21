@@ -196,10 +196,19 @@ impl SourceFiles {
 /// with a rate ceiling cannot play without opening anything.
 pub fn header_facts(path: &Path) -> Option<(Option<u32>, Option<u64>)> {
     use std::io::Read;
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let name = path.file_name()?.to_str()?;
     let mut head = [0u8; 64];
     let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
-    let head = &head[..n];
+    facts_from_header(name, &head[..n])
+}
+
+/// [`header_facts`] from a file's first bytes already in hand: for a
+/// file read over the network, where the source does the reading.
+pub fn facts_from_header(
+    name: &str,
+    head: &[u8],
+) -> Option<(Option<u32>, Option<u64>)> {
+    let ext = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
         "flac" => flac_streaminfo(head),
         "wav" => wav_fmt(head),
