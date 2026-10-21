@@ -6,6 +6,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- NFS exports in the library. A new source plugin,
+  `plugins/org.evoframework.source.nfs`, lists the exports the card
+  names (`share = nfs://host/export/folder`) and reads their files,
+  with an NFS version 3 client written here in plain `std::net`:
+  SunRPC over TCP with record marking, AUTH_SYS as an ordinary user,
+  the portmapper asked for mountd and nfsd (or the URL's port for
+  both, as a userspace server runs them), MOUNT3 mounting the longest
+  path the server will give out and looking the rest up (a NAS
+  exports a volume; the folder named below it is walked), FSINFO for
+  the read size, READDIRPLUS with READDIR and LOOKUP where a server
+  has no PLUS, READ by offset so a seek is the next read. An export
+  marked `secure` — the usual default — takes mounts only from ports
+  below 1024: the plugin takes a dialer from the distribution, and the
+  firmware's binds a reserved port, which the chip may; a desktop
+  without the privilege connects the ordinary way and such an export
+  says "access denied". The Network page lists exports beside the
+  media servers and SMB shares. The host tool's `--share` takes
+  `nfs://` too. Measured on the desk against a userspace server
+  (unfs3): list, reads at the head, the middle, the tail and the end;
+  a FLAC opened from 30 s lands to the second. On the device, a
+  Synology's export mounted from the folder named below the volume.
+
 - SMB1 for the old box in the kitchen, by name only. A share written
   `smb1://host/share` is spoken in NT LM 0.12 (Unicode, 32-bit
   status, NTLMv2 under SPNEGO where the server has extended security
@@ -29,7 +51,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interim notices a slow server sends; nothing linked, the same code
   on the device and the host. SMB1 is never spoken on an `smb://`
   share, so an old box cannot be reached by a downgrade — `smb1://` is
-  its own name (above), as `nfs://` will be. The SDK gains the shape a share's
+  its own name (above), as `nfs://` is. The SDK gains the shape a share's
   file reads as (`ByteFile`: a length and reads by position) and the
   opener a distribution hands the decoder per scheme (`FileOpener`);
   the Symphonia plugin reads such a file through its read-ahead ring,
