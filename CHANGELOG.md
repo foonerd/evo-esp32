@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The network's media servers in the library. A new source plugin,
+  `plugins/org.evoframework.source.dlna`, finds the DLNA (UPnP AV)
+  media servers on the network and lists them as trees of folders and
+  tracks: SSDP discovery on its own thread (a 2.5 s search every
+  minute, every 15 s while none has answered), the device description
+  read for the server's name and ContentDirectory control address,
+  and `Browse` over SOAP for the folders, 200 objects a page, each
+  item's title, artist, album, duration, art and the address of its
+  first audio resource. It is written to the SDK's `source` contract
+  like the files plugin — paths are `udn` or `udn|object-id` — so the
+  decoder plays what it lists like a server's file (Stage 1): with
+  the progress ring, seek, and the queue's modes. Plain Rust on
+  `std`, nothing linked: the plugin runs on the device and the host
+  alike. The firmware stocks a `dlna` shelf, and the library page's
+  root is now the list of sources, Card and Network: Network lists
+  the servers found, a server its folders, and the header carries the
+  folder's name as the server listed it; the page asks again every
+  2 s while the search is out and no server has answered. The host
+  tool gains `--dlna NAME` (play the first track found walking that
+  server's folders, folders called Music first) and `--iface ADDR`
+  for a host with several interfaces. Measured on the desk against a
+  MiniDLNA: three servers found in 2.5 s, a FLAC item opened from 20 s
+  lands to the second; on the device, the three servers found 5 s
+  after the Wi-Fi came up.
+
 - Files on a server play and seek like the card's. A track reached
   over HTTP is a file when the server gives its length and does
   ranges (a DLNA server's item, a share behind a web server), and a
