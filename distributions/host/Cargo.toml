@@ -23,6 +23,7 @@ org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delive
 org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia" }
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
 org-evoframework-source-dlna = { path = "../../plugins/org.evoframework.source.dlna" }
+org-evoframework-source-smb = { path = "../../plugins/org.evoframework.source.smb" }
 serde_json = { workspace = true, features = ["std"] }
 
 [build-dependencies]

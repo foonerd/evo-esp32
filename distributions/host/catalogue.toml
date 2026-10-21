@@ -19,6 +19,11 @@ name = "dlna"
 shape = 1
 description = "The DLNA media servers on the network, found by SSDP and browsed through ContentDirectory; their tracks play over HTTP."
 
+[[racks.shelves]]
+name = "smb"
+shape = 1
+description = "SMB shares named in the configuration, each a tree of folders and audio files read by position."
+
 [[racks]]
 name = "playback"
 family = "domain"

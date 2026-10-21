@@ -45,6 +45,7 @@ use org_evoframework_delivery_null::DeliveryNull;
 use org_evoframework_playback_symphonia::PlaybackSymphonia;
 use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::SourceFiles;
+use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
 use sink::PacedWav;
 
 mod generated {
@@ -106,6 +107,10 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
                     those called Music first
   --iface ADDR      the address of the interface the search goes out of,
                     on a host with several
+  --share URL       a network share, smb://host/share[/folder]; with
+                    --share-user and --share-password where it needs them.
+                    --play-share plays its first track found walking it
+  --play-share      play from the share rather than the directory
   --seconds N       how long to run (default 5)
   --start MS        start the track this many milliseconds in (a seek at open)
   --panel PATH      write the panel's last frame as a PNG
@@ -125,6 +130,10 @@ struct Cli {
     dir: PathBuf,
     dlna: Option<String>,
     iface: Option<std::net::Ipv4Addr>,
+    share: Option<String>,
+    share_user: Option<String>,
+    share_password: Option<String>,
+    play_share: bool,
     seconds: u64,
     start_ms: u64,
     panel: Option<PathBuf>,
@@ -142,6 +151,10 @@ fn parse_args() -> Result<Cli, String> {
         dir: PathBuf::from("."),
         dlna: None,
         iface: None,
+        share: None,
+        share_user: None,
+        share_password: None,
+        play_share: false,
         seconds: 5,
         start_ms: 0,
         panel: None,
@@ -163,12 +176,19 @@ fn parse_args() -> Result<Cli, String> {
             cli.sheet = true;
             continue;
         }
+        if flag == "--play-share" {
+            cli.play_share = true;
+            continue;
+        }
         let value = args
             .next()
             .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?;
         match flag.as_str() {
             "--dir" => cli.dir = PathBuf::from(value),
             "--dlna" => cli.dlna = Some(value),
+            "--share" => cli.share = Some(value),
+            "--share-user" => cli.share_user = Some(value),
+            "--share-password" => cli.share_password = Some(value),
             "--iface" => {
                 cli.iface = Some(value.parse().map_err(|_| {
                     format!("--iface must be an IPv4 address, got {value:?}")
@@ -232,6 +252,7 @@ fn descriptions(dir: &std::path::Path) -> Vec<PluginDescription> {
     vec![
         SourceFiles::new(dir).describe(),
         SourceDlna::new().describe(),
+        SourceSmb::new(Vec::new()).describe(),
         PlaybackSymphonia::new(Box::new(PacedWav::new(None))).describe(),
         DeliveryNull::new().describe(),
     ]
@@ -242,6 +263,7 @@ fn descriptions(dir: &std::path::Path) -> Vec<PluginDescription> {
 fn bring_up(
     dir: &std::path::Path,
     iface: Option<std::net::Ipv4Addr>,
+    shares: Vec<Share>,
     wav: Option<PathBuf>,
     now: Ticks,
 ) -> Result<Steward, String> {
@@ -265,10 +287,14 @@ fn bring_up(
         )
         .map_err(|e| e.to_string())?;
     steward
+        .admit_respondent(Box::new(SourceSmb::new(shares.clone())), now)
+        .map_err(|e| e.to_string())?;
+    steward
         .admit_warden(
             Box::new(
                 PlaybackSymphonia::new(Box::new(PacedWav::new(wav)))
-                    .with_opener(Box::new(http::PlainHttp)),
+                    .with_opener(Box::new(http::PlainHttp))
+                    .with_file_opener(Box::new(SmbOpener::new(shares))),
             ),
             now,
         )
@@ -544,8 +570,23 @@ fn main() {
         return;
     }
 
+    let shares = match &cli.share {
+        Some(url) => match Share::parse(
+            url,
+            cli.share_user.as_deref(),
+            cli.share_password.as_deref(),
+            None,
+        ) {
+            Ok(s) => vec![s],
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+        None => Vec::new(),
+    };
     let mut steward =
-        match bring_up(&cli.dir, cli.iface, cli.wav.clone(), now()) {
+        match bring_up(&cli.dir, cli.iface, shares, cli.wav.clone(), now()) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("{e}");
@@ -562,7 +603,24 @@ fn main() {
             .join(", ")
     );
 
-    let track = if let Some(name) = &cli.dlna {
+    let track = if cli.play_share {
+        match first_track(
+            &mut steward,
+            shelf::source_smb(),
+            String::new(),
+            now(),
+        ) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                eprintln!("no track found on the share");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    } else if let Some(name) = &cli.dlna {
         // The search runs on its thread; a server takes a couple of
         // seconds to answer.
         let server = match dlna_server(&mut steward, name, now()) {
@@ -758,7 +816,8 @@ mod tests {
         sink::write_tone(&dir.join("song.wav"), 8000, 300).unwrap();
         let heard = dir.join("heard.wav");
         let mut s =
-            bring_up(&dir, None, Some(heard.clone()), Ticks(0)).unwrap();
+            bring_up(&dir, None, Vec::new(), Some(heard.clone()), Ticks(0))
+                .unwrap();
         let track =
             first_track(&mut s, shelf::source_files(), String::new(), Ticks(0))
                 .unwrap()
