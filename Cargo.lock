@@ -176,6 +176,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-volumio"
+version = "0.1.1"
+dependencies = [
+ "log",
+ "serde_json",
+]
+
+[[package]]
 name = "extended"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

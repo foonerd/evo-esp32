@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The player as a Volumio device. `distributions/volumio`
+  (`evo-esp32-volumio`) speaks what Volumio devices speak to each
+  other, socket.io 2 over Engine.IO 3, on its HTTP long-polling
+  transport in plain std: a server on port 3000 for the Volumio that
+  finds the player (announced as `_Volumio._tcp` with `volumioName`,
+  `UUID` and `type=device`), answering `getState` and
+  `getMultiroomSyncOutput` and pushing both on every change, and a
+  client session back to each Volumio that connects, so a leader's
+  `enableMultiroomSyncOutput` and `disableMultiroomSyncOutput`
+  broadcasts reach it; the firmware then points the Snapcast receiver
+  at the leader's server, or back at the card's or the search's. The
+  player appears in Volumio's Multiroom with its name, what plays, and
+  no volume slider (the volume is the player's own). Its tile is the
+  cover of what plays, served by the same server, or the evo tile
+  when there is none. Payloads are read either way the reference
+  implementations frame them; a peer's queue pushes are passed over
+  unread. The player does not search for Volumio devices itself: a
+  query for a service type one also advertises makes avahi (which
+  Volumio runs) expire its record of it within two minutes (RFC 6762
+  §10.5, passive observation of failure), measured on the bench.
+  `CONFIG_LWIP_MAX_SOCKETS` goes to 16 for the held polls; the
+  heartbeat gains the link's band, channel, signal and power-save
+  state.
+
 - The device as a client of a Snapcast server.
   `plugins/org.evoframework.snapcast.receiver` stocks the new
   `playback/snapcast` shelf: the binary protocol (`wire`), FLAC frames

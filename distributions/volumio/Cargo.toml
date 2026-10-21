@@ -1,0 +1,16 @@
+[package]
+name = "evo-esp32-volumio"
+description = "The player as a Volumio device on the network: announced where Volumio looks, listed in Volumio's Multiroom with its state, and put into a group from Volumio's side. Volumio's peers speak socket.io 2 over Engine.IO 3; this crate speaks the HTTP long-polling transport of it in plain std, as a server for the peers that come and as a client to each peer found, so a peer's broadcasts reach it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+log = "0.4"
+serde_json = { version = "1", default-features = false, features = ["std"] }
