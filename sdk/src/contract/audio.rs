@@ -136,6 +136,12 @@ pub struct Track {
     /// set, a distribution looks where it will (the folder's cover).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub art: Option<String>,
+    /// A live stream, a station: no end and no seek, and the queue's
+    /// modes do not apply. The source says so (a playlist's entry with
+    /// no duration); a network file a server lists (a DLNA item, a share)
+    /// is not live, whatever its scheme.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub live: bool,
 }
 
 /// The subject kind a source announces a track under.
@@ -340,6 +346,22 @@ pub mod playback {
         /// Open `uri` for reading, asking the server for the stream's
         /// metadata where the protocol has it (`Icy-MetaData: 1`).
         fn open(&self, uri: &str) -> Result<Box<dyn ByteStream>, String>;
+        /// Open `uri` for reading from `offset` bytes in (HTTP's
+        /// `Range: bytes=offset-`), for a file that seeks. A server that
+        /// answers from the start instead is an error here, not a stream
+        /// from the wrong place. The default knows only offset zero.
+        fn open_at(
+            &self,
+            uri: &str,
+            offset: u64,
+        ) -> Result<Box<dyn ByteStream>, String> {
+            if offset == 0 {
+                return self.open(uri);
+            }
+            Err(alloc::format!(
+                "{uri}: this transport cannot open at an offset"
+            ))
+        }
     }
 }
 
@@ -437,6 +459,7 @@ mod tests {
             duration_ms: Some(1000),
             sample_rate: None,
             art: None,
+            live: false,
         };
         let v = to_value(&t);
         // Value maps sort their keys; the unknown fields are absent.

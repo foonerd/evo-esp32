@@ -260,6 +260,7 @@ mod tests {
             duration_ms: ms,
             sample_rate: None,
             art: None,
+            live: false,
         }
     }
 

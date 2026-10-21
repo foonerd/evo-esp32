@@ -413,8 +413,8 @@ fn main() -> anyhow::Result<()> {
     // The card's files are the queue unless `start` names something
     // else; stations have no end, so the card's run leaves them out and
     // a tap in the library plays one.
-    let stations = tracks.iter().filter(|t| is_stream(t)).count();
-    tracks.retain(|t| !is_stream(t));
+    let stations = tracks.iter().filter(|t| t.live).count();
+    tracks.retain(|t| !t.live);
     let card_tracks = tracks.len();
     // SAFETY: esp_random reads the hardware RNG; no preconditions.
     let seed = unsafe {
@@ -440,12 +440,12 @@ fn main() -> anyhow::Result<()> {
                     items.len(),
                     at.map_or("the first".to_string(), |i| format!("#{i}"))
                 );
-                let station = at
+                let from_network = at
                     .and_then(|i| items.get(i))
                     .or(items.first())
-                    .is_some_and(is_stream);
+                    .is_some_and(needs_network);
                 queue.set(items, at);
-                if station && net.is_some() {
+                if from_network && net.is_some() {
                     start_when_up = true;
                 }
             }
@@ -1232,7 +1232,7 @@ fn main() -> anyhow::Result<()> {
                 // and anything the listener let go of, moves on.
                 let on_its_own = current.is_some();
                 let ended_station =
-                    on_its_own && queue.current().is_some_and(is_stream);
+                    on_its_own && queue.current().is_some_and(|t| t.live);
                 if ended_station {
                     let title = queue.current().map(|t| t.title.clone());
                     let title = title.unwrap_or_default();
@@ -1736,7 +1736,7 @@ fn advance(
             );
             continue;
         }
-        if is_stream(&track) {
+        if track.live {
             memory("before the station");
         }
         match play(steward, &track, now, level) {
@@ -1744,7 +1744,7 @@ fn advance(
                 *notice = None;
                 return Some(handle);
             }
-            Err(why) if is_stream(&track) => {
+            Err(why) if track.live => {
                 *notice = Some(format!("{}: {}", track.title, plain(&why)));
                 return None;
             }
@@ -1814,7 +1814,7 @@ fn starting_point(
         },
     };
     let mut items = list_tracks(steward, &folder, now)?;
-    items.retain(|t| !is_stream(t));
+    items.retain(|t| !t.live);
     if items.is_empty() {
         return Err(format!("{path}: nothing to play in it"));
     }
@@ -1865,8 +1865,9 @@ fn background(face: &Face) -> u16 {
     evo_esp32_face::art::raw(face.theme().background)
 }
 
-/// A track from the network rather than the card.
-fn is_stream(track: &Track) -> bool {
+/// A track reached over the network, station or file: it waits for the
+/// link.
+fn needs_network(track: &Track) -> bool {
     track.uri.starts_with("http://") || track.uri.starts_with("https://")
 }
 

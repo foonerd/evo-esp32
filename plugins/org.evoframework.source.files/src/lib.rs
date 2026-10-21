@@ -135,6 +135,7 @@ impl SourceFiles {
                     duration_ms,
                     sample_rate,
                     art: None,
+                    live: false,
                 });
             } else if is_playlist(&name) {
                 folders.push((title_of(&name), rel));
@@ -257,44 +258,51 @@ pub fn is_playlist(name: &str) -> bool {
         })
 }
 
-/// The stations a playlist names: its `http://` and `https://` entries,
-/// in order, each a [`Track`] with no length (a stream has none) and
-/// the playlist's name as its album. M3U: a `#EXTINF:-1,Title` line
-/// titles the URL on the next line, and a `tvg-logo="…"` attribute on
-/// it (the IPTV convention) names the station's picture, by URL or by
-/// a path on the card relative to the playlist's folder `dir`; PLS:
-/// `FileN=` and `TitleN=` pairs. A local path in a playlist is not a
-/// station and is left out; an entry without a title is titled by its
-/// host.
+/// The entries a playlist names: its `http://` and `https://` entries,
+/// in order, each a [`Track`] with the playlist's name as its album. An
+/// entry with no length (`#EXTINF:-1`, `LengthN=-1`, or none) is a
+/// station: live, no end; one with a length in seconds is a file on a
+/// server, with that duration. M3U: a `#EXTINF:-1,Title` line titles
+/// the URL on the next line, and a `tvg-logo="…"` attribute on it (the
+/// IPTV convention) names the station's picture, by URL or by a path on
+/// the card relative to the playlist's folder `dir`; PLS: `FileN=`,
+/// `TitleN=` and `LengthN=` by number. A local path in a playlist is
+/// left out; an entry without a title is titled by its host.
 pub fn stations(text: &str, playlist: &str, dir: &Path) -> Vec<Track> {
     let text = text.trim_start_matches('\u{feff}');
     let is_pls = text
         .lines()
         .next()
         .is_some_and(|l| l.trim().eq_ignore_ascii_case("[playlist]"));
-    let station = |uri: &str, title: Option<&str>, logo: Option<&str>| {
+    let entry = |uri: &str,
+                 title: Option<&str>,
+                 logo: Option<&str>,
+                 seconds: Option<i64>| {
         let title = title
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| host_of(uri));
+        let length = seconds.filter(|&s| s > 0);
         Track {
             uri: uri.to_string(),
             title,
             artist: None,
             album: Some(playlist.to_string()),
-            duration_ms: None,
+            duration_ms: length.map(|s| s as u64 * 1000),
             sample_rate: None,
             art: logo.map(|l| art_uri(l, dir)),
+            live: length.is_none(),
         }
     };
     let is_stream =
         |u: &str| u.starts_with("http://") || u.starts_with("https://");
     let mut out = Vec::new();
     if is_pls {
-        // FileN and TitleN may come in any order; pair them by N.
+        // FileN, TitleN and LengthN may come in any order; pair them by N.
         let mut files: Vec<(usize, String)> = Vec::new();
         let mut titles: Vec<(usize, String)> = Vec::new();
+        let mut lengths: Vec<(usize, i64)> = Vec::new();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
@@ -309,6 +317,12 @@ pub fn stations(text: &str, playlist: &str, dir: &Path) -> Vec<Track> {
                 key.strip_prefix("Title").and_then(|n| n.parse().ok())
             {
                 titles.push((n, value.to_string()));
+            } else if let Some(n) =
+                key.strip_prefix("Length").and_then(|n| n.parse().ok())
+            {
+                if let Ok(s) = value.parse() {
+                    lengths.push((n, s));
+                }
             }
         }
         files.sort_by_key(|(n, _)| *n);
@@ -318,11 +332,14 @@ pub fn stations(text: &str, playlist: &str, dir: &Path) -> Vec<Track> {
                     .iter()
                     .find(|(m, _)| *m == n)
                     .map(|(_, t)| t.as_str());
-                out.push(station(&uri, title, None));
+                let seconds =
+                    lengths.iter().find(|(m, _)| *m == n).map(|(_, s)| *s);
+                out.push(entry(&uri, title, None, seconds));
             }
         }
     } else {
-        let mut pending: Option<(Option<String>, Option<String>)> = None;
+        let mut pending: Option<(Option<String>, Option<String>, Option<i64>)> =
+            None;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() {
@@ -334,8 +351,14 @@ pub fn stations(text: &str, playlist: &str, dir: &Path) -> Vec<Track> {
                 continue;
             } else {
                 if is_stream(line) {
-                    let (title, logo) = pending.take().unwrap_or_default();
-                    out.push(station(line, title.as_deref(), logo.as_deref()));
+                    let (title, logo, seconds) =
+                        pending.take().unwrap_or_default();
+                    out.push(entry(
+                        line,
+                        title.as_deref(),
+                        logo.as_deref(),
+                        seconds,
+                    ));
                 }
                 pending = None;
             }
@@ -344,11 +367,12 @@ pub fn stations(text: &str, playlist: &str, dir: &Path) -> Vec<Track> {
     out
 }
 
-/// What follows `#EXTINF:`: `(title, logo)`. The title is what comes
-/// after the first comma outside quotes (`-1 tvg-logo="a,b.png",Title`
-/// keeps the comma in the quotes); the logo is the `tvg-logo` attribute
-/// before it, quoted or bare.
-fn extinf(info: &str) -> (Option<String>, Option<String>) {
+/// What follows `#EXTINF:`: `(title, logo, seconds)`. The title is what
+/// comes after the first comma outside quotes (`-1 tvg-logo="a,b.png",
+/// Title` keeps the comma in the quotes); the logo is the `tvg-logo`
+/// attribute before it, quoted or bare; the seconds are the leading
+/// number, `-1` for a stream.
+fn extinf(info: &str) -> (Option<String>, Option<String>, Option<i64>) {
     let mut quoted = false;
     let split = info.char_indices().find_map(|(i, c)| match c {
         '"' => {
@@ -362,6 +386,11 @@ fn extinf(info: &str) -> (Option<String>, Option<String>) {
         Some(i) => (&info[..i], Some(info[i + 1..].to_string())),
         None => (info, None),
     };
+    let seconds = attrs
+        .split([' ', ','])
+        .next()
+        .and_then(|n| n.trim().parse::<f64>().ok())
+        .map(|s| s.round() as i64);
     let logo = attrs.find("tvg-logo=").and_then(|i| {
         let rest = &attrs[i + "tvg-logo=".len()..];
         let value = match rest.strip_prefix('"') {
@@ -373,7 +402,7 @@ fn extinf(info: &str) -> (Option<String>, Option<String>) {
             .filter(|v| !v.is_empty())
             .map(str::to_string)
     });
-    (title, logo)
+    (title, logo, seconds)
 }
 
 /// A logo reference as a URI: a URL as it is, a path on the card as
@@ -631,13 +660,14 @@ mod tests {
 
     #[test]
     fn playlists_name_their_stations() {
-        let m3u = "\u{feff}#EXTM3U\n#EXTINF:-1 tvg-logo=\"logos/rp.png\" group-title=\"Eclectic, mostly\",Radio Paradise\nhttp://stream.radioparadise.com/mp3-128\n\n# a comment\n/music/local.flac\nhttps://ice1.somafm.com/groovesalad-128-mp3\n#EXTINF:-1 tvg-logo=https://kexp.org/logo.png,KEXP\nhttp://live-aacplus-64.kexp.org/kexp64.aac\n";
+        let m3u = "\u{feff}#EXTM3U\n#EXTINF:-1 tvg-logo=\"logos/rp.png\" group-title=\"Eclectic, mostly\",Radio Paradise\nhttp://stream.radioparadise.com/mp3-128\n\n# a comment\n/music/local.flac\nhttps://ice1.somafm.com/groovesalad-128-mp3\n#EXTINF:-1 tvg-logo=https://kexp.org/logo.png,KEXP\nhttp://live-aacplus-64.kexp.org/kexp64.aac\n#EXTINF:243,Money For Nothing\nhttp://nas.local/music/02.flac\n";
         let got = stations(m3u, "Favourites", Path::new("/sdcard/Radio"));
-        assert_eq!(got.len(), 3);
+        assert_eq!(got.len(), 4);
         assert_eq!(got[0].title, "Radio Paradise");
         assert_eq!(got[0].uri, "http://stream.radioparadise.com/mp3-128");
         assert_eq!(got[0].album.as_deref(), Some("Favourites"));
         assert_eq!(got[0].duration_ms, None);
+        assert!(got[0].live, "no length: a station");
         assert_eq!(
             got[0].art.as_deref(),
             Some("file:///sdcard/Radio/logos/rp.png"),
@@ -645,19 +675,25 @@ mod tests {
         );
         assert_eq!(got[1].title, "ice1.somafm.com", "untitled: the host");
         assert_eq!(got[1].art, None);
+        assert!(got[1].live);
         assert_eq!(got[2].title, "KEXP");
         assert_eq!(got[2].art.as_deref(), Some("https://kexp.org/logo.png"));
-        let pls = "[playlist]\nNumberOfEntries=2\nTitle2=Second\nFile1=http://a.example/one\nTitle1=First\nFile2=https://b.example:8000/two\nLength1=-1\n";
+        assert_eq!(got[3].title, "Money For Nothing");
+        assert_eq!(got[3].duration_ms, Some(243_000));
+        assert!(!got[3].live, "a length: a file on a server");
+        let pls = "[playlist]\nNumberOfEntries=2\nTitle2=Second\nFile1=http://a.example/one\nTitle1=First\nFile2=https://b.example:8000/two\nLength1=-1\nLength2=180\n";
         let got = stations(pls, "Radio", Path::new("/sdcard/Radio"));
         assert_eq!(got.len(), 2);
         assert_eq!(
             (got[0].title.as_str(), got[0].uri.as_str()),
             ("First", "http://a.example/one")
         );
+        assert!(got[0].live);
         assert_eq!(
             (got[1].title.as_str(), got[1].uri.as_str()),
             ("Second", "https://b.example:8000/two")
         );
+        assert_eq!((got[1].live, got[1].duration_ms), (false, Some(180_000)));
         assert!(is_playlist("stations.M3U"));
         assert!(is_playlist("x.pls"));
         assert!(!is_playlist("x.mp3"));

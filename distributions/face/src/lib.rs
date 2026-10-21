@@ -71,6 +71,8 @@ pub struct View {
     /// The track's URI, to tell it apart in a list; empty when nothing
     /// is in custody.
     pub uri: String,
+    /// A live stream, a station: no end, no seek, no modes.
+    pub live: bool,
     /// The track's title; empty when nothing is in custody.
     pub title: String,
     /// Its artist, or empty.
@@ -126,6 +128,7 @@ impl View {
                 playback::Status::Paused => Status::Paused,
             },
             uri: track.map(|t| t.uri.clone()).unwrap_or_default(),
+            live: track.is_some_and(|t| t.live),
             title: track.map(|t| t.title.clone()).unwrap_or_default(),
             artist: track.and_then(|t| t.artist.clone()).unwrap_or_default(),
             album: track.and_then(|t| t.album.clone()).unwrap_or_default(),
@@ -169,13 +172,11 @@ impl View {
         line
     }
 
-    /// The station's name when the track is a stream: its album line,
-    /// which the playback plugin keeps for the station's name, else its
-    /// title. None for a file.
+    /// The station's name when the track is a live stream: its album
+    /// line, which the playback plugin keeps for the station's name,
+    /// else its title. None for a file, on the card or on a server.
     pub fn station(&self) -> Option<&str> {
-        if !(self.uri.starts_with("http://")
-            || self.uri.starts_with("https://"))
-        {
+        if !self.live {
             return None;
         }
         Some(if self.album.is_empty() {
@@ -1544,6 +1545,7 @@ mod tests {
                 duration_ms: Some(506_000),
                 sample_rate: None,
                 art: None,
+                live: false,
             }),
             position_ms: 119_000,
             format: Some(playback::Format {
@@ -2052,6 +2054,7 @@ mod tests {
             );
             assert_eq!(face.refresh(&mut display, &view), Ok(Repaint::None));
             view.uri = "http://stream.example/live".to_string();
+            view.live = true;
             assert!(!view.modes());
             assert_eq!(
                 face.refresh_whole(&mut display, &view),
@@ -2068,6 +2071,7 @@ mod tests {
         let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
         let mut view = View::new(&playing(), None, "Card");
         view.uri = "http://stream.example/live".to_string();
+        view.live = true;
         view.album = "Radio Paradise".to_string();
         view.title =
             "A title much too long to fit the width of the panel in one line"
@@ -2097,6 +2101,12 @@ mod tests {
         assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Full));
         assert!(!face.sheet());
         view.uri = "file:///music/a.flac".to_string();
+        view.live = false;
         assert_eq!(view.station(), None);
+        // A file on a server is a track, whatever its scheme.
+        view.uri = "http://nas.local/music/a.flac".to_string();
+        view.duration_ms = Some(243_000);
+        assert_eq!(view.station(), None);
+        assert!(view.modes());
     }
 }
