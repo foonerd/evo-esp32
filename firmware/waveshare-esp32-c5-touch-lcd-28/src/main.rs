@@ -70,7 +70,7 @@ use evo_esp32_face::{
 use evo_esp32_platform_esp_idf::mdns::{Advertiser, Search};
 use evo_esp32_platform_esp_idf::HttpOpener;
 use evo_esp32_queue::{Queue, Repeat};
-use evo_esp32_sdk::catalogue::Catalogue;
+use evo_esp32_sdk::catalogue::{Catalogue, ShelfRef};
 use evo_esp32_sdk::contract::audio::playback::{
     self, Correction, Play, Receive,
 };
@@ -99,6 +99,7 @@ use org_evoframework_playback_symphonia::{CodecRegistry, PlaybackSymphonia};
 use org_evoframework_snapcast_receiver::{
     Link as SnapLink, Settings as SnapSettings, SnapcastReceiver,
 };
+use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::SourceFiles;
 use sink::{I2sSink, RateFollower};
 
@@ -139,6 +140,9 @@ const FACE_TICK: Duration = Duration::from_millis(40);
 const FACE_REST: Duration = Duration::from_millis(100);
 /// How long after a touch the face keeps its quick cadence.
 const FACE_AWAKE: Duration = Duration::from_secs(1);
+/// How often an empty Network page asks the source again for servers
+/// while the search for them is out.
+const SERVERS_TICK: Duration = Duration::from_secs(2);
 /// The panel's rotation, degrees; the companion's default.
 const ROTATION: u16 = 0;
 /// Backlight, 0 to 100.
@@ -537,6 +541,7 @@ fn main() -> anyhow::Result<()> {
     }
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
+    let mut last_servers = Instant::now();
     let mut last_touch = Instant::now() - FACE_AWAKE;
     let mut last_net = Instant::now() - FACE_TICK;
     let mut painting = false;
@@ -680,7 +685,7 @@ fn main() -> anyhow::Result<()> {
                                         browse.open(
                                             &mut steward,
                                             &mut face,
-                                            "",
+                                            None,
                                             t,
                                         );
                                     }
@@ -794,16 +799,10 @@ fn main() -> anyhow::Result<()> {
                                     continue;
                                 }
                                 if entry.folder {
-                                    let path = browse
-                                        .folder_path(&entry.name)
-                                        .unwrap_or_default();
-                                    browse
-                                        .trail
-                                        .push(face.library().path.clone());
-                                    browse.open(
+                                    browse.descend(
                                         &mut steward,
                                         &mut face,
-                                        &path,
+                                        &entry.name,
                                         t,
                                     );
                                 } else if let Some(at) =
@@ -855,14 +854,7 @@ fn main() -> anyhow::Result<()> {
                                 face.show_sheet(false);
                             }
                             Intent::Tap(Hotspot::Back) => {
-                                if let Some(parent) = browse.trail.pop() {
-                                    browse.open(
-                                        &mut steward,
-                                        &mut face,
-                                        &parent,
-                                        t,
-                                    );
-                                }
+                                browse.ascend(&mut steward, &mut face, t);
                             }
                             Intent::Scroll(dy) => face.scroll(dy),
                             Intent::Tap(_)
@@ -1078,6 +1070,14 @@ fn main() -> anyhow::Result<()> {
         };
         if !audio_short && (painting || last_face.elapsed() >= face_tick) {
             last_face = Instant::now();
+            if face.screen() == Screen::Library
+                && browse.waiting_for_servers()
+                && last_servers.elapsed() >= SERVERS_TICK
+            {
+                last_servers = Instant::now();
+                let here = browse.here.clone();
+                browse.open(&mut steward, &mut face, here, t);
+            }
             let output = output_state(&steward);
             if let Some(out) = &output {
                 let now_level = (out.volume, out.muted);
@@ -1383,6 +1383,7 @@ fn catalogue() -> Catalogue {
 fn descriptions() -> Vec<PluginDescription> {
     vec![
         SourceFiles::new(MUSIC).describe(),
+        SourceDlna::new().describe(),
         PlaybackSymphonia::new(Box::new(Silent)).describe(),
         MultiroomReceiver::new(
             Box::new(Silent),
@@ -1435,6 +1436,9 @@ fn bring_up(
         .admit_respondent(Box::new(SourceFiles::new(MUSIC)), now)
         .map_err(|e| e.to_string())?;
     steward
+        .admit_respondent(Box::new(SourceDlna::new()), now)
+        .map_err(|e| e.to_string())?;
+    steward
         .admit_warden(
             Box::new(
                 PlaybackSymphonia::with_codecs(
@@ -1483,7 +1487,7 @@ fn list_tracks(
     let mut tracks = Vec::new();
     let mut pending = vec![root.to_string()];
     while let Some(path) = pending.pop() {
-        let listing = list_folder(steward, &path, now)?;
+        let listing = list_folder(steward, &shelf::source_files(), &path, now)?;
         let depth = path.split('/').filter(|s| !s.is_empty()).count();
         let indent = "  ".repeat(depth);
         let mut folders = Vec::new();
@@ -1513,8 +1517,10 @@ fn list_tracks(
     Ok(tracks)
 }
 
+/// One listing request to a source: the entries of `path` on `source`.
 fn list_folder(
     steward: &mut Steward,
+    source: &ShelfRef,
     path: &str,
     now: Ticks,
 ) -> Result<Listing, String> {
@@ -1522,7 +1528,7 @@ fn list_folder(
         .request(
             &Request {
                 cid: CorrelationId(1),
-                shelf: shelf::source_files(),
+                shelf: source.clone(),
                 verb: LIST.into(),
                 subject: None,
                 args: to_value(&ListArgs {
@@ -1780,7 +1786,7 @@ fn starting_point(
         || lower.ends_with(".m3u8")
         || lower.ends_with(".pls")
     {
-        let listing = list_folder(steward, path, now)?;
+        let listing = list_folder(steward, &shelf::source_files(), path, now)?;
         let items: Vec<Track> = listing
             .entries
             .into_iter()
@@ -1806,13 +1812,14 @@ fn starting_point(
         return Ok((items, at));
     }
     // A folder, or a file in one.
-    let (folder, file) = match list_folder(steward, path, now) {
-        Ok(_) => (path.to_string(), None),
-        Err(_) => match path.rsplit_once('/') {
-            Some((f, name)) => (f.to_string(), Some(name)),
-            None => (String::new(), Some(path)),
-        },
-    };
+    let (folder, file) =
+        match list_folder(steward, &shelf::source_files(), path, now) {
+            Ok(_) => (path.to_string(), None),
+            Err(_) => match path.rsplit_once('/') {
+                Some((f, name)) => (f.to_string(), Some(name)),
+                None => (String::new(), Some(path)),
+            },
+        };
     let mut items = list_tracks(steward, &folder, now)?;
     items.retain(|t| !t.live);
     if items.is_empty() {
@@ -2198,80 +2205,158 @@ fn mirror(gpio: u8, signal: u32) {
         );
     }
 }
+/// A folder of one source: where the library page can be.
+#[derive(Clone)]
+struct Place {
+    /// The source shelf the folder is on.
+    source: ShelfRef,
+    /// The folder's path, as that source names it.
+    path: String,
+    /// What the header says there: the folder's name as it was listed,
+    /// or the source's.
+    name: String,
+}
+
 /// The library page's state: the folder in view, the folders above it,
-/// and the folder's tracks in the source's order.
+/// and the folder's tracks in the source's order. The root of the page
+/// is the list of sources, Card and Network; `None` as a place.
 #[derive(Default)]
 struct Browse {
     loaded: bool,
-    /// The paths of the folders opened to reach the one in view.
-    trail: Vec<String>,
-    /// The folder in view's subfolders, name to path.
-    folders: Vec<(String, String)>,
+    /// The places opened to reach the one in view.
+    trail: Vec<Option<Place>>,
+    /// The place in view.
+    here: Option<Place>,
+    /// The folder in view's subfolders, name to place.
+    folders: Vec<(String, Place)>,
     /// The folder in view's tracks, in order.
     tracks: Vec<Track>,
 }
 
 impl Browse {
-    /// List `path` from the source and show it on the face.
+    /// List `place` from its source and show it on the face.
     fn open(
         &mut self,
         steward: &mut Steward,
         face: &mut Face,
-        path: &str,
+        place: Option<Place>,
         now: Ticks,
     ) {
-        let listing = match list_folder(steward, path, now) {
-            Ok(l) => l,
-            Err(e) => {
-                warn!("library: {e}");
-                return;
-            }
-        };
-        self.folders.clear();
-        self.tracks.clear();
-        let mut entries = Vec::with_capacity(listing.entries.len());
-        for e in listing.entries {
-            match e {
-                Entry::Folder { name, path } => {
+        let mut entries = Vec::new();
+        let (path, name) = match &place {
+            None => {
+                self.folders.clear();
+                self.tracks.clear();
+                for (name, source) in [
+                    ("Card", shelf::source_files()),
+                    ("Network", shelf::source_dlna()),
+                ] {
                     entries.push(evo_esp32_face::Entry {
-                        name: name.clone(),
+                        name: name.to_string(),
                         folder: true,
                         uri: None,
                         playable: true,
                     });
-                    self.folders.push((name, path));
+                    self.folders.push((
+                        name.to_string(),
+                        Place {
+                            source,
+                            path: String::new(),
+                            name: name.to_string(),
+                        },
+                    ));
                 }
-                Entry::Track(t) => {
-                    entries.push(evo_esp32_face::Entry {
-                        name: t.title.clone(),
-                        folder: false,
-                        uri: Some(t.uri.clone()),
-                        playable: within_ceiling(&t),
-                    });
-                    self.tracks.push(t);
-                }
+                (String::new(), "Library".to_string())
             }
-        }
-        let name = path
-            .rsplit('/')
-            .find(|s| !s.is_empty())
-            .unwrap_or("Card")
-            .to_string();
+            Some(p) => {
+                let listing =
+                    match list_folder(steward, &p.source, &p.path, now) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            warn!("library: {e}");
+                            return;
+                        }
+                    };
+                self.folders.clear();
+                self.tracks.clear();
+                entries.reserve(listing.entries.len());
+                for e in listing.entries {
+                    match e {
+                        Entry::Folder { name, path } => {
+                            entries.push(evo_esp32_face::Entry {
+                                name: name.clone(),
+                                folder: true,
+                                uri: None,
+                                playable: true,
+                            });
+                            self.folders.push((
+                                name.clone(),
+                                Place {
+                                    source: p.source.clone(),
+                                    path,
+                                    name,
+                                },
+                            ));
+                        }
+                        Entry::Track(t) => {
+                            entries.push(evo_esp32_face::Entry {
+                                name: t.title.clone(),
+                                folder: false,
+                                uri: Some(t.uri.clone()),
+                                playable: within_ceiling(&t),
+                            });
+                            self.tracks.push(t);
+                        }
+                    }
+                }
+                // Never empty below the root: the face shows the way
+                // back whenever there is one.
+                (format!("{}:{}", p.source.shelf, p.path), p.name.clone())
+            }
+        };
         face.set_library(Library {
-            path: path.to_string(),
+            path,
             name,
             entries,
             first: 0,
         });
+        self.here = place;
         self.loaded = true;
     }
 
-    /// The source's path of the subfolder called `name`.
-    fn folder_path(&self, name: &str) -> Option<String> {
-        self.folders
+    /// Open the subfolder called `name` of the place in view.
+    fn descend(
+        &mut self,
+        steward: &mut Steward,
+        face: &mut Face,
+        name: &str,
+        now: Ticks,
+    ) {
+        let Some(place) = self
+            .folders
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, p)| p.clone())
+        else {
+            return;
+        };
+        self.trail.push(self.here.clone());
+        self.open(steward, face, Some(place), now);
+    }
+
+    /// Back to the place the one in view was opened from.
+    fn ascend(&mut self, steward: &mut Steward, face: &mut Face, now: Ticks) {
+        if let Some(parent) = self.trail.pop() {
+            self.open(steward, face, parent, now);
+        }
+    }
+
+    /// The network's servers take a moment to answer the search: while
+    /// the Network page stands empty, list it again.
+    fn waiting_for_servers(&self) -> bool {
+        self.here.as_ref().is_some_and(|p| {
+            p.source == shelf::source_dlna() && p.path.is_empty()
+        }) && self.folders.is_empty()
     }
 }
 
