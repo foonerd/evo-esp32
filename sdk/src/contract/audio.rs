@@ -60,6 +60,8 @@ pub mod shelf {
     pub const RADIO: &str = "radio";
     /// `source/dlna`.
     pub const DLNA: &str = "dlna";
+    /// `source/smb`.
+    pub const SMB: &str = "smb";
     /// `playback/decode`.
     pub const DECODE: &str = "decode";
     /// `playback/receive`.
@@ -87,6 +89,10 @@ pub mod shelf {
     /// `source/dlna` as a reference.
     pub fn source_dlna() -> ShelfRef {
         ShelfRef::new(SOURCE, DLNA)
+    }
+    /// `source/smb` as a reference.
+    pub fn source_smb() -> ShelfRef {
+        ShelfRef::new(SOURCE, SMB)
     }
     /// `playback/decode` as a reference.
     pub fn playback_decode() -> ShelfRef {
@@ -368,6 +374,33 @@ pub mod playback {
                 "{uri}: this transport cannot open at an offset"
             ))
         }
+    }
+
+    /// A file of known length read by position: what a share's file
+    /// (`smb://`, `nfs://`) reads as once opened. The protocol reads at
+    /// an offset of its own accord, so a seek is free and the decoder's
+    /// probing costs nothing but the bytes it asks for.
+    pub trait ByteFile: Send {
+        /// The file's length in bytes.
+        fn length(&self) -> u64;
+        /// Read into `buf` from `offset`; the bytes read, zero at the
+        /// end of the file. Blocks until there is something or the
+        /// transport gives up, which it says.
+        fn read_at(
+            &mut self,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, String>;
+    }
+
+    /// Opens the files of one URI scheme a distribution reaches by a
+    /// protocol with positional reads. A distribution hands the decoder
+    /// one per scheme; the decoder picks by `scheme`.
+    pub trait FileOpener: Send + Sync {
+        /// The scheme opened, without the colon: `smb`, `nfs`.
+        fn scheme(&self) -> &str;
+        /// Open `uri` for reading.
+        fn open(&self, uri: &str) -> Result<Box<dyn ByteFile>, String>;
     }
 }
 

@@ -84,7 +84,9 @@ pub mod hls;
 pub mod netfile;
 pub mod stream;
 pub mod ts;
-use evo_esp32_sdk::contract::audio::playback::StreamOpener;
+use evo_esp32_sdk::contract::audio::playback::{
+    ByteFile, FileOpener, StreamOpener,
+};
 use stream::Live;
 
 /// The plugin's name, as the catalogue and the steward know it.
@@ -215,6 +217,9 @@ pub struct PlaybackSymphonia {
     /// How `http://` and `https://` tracks are reached; none, and they
     /// are refused.
     opener: Option<Arc<dyn StreamOpener>>,
+    /// How the files of other schemes (`smb://`, `nfs://`) are reached,
+    /// one opener per scheme.
+    files: Arc<Vec<Box<dyn FileOpener>>>,
     subject: Option<SubjectId>,
     in_hand: Option<InHand>,
 }
@@ -236,6 +241,7 @@ impl PlaybackSymphonia {
             sink,
             codecs: Arc::new(codecs),
             opener: None,
+            files: Arc::new(Vec::new()),
             subject: None,
             in_hand: None,
         }
@@ -246,6 +252,16 @@ impl PlaybackSymphonia {
     /// is played segment by segment through it ([`hls`]).
     pub fn with_opener(mut self, opener: Box<dyn StreamOpener>) -> Self {
         self.opener = Some(Arc::new(hls::Aware(Arc::from(opener))));
+        self
+    }
+
+    /// With a way to reach the files of one more scheme (`smb`, `nfs`):
+    /// a share's file is read by position, so a seek costs nothing.
+    /// Called before admission, once per scheme.
+    pub fn with_file_opener(mut self, opener: Box<dyn FileOpener>) -> Self {
+        Arc::get_mut(&mut self.files)
+            .expect("file openers are set before the plugin is admitted")
+            .push(opener);
         self
     }
 
@@ -311,9 +327,17 @@ impl Warden for PlaybackSymphonia {
             .map_err(|e| CustodyError(format!("instruction: {e}")))?;
         let track = play.track;
         if is_network(&track.uri) {
-            let opener = self.opener.clone().ok_or_else(|| {
-                CustodyError("no transport for a network stream".into())
-            })?;
+            let opener = self.opener.clone();
+            let files = Arc::clone(&self.files);
+            if opener.is_none() && !is_http(&track.uri) {
+                // A share's scheme with no opener for it is as refused
+                // as a stream with no transport, but on this thread.
+                file_opener(&files, &track.uri)?;
+            } else if opener.is_none() {
+                return Err(CustodyError(
+                    "no transport for a network stream".into(),
+                ));
+            }
             let (tx, rx) = mpsc::channel();
             let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
             thread::Builder::new()
@@ -321,7 +345,8 @@ impl Warden for PlaybackSymphonia {
                 .stack_size(OPEN_STACK)
                 .spawn(move || {
                     // The custody may be gone by now; then this is dropped.
-                    let _ = tx.send(open(&uri, &codecs, Some(&opener)));
+                    let _ =
+                        tx.send(open(&uri, &codecs, opener.as_ref(), &files));
                 })
                 .map_err(|e| CustodyError(format!("open thread: {e}")))?;
             let state = State {
@@ -349,7 +374,7 @@ impl Warden for PlaybackSymphonia {
             });
             return Ok(());
         }
-        let opened = open(&track.uri, &self.codecs, None)?;
+        let opened = open(&track.uri, &self.codecs, None, &self.files)?;
         let mut h = InHand {
             handle,
             state: State {
@@ -603,9 +628,69 @@ impl Warden for PlaybackSymphonia {
 }
 
 /// Whether `uri` is reached over the network rather than read from a
-/// path.
+/// path: any scheme but `file`.
 fn is_network(uri: &str) -> bool {
+    uri.contains("://") && !uri.starts_with("file://")
+}
+
+/// Whether `uri` is a stream or a server's file over HTTP.
+fn is_http(uri: &str) -> bool {
     uri.starts_with("http://") || uri.starts_with("https://")
+}
+
+/// The opener for `uri`'s scheme among the file openers.
+fn file_opener<'a>(
+    files: &'a [Box<dyn FileOpener>],
+    uri: &str,
+) -> Result<&'a dyn FileOpener, CustodyError> {
+    let scheme = uri.split("://").next().unwrap_or("");
+    files
+        .iter()
+        .find(|o| o.scheme() == scheme)
+        .map(|o| o.as_ref())
+        .ok_or_else(|| {
+            CustodyError(format!("{scheme}://: no way to reach it here"))
+        })
+}
+
+/// A [`ByteFile`] as Symphonia reads: a cursor over positional reads.
+struct FileReader {
+    file: Box<dyn ByteFile>,
+    pos: u64,
+    len: u64,
+}
+
+impl std::io::Read for FileReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.len {
+            return Ok(0);
+        }
+        let n = self
+            .file
+            .read_at(self.pos, buf)
+            .map_err(std::io::Error::other)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for FileReader {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let to = match pos {
+            SeekFrom::Start(p) => p as i128,
+            SeekFrom::End(d) => self.len as i128 + d as i128,
+            SeekFrom::Current(d) => self.pos as i128 + d as i128,
+        };
+        if to < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start",
+            ));
+        }
+        self.pos = to as u64;
+        Ok(self.pos)
+    }
 }
 
 /// The stream is open: name the track from its tags, land the start,
@@ -696,8 +781,9 @@ fn decodable(content_type: &str) -> bool {
     }
 }
 
-/// Open a URI: a `file://` on the host, or an `http://`/`https://`
-/// stream through the opener; probe it, pick its default audio track,
+/// Open a URI: a `file://` on the host, an `http://`/`https://`
+/// stream through the opener, or a share's file through the opener
+/// for its scheme; probe it, pick its default audio track,
 /// make a decoder, and report the format the stream will come out in.
 /// A network response with a length and ranges is a file on a server,
 /// read and sought like the card's; one without is a station.
@@ -705,11 +791,30 @@ fn open(
     uri: &str,
     codecs: &CodecRegistry,
     opener: Option<&Arc<dyn StreamOpener>>,
+    files: &[Box<dyn FileOpener>],
 ) -> Result<(Stream, Format), CustodyError> {
     let mut hint = Hint::new();
     let mut live = None;
     let mut ahead_watch = None;
-    let source: Box<dyn symphonia::core::io::MediaSource> = if is_network(uri) {
+    let source: Box<dyn symphonia::core::io::MediaSource> = if is_network(uri)
+        && !is_http(uri)
+    {
+        let file = file_opener(files, uri)?.open(uri).map_err(CustodyError)?;
+        if let Some(ext) = uri
+            .split(['?', '#'])
+            .next()
+            .and_then(|p| p.rsplit('.').next())
+            .filter(|e| e.len() <= 4 && !e.contains('/'))
+        {
+            hint.with_extension(ext);
+        }
+        let len = file.length();
+        let reader =
+            ahead::ReadAhead::new(FileReader { file, pos: 0, len }, len)
+                .map_err(|e| CustodyError(format!("reader: {e}")))?;
+        ahead_watch = Some(reader.watch(NETWORK_LOW_WATER));
+        Box::new(reader)
+    } else if is_network(uri) {
         let opener = opener.ok_or_else(|| {
             CustodyError("no transport for a network stream".into())
         })?;
