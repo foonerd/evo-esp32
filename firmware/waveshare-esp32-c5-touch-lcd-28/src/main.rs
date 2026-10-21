@@ -1268,6 +1268,14 @@ fn main() -> anyhow::Result<()> {
             if let Some(line) = sink::report_dry() {
                 warn!("sink: {line}");
             }
+            // SAFETY: a plain getter.
+            let largest = unsafe {
+                sys::heap_caps_get_largest_free_block(sys::MALLOC_CAP_INTERNAL)
+            };
+            info!(
+                "heap: internal largest block {largest} B; {}",
+                alloc::Account::now().line()
+            );
             let snap = rooms.snap.session();
             if snap.connected {
                 info!(

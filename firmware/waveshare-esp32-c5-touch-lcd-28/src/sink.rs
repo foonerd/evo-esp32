@@ -22,10 +22,12 @@
 //! A mono stream is doubled into both slots on the way in. A pause stops
 //! the feeder, and the DMA plays silence until the resume; what is held
 //! waits. A seek drops what is held. A stream at another rate waits for
-//! the reservoir and the DMA to drain, then has the channel remade
-//! (`new_std_tx` again over a conjured `I2S0`) and the codec told; the
-//! header mirror survives, because the GPIO matrix routes signals, not
-//! channels.
+//! the reservoir and the DMA to drain, then has the channel's clock set
+//! again in place (`i2s_channel_reconfig_std_clock`, over the raw
+//! driver: the HAL remakes the channel, which frees the DMA ring into
+//! the heap and asks for a new one, and whatever the decoder allocated
+//! in between took the ring's place in internal SRAM — 33 KB of it lost
+//! at every change of rate, measured) and the codec told.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{
@@ -36,12 +38,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use esp_idf_svc::hal::gpio::AnyIOPin;
-use esp_idf_svc::hal::i2s::config::{
-    Config as ChannelConfig, DataBitWidth, SlotMode, StdClkConfig, StdConfig,
-    StdGpioConfig, StdSlotConfig,
-};
-use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx, I2S0};
+use esp_idf_svc::hal::gpio::{InputPin, OutputPin};
+use esp_idf_svc::hal::i2s::I2S0;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_svc::sys;
 use evo_esp32_sdk::contract::audio::playback::{Format, FrameSink};
@@ -370,17 +368,21 @@ impl<F: RateFollower> I2sSink<F> {
     /// each rate the stream takes.
     pub fn new(
         i2s0: I2S0<'static>,
-        bclk: impl esp_idf_svc::hal::gpio::InputPin
-            + esp_idf_svc::hal::gpio::OutputPin
-            + 'static,
-        dout: impl esp_idf_svc::hal::gpio::OutputPin + 'static,
-        ws: impl esp_idf_svc::hal::gpio::InputPin
-            + esp_idf_svc::hal::gpio::OutputPin
-            + 'static,
+        bclk: impl InputPin + OutputPin + 'static,
+        dout: impl OutputPin + 'static,
+        ws: impl InputPin + OutputPin + 'static,
         rate: u32,
         follower: F,
     ) -> Result<Self, sys::EspError> {
-        let (i2s, dma_lead) = open(i2s0, bclk, dout, ws, rate)?;
+        // The peripheral and the pins are taken for good; the channel is
+        // the raw driver's from here.
+        let _ = i2s0;
+        let (i2s, dma_lead) = Channel::open(
+            i32::from(bclk.pin()),
+            i32::from(dout.pin()),
+            i32::from(ws.pin()),
+            rate,
+        )?;
         let bytes = reservoir_bytes(CEILING_HZ);
         let reservoir = Arc::new(Reservoir::new(bytes));
         reservoir
@@ -462,59 +464,143 @@ fn reservoir_bytes(rate: u32) -> usize {
     (rate as usize * LEAD_MS as usize / 1000) * FRAME_BYTES
 }
 
-fn open(
-    i2s0: I2S0<'static>,
-    bclk: impl esp_idf_svc::hal::gpio::InputPin
-        + esp_idf_svc::hal::gpio::OutputPin
-        + 'static,
-    dout: impl esp_idf_svc::hal::gpio::OutputPin + 'static,
-    ws: impl esp_idf_svc::hal::gpio::InputPin
-        + esp_idf_svc::hal::gpio::OutputPin
-        + 'static,
-    rate: u32,
-) -> Result<(I2sDriver<'static, I2sTx>, u32), sys::EspError> {
-    let lead = lead_ms(rate, BUFFERS);
-    info!("i2s: {rate} Hz, {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead");
-    let config = StdConfig::new(
-        ChannelConfig::default()
-            .auto_clear(true)
-            .dma_buffer_count(BUFFERS)
-            .frames_per_buffer(FRAMES_PER_BUFFER),
-        StdClkConfig::from_sample_rate_hz(rate),
-        StdSlotConfig::philips_slot_default(
-            DataBitWidth::Bits16,
-            SlotMode::Stereo,
-        ),
-        StdGpioConfig::default(),
-    );
-    let mut i2s =
-        I2sDriver::new_std_tx(i2s0, &config, bclk, dout, None::<AnyIOPin>, ws)?;
-    i2s.tx_enable()?;
-    Ok((i2s, lead))
+/// I2S0's transmit channel: master, Philips, 16-bit stereo, over the
+/// raw driver, so that a change of rate is a change of clock and the
+/// DMA ring allocated at the open is the one for the life of the player.
+struct Channel(sys::i2s_chan_handle_t);
+
+// The handle is used by the feeder thread alone once made.
+unsafe impl Send for Channel {}
+
+fn esp(code: sys::esp_err_t) -> Result<(), sys::EspError> {
+    sys::EspError::convert(code)
 }
 
-/// The channel remade at `rate` over the conjured peripheral and pins:
-/// the matrix keeps their routing from the first open.
-fn reopen(
-    rate: u32,
-) -> Result<(I2sDriver<'static, I2sTx>, u32), sys::EspError> {
-    // SAFETY: the feeder is the only owner of I2S0 and of these pins, and
-    // the previous driver is dropped before this is called.
-    let (i2s0, bclk, dout, ws) = unsafe {
-        (
-            I2S0::steal(),
-            esp_idf_svc::hal::gpio::Gpio24::steal(),
-            esp_idf_svc::hal::gpio::Gpio26::steal(),
-            esp_idf_svc::hal::gpio::Gpio25::steal(),
-        )
-    };
-    open(i2s0, bclk, dout, ws, rate)
+impl Channel {
+    /// The channel at `rate` on the pins given, enabled.
+    fn open(
+        bclk: i32,
+        dout: i32,
+        ws: i32,
+        rate: u32,
+    ) -> Result<(Self, u32), sys::EspError> {
+        let lead = lead_ms(rate, BUFFERS);
+        info!("i2s: {rate} Hz, {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead");
+        let chan = sys::i2s_chan_config_t {
+            id: sys::i2s_port_t_I2S_NUM_0,
+            role: sys::i2s_role_t_I2S_ROLE_MASTER,
+            dma_desc_num: BUFFERS,
+            dma_frame_num: FRAMES_PER_BUFFER,
+            __bindgen_anon_1: sys::i2s_chan_config_t__bindgen_ty_1 {
+                auto_clear_after_cb: true,
+            },
+            auto_clear_before_cb: false,
+            allow_pd: false,
+            intr_priority: 0,
+        };
+        let mut handle: sys::i2s_chan_handle_t = core::ptr::null_mut();
+        // SAFETY: the configuration structs are filled whole, as the HAL
+        // fills them; the handle outlives every use (never deleted).
+        unsafe {
+            esp(sys::i2s_new_channel(
+                &chan,
+                &mut handle,
+                core::ptr::null_mut(),
+            ))?;
+            let std = sys::i2s_std_config_t {
+                clk_cfg: Self::clock(rate),
+                slot_cfg: sys::i2s_std_slot_config_t {
+                    data_bit_width:
+                        sys::i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT,
+                    slot_bit_width:
+                        sys::i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_AUTO,
+                    slot_mode: sys::i2s_slot_mode_t_I2S_SLOT_MODE_STEREO,
+                    slot_mask: 0b11,
+                    ws_width: 16,
+                    ws_pol: false,
+                    bit_shift: true,
+                    left_align: false,
+                    big_endian: false,
+                    bit_order_lsb: false,
+                },
+                gpio_cfg: sys::i2s_std_gpio_config_t {
+                    mclk: sys::gpio_num_t_GPIO_NUM_NC,
+                    bclk,
+                    ws,
+                    dout,
+                    din: sys::gpio_num_t_GPIO_NUM_NC,
+                    invert_flags: Default::default(),
+                },
+            };
+            let made = esp(sys::i2s_channel_init_std_mode(handle, &std))
+                .and_then(|()| esp(sys::i2s_channel_enable(handle)));
+            if let Err(e) = made {
+                sys::i2s_del_channel(handle);
+                return Err(e);
+            }
+        }
+        Ok((Self(handle), lead))
+    }
+
+    fn clock(rate: u32) -> sys::i2s_std_clk_config_t {
+        sys::i2s_std_clk_config_t {
+            sample_rate_hz: rate,
+            clk_src: sys::soc_module_clk_t_SOC_MOD_CLK_PLL_F160M
+                as sys::i2s_clock_src_t,
+            ext_clk_freq_hz: 0,
+            mclk_multiple: sys::i2s_mclk_multiple_t_I2S_MCLK_MULTIPLE_256,
+            bclk_div: 8,
+        }
+    }
+
+    /// The clock at `rate`, the ring kept; what the ring holds in time.
+    fn set_rate(&mut self, rate: u32) -> Result<u32, sys::EspError> {
+        // SAFETY: the channel is ours and enabled; disabled around the
+        // change as the driver requires, then enabled again.
+        unsafe {
+            esp(sys::i2s_channel_disable(self.0))?;
+            let set = esp(sys::i2s_channel_reconfig_std_clock(
+                self.0,
+                &Self::clock(rate),
+            ));
+            esp(sys::i2s_channel_enable(self.0))?;
+            set?;
+        }
+        let lead = lead_ms(rate, BUFFERS);
+        info!(
+            "i2s: {rate} Hz, the same {BUFFERS} DMA buffers, {lead} ms of lead"
+        );
+        Ok(lead)
+    }
+
+    /// Write what the DMA takes within `timeout_ms`; how much it took.
+    fn write(
+        &mut self,
+        bytes: &[u8],
+        timeout_ms: u32,
+    ) -> Result<usize, sys::EspError> {
+        let mut written = 0usize;
+        // SAFETY: a valid buffer and length; the driver copies out of it.
+        let code = unsafe {
+            sys::i2s_channel_write(
+                self.0,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                &mut written,
+                timeout_ms,
+            )
+        };
+        if code == sys::ESP_ERR_TIMEOUT && written > 0 {
+            return Ok(written);
+        }
+        esp(code).map(|()| written)
+    }
 }
 
 /// The feeder: the reservoir's bytes, scaled, into the DMA, for as long
 /// as the sink lives.
 fn feed(
-    mut i2s: I2sDriver<'static, I2sTx>,
+    mut i2s: Channel,
     reservoir: &Reservoir,
     volume: &Volume,
     commands: &Receiver<Command>,
@@ -525,11 +611,9 @@ fn feed(
     loop {
         match commands.try_recv() {
             Ok(Command::Reopen(rate)) => {
-                drop(i2s);
-                match reopen(rate) {
-                    Ok((new, _)) => i2s = new,
-                    // No channel is no player; say so and stop.
-                    Err(e) => panic!("i2s: could not reopen at {rate} Hz: {e}"),
+                // No channel is no player; say so and stop.
+                if let Err(e) = i2s.set_rate(rate) {
+                    panic!("i2s: could not set {rate} Hz: {e}");
                 }
                 if let Ok(mut m) = reservoir.dma.lock() {
                     *m = DmaModel::new();

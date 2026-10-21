@@ -29,6 +29,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and with Symphonia's AAC decoder (the `aac-symphonia` feature, the
   host's) the thread that opens a stream gets 256 KB of stack, since
   that decoder is built on the stack before it is boxed.
+- Internal SRAM kept for the drivers. Three changes to where the
+  player's memory comes from, so that Wi-Fi, lwIP and the DMA keep
+  what they need while an MP3 plays: the allocator's medium band
+  (16–64 KB) keeps a 32 KB floor of internal SRAM, and an allocation
+  that would eat into it is placed in PSRAM first; the I2S channel is
+  re-clocked in place on a change of sample rate (through the
+  driver's channel API; the HAL's remake of the channel cost 33 KB of
+  internal SRAM to fragmentation on every change, since the DMA ring
+  came back in pieces); and Espressif's codecs take their working
+  memory from PSRAM, through the component's `media_lib_*` hooks,
+  which the firmware now defines (the MP3 decoder's state was 29 KB
+  of internal SRAM). Measured on the board with the card's queue:
+  internal SRAM free during an MP3 track 14 KB → 38 KB, the largest
+  free block 5 KB → 16 KB, no change to a 96 kHz FLAC track (48 KB);
+  the MP3 decoder's share of the core goes from 42 % to 52 % with its
+  state in PSRAM, still well under FLAC's. The heartbeat gains a
+  `heap:` line: the largest free internal block, the medium band's
+  split between SRAM and PSRAM, and how many allocations the floor has
+  diverted.
 
 ## [0.1.2] - 2026-10-21
 
