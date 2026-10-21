@@ -6,6 +6,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- SMB shares in the library. A new source plugin,
+  `plugins/org.evoframework.source.smb`, lists the shares the card
+  names and reads their files, with a client for SMB 2.0.2 and 2.1
+  written here in plain `std::net`: NTLMv2 under SPNEGO with the MIC
+  over the exchange and the mechanism list, HMAC-SHA256 signing when
+  the server requires it (and its replies verified), credits, the
+  interim notices a slow server sends; nothing linked, the same code
+  on the device and the host. SMB1 is never spoken on an `smb://`
+  share, so an old box cannot be reached by a downgrade — `smb1://` is
+  for a later build, as is `nfs://`. The SDK gains the shape a share's
+  file reads as (`ByteFile`: a length and reads by position) and the
+  opener a distribution hands the decoder per scheme (`FileOpener`);
+  the Symphonia plugin reads such a file through its read-ahead ring,
+  and a seek costs nothing but the next read, since the protocol
+  reads at an offset. A share's listing peeks each FLAC and WAV for its
+  rate and length as the card's does, so the rate ceiling applies
+  before a tap. The card's settings gain `share` (`smb://host/share/
+  folder`, by name or address, `:port` where it is not 445),
+  `share_user`, `share_password` (masked in `evostatus.txt`) and
+  `share_domain`, and `share2` to `share9` with the same; a guest
+  share needs no user. The Network page lists the shares beside the
+  media servers found. The host tool gains `--share URL`,
+  `--share-user`, `--share-password` and `--play-share`. Measured on
+  the desk against Samba 4.17: a guest share, a share needing a user
+  with signing mandatory, and a Volumio player's share each list and
+  play; a FLAC opened from 20 s lands to the second; the
+  specification's NTLMv2 vectors are unit tests, and a loopback
+  server exercises the whole exchange in CI.
+
 ## [0.1.3] - 2026-10-21
 
 - The network's media servers in the library. A new source plugin,
