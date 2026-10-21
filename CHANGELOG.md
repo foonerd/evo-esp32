@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-21
+
 - The network's media servers in the library. A new source plugin,
   `plugins/org.evoframework.source.dlna`, finds the DLNA (UPnP AV)
   media servers on the network and lists them as trees of folders and
@@ -68,8 +70,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`#EXT-X-MAP`) are refused by name. The plugin wraps whatever
   transport the distribution gives it (`hls::Aware`), so the firmware
   and the host tool both play HLS with no change of their own. The
-  shipped Radio list gains the BBC's ten national stations (1Xtra,
-  6 Music, Asian Network, Radio 1 to 4, 4 Extra, 5 Live) by their
+  shipped Radio list gains nine BBC national stations (1Xtra,
+  6 Music, Asian Network, Radio 1 to 4, 4 Extra, 5 Live) beside the
+  World Service, by their
   stable manifests on `a.files.bbci.co.uk`, 96 kb/s HE-AAC, which
   play anywhere; the Akamai pools they point into rotate, which is
   why the pools are not listed. The host tool plays the first track of

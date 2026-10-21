@@ -123,7 +123,7 @@ jobs:
 
              esptool verifies the write by itself. If it cannot connect, hold the board's BOOT button while plugging it in, then run the command again.
           4. **The card.** A FAT32 microSD card (32 GB or less works as sold). Unzip the card folder onto its root: \`evoconfig.txt\` (open it in any text editor and fill in your Wi-Fi name and password) and \`Radio/\`, the stations. Put your music in folders of your own anywhere on the card: FLAC, WAV and MP3, 44.1 to 96 kHz, with \`cover.jpg\` in an album's folder for its picture. Insert the card.
-          5. **Power on.** The music starts within a few seconds; the network joins behind it (its address is in Settings). Tap the Library tab for the card's folders and \`Radio\`; a tap on a station plays it. \`evostatus.txt\` on the card says what the player read and whether it joined.
+          5. **Power on.** The music starts within a few seconds; the network joins behind it (its address is in Settings). Tap the Library tab: **Card** is the card's folders and \`Radio\`, a tap on a station plays it; **Network** is the media servers on your network (a NAS, Plex, MiniDLNA, Volumio), their folders and tracks. \`evostatus.txt\` on the card says what the player read and whether it joined.
 
           Every setting, the Settings page, where the controls are in each style, and internet radio (your own \`.m3u\`/\`.pls\` files, station logos): [Configuration](https://github.com/${GITHUB_REPOSITORY}/wiki/Configuration). What the board can and cannot play: [Hardware](https://github.com/${GITHUB_REPOSITORY}/wiki/Hardware).
 
@@ -131,7 +131,8 @@ jobs:
 
           ## Known in this release
 
-          - From the air: MP3, AAC (AAC-LC and HE-AAC), FLAC and Ogg Vorbis. The BBC's domestic stations are HLS and not played yet; the World Service is.
+          - Music on the network: the library's Network page lists the DLNA (UPnP AV) media servers found on the network and plays their tracks with the progress ring, seek, shuffle and repeat, as the card's. A file on a web server plays the same way from a playlist entry that carries its length. SMB and NFS shares are not reached yet; they are next.
+          - From the air: MP3, AAC (AAC-LC and HE-AAC), FLAC and Ogg Vorbis, as one stream or as HLS; the BBC's national stations are in the shipped list. An HE-AAC station is the heaviest thing the board does and plays in real time with a little of the core to spare.
           - Multiroom three ways, see [Multiroom](https://github.com/${GITHUB_REPOSITORY}/wiki/Multiroom): the player is a [Snapcast](https://github.com/badaix/snapcast) client (a server named in \`evoconfig.txt\` or found on the network); it is a device in [Volumio](https://volumio.com)'s Multiroom, found and grouped from Volumio's own screen, with its cover and no volume slider; and it is a room of an Evo multiroom group by its Evo id (bottom of Settings).
           - On the 2.4 GHz band, or with a weak signal, the status strip says so: a stream's timing wanders there. 5 GHz is the band for streams.
           - 176.4 and 192 kHz files are beyond the chip and are greyed in the library; 96 kHz plays with the network up.

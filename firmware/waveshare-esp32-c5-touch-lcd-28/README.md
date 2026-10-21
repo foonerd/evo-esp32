@@ -19,7 +19,7 @@ The build is the companion's: ESP-IDF v5.5.5 through esp-idf-svc 0.53, nightly-2
 cd firmware/waveshare-esp32-c5-touch-lcd-28
 cargo build --release
 cd ../.. && scripts/image.sh firmware/waveshare-esp32-c5-touch-lcd-28
-esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.2.bin
+esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.3.bin
 ```
 
 ## Configuring by card
