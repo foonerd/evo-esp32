@@ -85,3 +85,10 @@ CONFIG_FREERTOS_HZ=1000
 # cache off, and internal SRAM is for the Wi-Fi driver and the DMA.
 CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
 CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
+
+# Who had the core: the kernel keeps a run-time counter per task (the
+# high-resolution timer, read at each switch) and the heartbeat reports
+# each task's share of the last period. The cost is a timer read per
+# context switch.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y

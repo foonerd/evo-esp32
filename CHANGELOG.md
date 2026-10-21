@@ -50,6 +50,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "stopped sending" while chunks flowed.
 - The arrival stamp on a Snapcast message is taken once its header is
   in, not before the wait for it.
+- 96 kHz FLAC from the card plays at real time with the network up
+  again. The decoder read the file itself: a card on a serial bus hands
+  blocks over as DMA transfers the caller waits out, and a destination
+  in PSRAM (Symphonia's 64 KB stream buffer) is not DMA-capable on the
+  C5, so the driver read it a block at a time through a bounce buffer;
+  measured by the kernel's run-time counters, that cost a third of the
+  core and the decoder 6% more waiting. The card is now read ahead on
+  a thread of its own (`playback.symphonia::ahead`) into a 256 KB ring
+  in bulk memory, in aligned 8 KB whole-block reads the driver takes
+  straight: the reader costs 7%, the decoder 67%, and 14% of the core
+  is idle where there was none; a seek within the ring is taken from
+  it. The loop also no longer sleeps a millisecond after every tick
+  while the decoder is short of lead (that was 7% of the core); the
+  idle task gets its turn once a quarter second instead. The heartbeat
+  gains a `core:` line, each task's share of the core since the last
+  beat, with its priority.
 - The status strip says when the link is one a stream will feel:
   *2.4 GHz Wi-Fi* on that band, *weak Wi-Fi* below -75 dBm on either,
   between the source and the stream so a narrow layout cuts the

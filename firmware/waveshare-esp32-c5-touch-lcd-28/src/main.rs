@@ -108,7 +108,9 @@ mod generated {
 const RATE: u32 = 44_100;
 /// The highest stream rate this board plays. Measured: 192 kHz/24-bit
 /// FLAC decodes at 0.4 of real time on the C5 with the core saturated,
-/// and the ES8311 has no 192 kHz setting; 96 kHz plays at 1.0.
+/// and the ES8311 has no 192 kHz setting; 96 kHz plays at real time
+/// with the network up, 14% of the core to spare (the card read ahead
+/// on its own thread).
 const RATE_CEILING: u32 = 96_000;
 /// Playback volume, percent on the house curve, applied in the sink.
 const VOLUME_PERCENT: u8 = 40;
@@ -121,6 +123,9 @@ const MUSIC: &str = companion_platform_esp_idf::card::MOUNT_POINT;
 const HEARTBEAT: Duration = Duration::from_secs(10);
 /// How long the loop sleeps between ticks when the fabric is idle.
 const TICK: Duration = Duration::from_millis(5);
+/// How often the loop sleeps a millisecond for the idle task while the
+/// decoder is behind and would otherwise never let go of the core.
+const IDLE_EVERY: Duration = Duration::from_millis(250);
 /// The face's cadence: the companion steps its ticker every 40 ms.
 const FACE_TICK: Duration = Duration::from_millis(40);
 /// The panel's rotation, degrees; the companion's default.
@@ -507,6 +512,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut seen = Seq(0);
     let mut last_beat = Instant::now();
+    let mut last_idle = Instant::now();
+    let mut shares = CoreShares::new();
     let mut busy = Duration::ZERO;
     loop {
         let t = now();
@@ -1205,6 +1212,7 @@ fn main() -> anyhow::Result<()> {
             );
             full_frames = 0;
             report_playback(&steward, track_started.elapsed());
+            info!("core: {}", shares.line());
             if let Some(line) = sink::report_dry() {
                 warn!("sink: {line}");
             }
@@ -1236,14 +1244,26 @@ fn main() -> anyhow::Result<()> {
                 search_at = Some(Instant::now() + SEARCH_AGAIN);
             }
         }
-        // The idle task must run or its watchdog bites: a short sleep
-        // when the fabric wants ticking now or a frame is mid-paint, the
-        // tick length otherwise.
-        std::thread::sleep(if painting || due.is_some_and(|d| d.0 <= t.0) {
-            Duration::from_millis(1)
+        // The idle task must run or its watchdog bites (5 s): a short
+        // sleep when the fabric wants ticking now or a frame is
+        // mid-paint, the tick length otherwise. While the decoder is
+        // short of lead every millisecond is its, so the sleep then
+        // comes once in [`IDLE_EVERY`]: a 96 kHz FLAC at the edge of the
+        // core lost 7% to these sleeps (measured by the kernel's run-time
+        // counters) and ran dry for it.
+        let due_now = painting || due.is_some_and(|d| d.0 <= t.0);
+        if due_now && audio_short && last_idle.elapsed() < IDLE_EVERY {
+            std::thread::yield_now();
         } else {
-            TICK
-        });
+            if due_now {
+                last_idle = Instant::now();
+            }
+            std::thread::sleep(if due_now {
+                Duration::from_millis(1)
+            } else {
+                TICK
+            });
+        }
     }
 }
 
@@ -1453,6 +1473,72 @@ fn output_state(steward: &Steward) -> Option<delivery::State> {
 }
 
 /// A Fisher-Yates shuffle on the chip's hardware random numbers.
+/// Who had the core since the last call: each task's share of the run
+/// time, from the kernel's counters. The counters are 32-bit
+/// microseconds and wrap in 71 minutes; the deltas are taken wrapping.
+struct CoreShares {
+    /// By the kernel's task number: two tasks may share a name.
+    last: std::collections::HashMap<u32, u32>,
+    last_total: u32,
+}
+
+impl CoreShares {
+    fn new() -> Self {
+        Self {
+            last: std::collections::HashMap::new(),
+            last_total: 0,
+        }
+    }
+
+    /// One line, the largest share first: `main 71%  wifi 9%  IDLE 8%`;
+    /// tasks under one percent left out.
+    fn line(&mut self) -> String {
+        // SAFETY: the array is sized by the kernel's task count with room
+        // for tasks created meanwhile; the kernel fills what fits and
+        // says how many.
+        let (statuses, total) = unsafe {
+            let n = sys::uxTaskGetNumberOfTasks() as usize + 4;
+            let mut buf: Vec<sys::TaskStatus_t> = vec![std::mem::zeroed(); n];
+            let mut total: u32 = 0;
+            let got = sys::uxTaskGetSystemState(
+                buf.as_mut_ptr(),
+                n as u32,
+                &mut total,
+            );
+            buf.truncate(got as usize);
+            (buf, total)
+        };
+        let period = total.wrapping_sub(self.last_total);
+        self.last_total = total;
+        let mut shares: Vec<(String, u32)> = Vec::new();
+        let mut seen = std::collections::HashMap::new();
+        for s in &statuses {
+            // SAFETY: the kernel's task name, NUL-terminated, alive while
+            // the task is.
+            let name = unsafe { std::ffi::CStr::from_ptr(s.pcTaskName) }
+                .to_string_lossy()
+                .into_owned();
+            let was = self.last.get(&s.xTaskNumber).copied().unwrap_or(0);
+            let ran = s.ulRunTimeCounter.wrapping_sub(was);
+            seen.insert(s.xTaskNumber, s.ulRunTimeCounter);
+            let name = format!("{name}/{}", s.uxCurrentPriority);
+            if period > 0 {
+                let pct = (u64::from(ran) * 100 / u64::from(period)) as u32;
+                if pct >= 1 {
+                    shares.push((name, pct));
+                }
+            }
+        }
+        self.last = seen;
+        shares.sort_by_key(|a| std::cmp::Reverse(a.1));
+        shares
+            .iter()
+            .map(|(n, p)| format!("{n} {p}%"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    }
+}
+
 /// The playback projection against the wall clock since the track was
 /// assigned: position over elapsed is 1.0 when the decoder keeps up.
 fn report_playback(steward: &Steward, elapsed: Duration) {
