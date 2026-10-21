@@ -30,6 +30,7 @@
 //! (the Evo audio plane's `_evo._tcp`), on Espressif's mDNS responder.
 
 pub mod aac;
+pub mod dial;
 pub mod http;
 pub mod jpeg;
 pub mod mdns;

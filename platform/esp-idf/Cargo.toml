@@ -18,6 +18,8 @@ unused_qualifications = "warn"
 [dependencies]
 esp-idf-svc = { version = "0.53", default-features = false, features = ["std", "alloc"] }
 evo-esp32-sdk = { path = "../../sdk" }
+org-evoframework-source-nfs = { path = "../../plugins/org.evoframework.source.nfs" }
+libc = "0.2"
 log = "0.4"
 png = { version = "0.18.1", default-features = false }
 symphonia-core = "0.6"
