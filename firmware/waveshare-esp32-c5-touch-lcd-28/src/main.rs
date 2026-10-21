@@ -1418,14 +1418,14 @@ impl evo_esp32_sdk::contract::audio::playback::FrameSink for Silent {
     fn stop(&mut self) {}
 }
 
-/// The shares the card names that this build reaches: `smb://` ones;
-/// an `smb1://` or `nfs://` share is logged and left for the build
+/// The shares the card names that this build reaches: `smb://` and
+/// `smb1://` ones; an `nfs://` share is logged and left for the build
 /// that speaks it.
 fn shares(settings: &evo_esp32_config::Settings) -> Vec<Share> {
     let mut out = Vec::new();
     for s in &settings.shares {
         let Some(url) = &s.url else { continue };
-        if !url.starts_with("smb://") {
+        if !url.starts_with("smb://") && !url.starts_with("smb1://") {
             warn!(
                 "share{}: {} is not reached by this build yet",
                 if s.index == 1 {
@@ -1489,7 +1489,8 @@ fn bring_up(
                     codecs(),
                 )
                 .with_opener(Box::new(HttpOpener))
-                .with_file_opener(Box::new(SmbOpener::new(shares))),
+                .with_file_opener(Box::new(SmbOpener::new(shares.clone())))
+                .with_file_opener(Box::new(SmbOpener::smb1(shares))),
             ),
             now,
         )

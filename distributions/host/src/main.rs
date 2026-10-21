@@ -294,7 +294,8 @@ fn bring_up(
             Box::new(
                 PlaybackSymphonia::new(Box::new(PacedWav::new(wav)))
                     .with_opener(Box::new(http::PlainHttp))
-                    .with_file_opener(Box::new(SmbOpener::new(shares))),
+                    .with_file_opener(Box::new(SmbOpener::new(shares.clone())))
+                    .with_file_opener(Box::new(SmbOpener::smb1(shares))),
             ),
             now,
         )
