@@ -527,6 +527,14 @@ fn main() -> anyhow::Result<()> {
     let mut art =
         art::Fetcher::new(face.layout().art.size.width, background(&face))?;
     memory("after the art fetcher");
+    // The task watchdog watches this loop (sdkconfig takes the idle task
+    // off it); every turn resets it.
+    // SAFETY: a null handle names the calling task.
+    if let Err(e) = sys::EspError::convert(unsafe {
+        sys::esp_task_wdt_add(std::ptr::null_mut())
+    }) {
+        warn!("watchdog: the loop could not subscribe: {e}");
+    }
     let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
     let mut last_touch = Instant::now() - FACE_AWAKE;
@@ -544,6 +552,8 @@ fn main() -> anyhow::Result<()> {
     let mut shares = CoreShares::new();
     let mut busy = Duration::ZERO;
     loop {
+        // SAFETY: resets this task's entry; harmless if it has none.
+        unsafe { sys::esp_task_wdt_reset() };
         let t = now();
         let tick_started = Instant::now();
         let due = steward.tick(t);

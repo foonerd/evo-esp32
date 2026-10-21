@@ -98,3 +98,12 @@ CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
 # context switch.
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# The task watchdog watches the loop and the feeder, which subscribe to
+# it and reset it each turn, rather than the idle task. The player runs
+# above idle by design: an HE-AAC station has the decoder at four fifths
+# of the core and a station's logo decodes beneath it on the art thread,
+# and the idle task not running for five seconds is then the schedule
+# working, not a fault (it fired at every BBC station's open). The loop
+# not turning for five seconds is.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n

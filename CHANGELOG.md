@@ -55,11 +55,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rest is 100 ms rather than 40 ms (40 ms while a frame is being
   painted or for a second after a touch): each look reads the fabric's
   state, and at 40 ms that was 7–10 % of the core, now 4 %. A logo in
-  PNG is decoded with a millisecond's pause every sixteen rows, so the
-  idle task gets its turn beside a decoder near the edge of the core:
-  a 600-pixel logo opening over an HE-AAC station had kept it off the
-  core for seconds (the task watchdog said so, every five seconds for
-  the first fifteen of a BBC station).
+  PNG is decoded with a millisecond's pause every sixteen rows. The
+  task watchdog watches the loop and the sink's feeder, which subscribe
+  to it and reset it each turn, rather than the idle task: an HE-AAC
+  station (the BBC's, 96 kb/s with SBR to 48 kHz) has Espressif's
+  decoder at three quarters of the core — 104 KB of state, 90 KB of it
+  in PSRAM whatever the placement rule — and a station's logo decodes
+  beneath it on the art thread, so the idle task not running for five
+  seconds is the schedule working, not a fault; it had fired at every
+  BBC station's open. The loop not turning for five seconds is the
+  fault, and is what is watched now. Measured on the board: HE-AAC main
+  task 82 % → 77–79 %, idle 6–8 % → 10–11 %, real time throughout.
+
 
 ## [0.1.2] - 2026-10-21
 

@@ -608,7 +608,16 @@ fn feed(
 ) {
     let mut chunk = vec![0u8; CHUNK];
     let mut dry_since: Option<Instant> = None;
+    // The task watchdog watches the feeder too: no feeder, no sound.
+    // SAFETY: a null handle names the calling task.
+    if let Err(e) = sys::EspError::convert(unsafe {
+        sys::esp_task_wdt_add(core::ptr::null_mut())
+    }) {
+        warn!("watchdog: the feeder could not subscribe: {e}");
+    }
     loop {
+        // SAFETY: resets this task's entry; harmless if it has none.
+        unsafe { sys::esp_task_wdt_reset() };
         match commands.try_recv() {
             Ok(Command::Reopen(rate)) => {
                 // No channel is no player; say so and stop.
