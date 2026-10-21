@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-21
+
 - The player as a Volumio device. `distributions/volumio`
   (`evo-esp32-volumio`) speaks what Volumio devices speak to each
   other, socket.io 2 over Engine.IO 3, on its HTTP long-polling

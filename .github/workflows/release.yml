@@ -132,8 +132,9 @@ jobs:
           ## Known in this release
 
           - From the air: MP3, AAC (AAC-LC and HE-AAC), FLAC and Ogg Vorbis. The BBC's domestic stations are HLS and not played yet; the World Service is.
-          - The player is a room of an Evo multiroom group: it announces itself as an Evo device, and a group that has its Evo id (bottom of Settings) as a member plays through it. See [Multiroom](https://github.com/${GITHUB_REPOSITORY}/wiki/Multiroom).
-          - 176.4 and 192 kHz files are beyond the chip and are greyed in the library.
+          - Multiroom three ways, see [Multiroom](https://github.com/${GITHUB_REPOSITORY}/wiki/Multiroom): the player is a [Snapcast](https://github.com/badaix/snapcast) client (a server named in \`evoconfig.txt\` or found on the network); it is a device in [Volumio](https://volumio.com)'s Multiroom, found and grouped from Volumio's own screen, with its cover and no volume slider; and it is a room of an Evo multiroom group by its Evo id (bottom of Settings).
+          - On the 2.4 GHz band, or with a weak signal, the status strip says so: a stream's timing wanders there. 5 GHz is the band for streams.
+          - 176.4 and 192 kHz files are beyond the chip and are greyed in the library; 96 kHz plays with the network up.
           - The on-board codec is mono through its speaker and headphone output; stereo is a DAC board on the header (see [Audio out](https://github.com/${GITHUB_REPOSITORY}/wiki/Audio-out)).
           - No over-the-air update yet: every update is this flash.
 
