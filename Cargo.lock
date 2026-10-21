@@ -193,6 +193,7 @@ dependencies = [
  "org-evoframework-playback-symphonia",
  "org-evoframework-source-dlna",
  "org-evoframework-source-files",
+ "org-evoframework-source-nfs",
  "org-evoframework-source-smb",
  "serde_json",
 ]
@@ -485,6 +486,18 @@ dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
  "serde_json",
+]
+
+[[package]]
+name = "org-evoframework-source-nfs"
+version = "0.1.3"
+dependencies = [
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "getrandom",
+ "log",
+ "org-evoframework-source-files",
+ "org-evoframework-source-smb",
 ]
 
 [[package]]

@@ -62,6 +62,8 @@ pub mod shelf {
     pub const DLNA: &str = "dlna";
     /// `source/smb`.
     pub const SMB: &str = "smb";
+    /// `source/nfs`.
+    pub const NFS: &str = "nfs";
     /// `playback/decode`.
     pub const DECODE: &str = "decode";
     /// `playback/receive`.
@@ -93,6 +95,10 @@ pub mod shelf {
     /// `source/smb` as a reference.
     pub fn source_smb() -> ShelfRef {
         ShelfRef::new(SOURCE, SMB)
+    }
+    /// `source/nfs` as a reference.
+    pub fn source_nfs() -> ShelfRef {
+        ShelfRef::new(SOURCE, NFS)
     }
     /// `playback/decode` as a reference.
     pub fn playback_decode() -> ShelfRef {

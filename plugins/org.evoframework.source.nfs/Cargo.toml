@@ -1,0 +1,22 @@
+[package]
+name = "org-evoframework-source-nfs"
+description = "A source over NFS exports on the network: an NFSv3 client in plain Rust (SunRPC over TCP, AUTH_SYS, MOUNT3), the export's folders listed and its files read by offset, so the decoder seeks for free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+org-evoframework-source-files = { path = "../org.evoframework.source.files" }
+org-evoframework-source-smb = { path = "../org.evoframework.source.smb" }
+log = "0.4"
+getrandom = "0.4"
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }
