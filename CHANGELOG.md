@@ -50,6 +50,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "stopped sending" while chunks flowed.
 - The arrival stamp on a Snapcast message is taken once its header is
   in, not before the wait for it.
+- The status strip says when the link is one a stream will feel:
+  *2.4 GHz Wi-Fi* on that band, *weak Wi-Fi* below -75 dBm on either,
+  between the source and the stream so a narrow layout cuts the
+  stream's detail rather than the word. The `Wi-Fi` row of Settings
+  and the status file carry the signal with the band. Measured against
+  one access point with power save off: round trips of 3-9 ms on 5 GHz
+  and 25-125 ms on 2.4 GHz; a Snapcast stream clean on both, its clock
+  holding to 0.6 ms on 5 GHz and wandering by 4 ms on 2.4 GHz.
 
 ## [0.1.1] - 2026-10-20
 

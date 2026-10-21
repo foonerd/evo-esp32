@@ -93,6 +93,11 @@ pub struct View {
     pub muted: bool,
     /// Where the music comes from, for the status strip: "Card".
     pub source: &'static str,
+    /// A word about the link the music depends on ("2.4 GHz Wi-Fi",
+    /// "weak Wi-Fi"), shown on the status strip after the source and
+    /// before the stream, so the strip's end is what a narrow layout
+    /// cuts. Empty when there is nothing to say.
+    pub caution: &'static str,
     /// The queue's order is shuffled.
     pub shuffle: bool,
     /// What the queue does at its end.
@@ -132,6 +137,7 @@ impl View {
             volume: out.map(|o| o.volume).unwrap_or(0),
             muted: out.map(|o| o.muted).unwrap_or(false),
             source,
+            caution: "",
             shuffle: false,
             repeat: Repeat::Off,
             notice: String::new(),
@@ -144,19 +150,23 @@ impl View {
         self.station().is_none()
     }
 
-    /// The status strip: where the music is from, and the stream, or
-    /// the notice when there is one.
+    /// The status strip: where the music is from, the caution about the
+    /// link if there is one, and the stream, or the notice when there
+    /// is one.
     pub fn status_line(&self) -> String {
         let detail = if self.notice.is_empty() {
             self.format_line()
         } else {
             self.notice.clone()
         };
-        if detail.is_empty() {
-            self.source.to_string()
-        } else {
-            format!("{}  ·  {detail}", self.source)
+        let mut line = self.source.to_string();
+        for part in [self.caution, detail.as_str()] {
+            if !part.is_empty() {
+                line.push_str("  ·  ");
+                line.push_str(part);
+            }
         }
+        line
     }
 
     /// The station's name when the track is a stream: its album line,
@@ -1573,6 +1583,21 @@ mod tests {
         let stopped = View::new(&playback::State::default(), None, "Card");
         assert_eq!(stopped.status, Status::Stopped);
         assert_eq!(stopped.format_line(), "");
+        // The strip: source, the caution about the link, the stream; a
+        // narrow layout cuts from the end, so the caution comes first.
+        let mut v = View::new(&playing(), Some(&out()), "Snapcast");
+        assert_eq!(v.status_line(), "Snapcast  ·  FLAC 96 kHz 16 bit");
+        v.caution = "2.4 GHz Wi-Fi";
+        assert_eq!(
+            v.status_line(),
+            "Snapcast  ·  2.4 GHz Wi-Fi  ·  FLAC 96 kHz 16 bit"
+        );
+        v.notice = "the stream ended".into();
+        assert_eq!(
+            v.status_line(),
+            "Snapcast  ·  2.4 GHz Wi-Fi  ·  the stream ended"
+        );
+        assert_eq!(stopped.status_line(), "Card");
     }
 
     #[test]

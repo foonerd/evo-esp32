@@ -47,6 +47,8 @@ pub enum Event {
         hostname: String,
         /// The channel, which says the band.
         channel: u8,
+        /// The signal at the join, dBm; 0 when the driver did not say.
+        rssi: i8,
     },
     /// The link went away; a join is being tried again.
     Down,
@@ -77,10 +79,16 @@ pub enum State {
         hostname: String,
         /// The channel.
         channel: u8,
+        /// The signal at the join, dBm; 0 when unknown.
+        rssi: i8,
     },
     /// Not on the network; why.
     Off(String),
 }
+
+/// Below this the link is called weak: packets go out at the lowest
+/// rates and are retried, and a stream's timing wanders.
+const WEAK_DBM: i8 = -75;
 
 impl State {
     /// One line for Settings and the status file.
@@ -88,15 +96,43 @@ impl State {
         match self {
             State::Joining => "joining".to_string(),
             State::Up {
-                address, channel, ..
+                address,
+                channel,
+                rssi,
+                ..
             } => {
                 let band = match Band::of_channel(*channel) {
                     Band::Five => "5 GHz",
                     _ => "2.4 GHz",
                 };
-                format!("{address} ({band})")
+                if *rssi == 0 {
+                    format!("{address} ({band})")
+                } else {
+                    format!("{address} ({band}, {rssi} dBm)")
+                }
             }
             State::Off(why) => why.clone(),
+        }
+    }
+
+    /// A word for the status strip when the link is one a stream will
+    /// feel: the 2.4 GHz band (a round trip of tens to hundreds of
+    /// milliseconds against single figures on 5 GHz, measured on the
+    /// bench) or a weak signal on either. Empty when the link is good
+    /// or there is none.
+    pub fn caution(&self) -> &'static str {
+        match self {
+            State::Up { channel, rssi, .. } => {
+                let two_four =
+                    !matches!(Band::of_channel(*channel), Band::Five);
+                match (two_four, *rssi != 0 && *rssi < WEAK_DBM) {
+                    (true, true) => "weak 2.4 GHz Wi-Fi",
+                    (true, false) => "2.4 GHz Wi-Fi",
+                    (false, true) => "weak Wi-Fi",
+                    (false, false) => "",
+                }
+            }
+            _ => "",
         }
     }
 }
@@ -157,11 +193,13 @@ impl Net {
                 address,
                 hostname,
                 channel,
+                rssi,
             } => State::Up {
                 ssid: ssid.clone(),
                 address: address.clone(),
                 hostname: hostname.clone(),
                 channel: *channel,
+                rssi: *rssi,
             },
             Event::Down => State::Joining,
             Event::Failed(why) => State::Off(why.clone()),
@@ -229,6 +267,7 @@ fn work(
                     address: net.address().unwrap_or_default(),
                     hostname: net.hostname(),
                     channel: net.joined_ap().map_or(0, |ap| ap.channel),
+                    rssi: signal(),
                 };
                 info!("net: {joined:?}; internal heap {} B", free_internal());
                 if tx.send(joined).is_err() {
@@ -259,4 +298,18 @@ fn work(
 fn free_internal() -> usize {
     // SAFETY: a plain getter with no preconditions.
     unsafe { sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL) }
+}
+
+/// The signal from the access point, dBm; 0 when the driver has no
+/// record (not joined).
+fn signal() -> i8 {
+    // SAFETY: a zeroed record the driver fills; a plain getter.
+    unsafe {
+        let mut ap: sys::wifi_ap_record_t = std::mem::zeroed();
+        if sys::esp_wifi_sta_get_ap_info(&mut ap) == sys::ESP_OK {
+            ap.rssi
+        } else {
+            0
+        }
+    }
 }

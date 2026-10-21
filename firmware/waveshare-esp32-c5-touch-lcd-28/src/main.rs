@@ -889,8 +889,9 @@ fn main() -> anyhow::Result<()> {
                         address,
                         hostname,
                         channel,
+                        rssi,
                     } => format!(
-                        "wifi: joined '{ssid}' on channel {channel}; hostname {hostname}, address {address}"
+                        "wifi: joined '{ssid}' on channel {channel} at {rssi} dBm; hostname {hostname}, address {address}"
                     ),
                     net::Event::Down => "wifi: link down; rejoining".to_string(),
                     net::Event::Failed(why) => format!("wifi: off: {why}"),
@@ -898,27 +899,17 @@ fn main() -> anyhow::Result<()> {
                 config.set_network(line);
                 config.write_status(&status_head);
                 if let net::Event::Up { .. } = &event {
-                    // The link as the driver sees it, for the log: the
-                    // power-save mode (R37) and the signal.
-                    // SAFETY: plain getters on the started driver; the
-                    // record is zeroed and filled by the driver.
+                    // Power save as the driver has it now (R37): the net
+                    // thread turned it off at start, read back here.
+                    // SAFETY: a plain getter on the started driver.
                     unsafe {
                         let mut ps = sys::wifi_ps_type_t_WIFI_PS_MIN_MODEM;
-                        let got_ps = sys::esp_wifi_get_ps(&mut ps);
-                        let mut ap: sys::wifi_ap_record_t = std::mem::zeroed();
-                        let got_ap = sys::esp_wifi_sta_get_ap_info(&mut ap);
-                        info!(
-                            "wifi: power save {}, rssi {} dBm, channel {}",
-                            if got_ps != sys::ESP_OK {
-                                "unknown".to_string()
-                            } else if ps == sys::wifi_ps_type_t_WIFI_PS_NONE {
-                                "off".to_string()
-                            } else {
-                                format!("mode {ps}")
-                            },
-                            if got_ap == sys::ESP_OK { ap.rssi } else { 0 },
-                            if got_ap == sys::ESP_OK { ap.primary } else { 0 }
-                        );
+                        let got = sys::esp_wifi_get_ps(&mut ps);
+                        if got != sys::ESP_OK
+                            || ps != sys::wifi_ps_type_t_WIFI_PS_NONE
+                        {
+                            warn!("wifi: power save is on (mode {ps}, {got})");
+                        }
                     }
                     if mdns.is_none() {
                         mdns = advertise(&hostname, &device_id);
@@ -1046,6 +1037,7 @@ fn main() -> anyhow::Result<()> {
             }
             let source = rooms.source().map_or("Card", Source::label);
             let mut state = View::new(&pb, output.as_ref(), source);
+            state.caution = net.as_ref().map_or("", |n| n.state.caution());
             state.shuffle = queue.shuffle();
             state.repeat = queue.repeat();
             if current.is_none() {
