@@ -22,6 +22,7 @@ log = "0.4"
 org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delivery.null" }
 org-evoframework-playback-symphonia = { path = "../../plugins/org.evoframework.playback.symphonia" }
 org-evoframework-source-files = { path = "../../plugins/org.evoframework.source.files" }
+org-evoframework-source-dlna = { path = "../../plugins/org.evoframework.source.dlna" }
 serde_json = { workspace = true, features = ["std"] }
 
 [build-dependencies]

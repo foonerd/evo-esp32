@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use evo_esp32_face::{
     art, theme, About, Art, Entry as Row, Fact, Library, Screen, Style, Theme,
 };
-use evo_esp32_sdk::catalogue::Catalogue;
+use evo_esp32_sdk::catalogue::{Catalogue, ShelfRef};
 use evo_esp32_sdk::contract::audio::playback::{self, Play};
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
 use evo_esp32_sdk::contract::audio::{
@@ -43,6 +43,7 @@ use evo_esp32_sdk::Ticks;
 use evo_esp32_steward::{Config, Steward};
 use org_evoframework_delivery_null::DeliveryNull;
 use org_evoframework_playback_symphonia::PlaybackSymphonia;
+use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::SourceFiles;
 use sink::PacedWav;
 
@@ -100,6 +101,11 @@ const USAGE: &str = "\
 evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
 
   --dir PATH        the music directory (default .)
+  --dlna NAME       play from the DLNA server of that name (any part of it)
+                    instead: the first track found walking its folders,
+                    those called Music first
+  --iface ADDR      the address of the interface the search goes out of,
+                    on a host with several
   --seconds N       how long to run (default 5)
   --start MS        start the track this many milliseconds in (a seek at open)
   --panel PATH      write the panel's last frame as a PNG
@@ -117,6 +123,8 @@ sets the level, info by default.";
 
 struct Cli {
     dir: PathBuf,
+    dlna: Option<String>,
+    iface: Option<std::net::Ipv4Addr>,
     seconds: u64,
     start_ms: u64,
     panel: Option<PathBuf>,
@@ -132,6 +140,8 @@ struct Cli {
 fn parse_args() -> Result<Cli, String> {
     let mut cli = Cli {
         dir: PathBuf::from("."),
+        dlna: None,
+        iface: None,
         seconds: 5,
         start_ms: 0,
         panel: None,
@@ -158,6 +168,12 @@ fn parse_args() -> Result<Cli, String> {
             .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?;
         match flag.as_str() {
             "--dir" => cli.dir = PathBuf::from(value),
+            "--dlna" => cli.dlna = Some(value),
+            "--iface" => {
+                cli.iface = Some(value.parse().map_err(|_| {
+                    format!("--iface must be an IPv4 address, got {value:?}")
+                })?);
+            }
             "--seconds" => {
                 cli.seconds = value.parse().map_err(|_| {
                     format!("--seconds must be a number, got {value:?}")
@@ -215,6 +231,7 @@ pub fn catalogue() -> Catalogue {
 fn descriptions(dir: &std::path::Path) -> Vec<PluginDescription> {
     vec![
         SourceFiles::new(dir).describe(),
+        SourceDlna::new().describe(),
         PlaybackSymphonia::new(Box::new(PacedWav::new(None))).describe(),
         DeliveryNull::new().describe(),
     ]
@@ -224,6 +241,7 @@ fn descriptions(dir: &std::path::Path) -> Vec<PluginDescription> {
 /// The decoder writes to a paced sink that records to `wav` if given.
 fn bring_up(
     dir: &std::path::Path,
+    iface: Option<std::net::Ipv4Addr>,
     wav: Option<PathBuf>,
     now: Ticks,
 ) -> Result<Steward, String> {
@@ -236,6 +254,15 @@ fn bring_up(
         .map_err(|e| e.to_string())?;
     steward
         .admit_respondent(Box::new(SourceFiles::new(dir)), now)
+        .map_err(|e| e.to_string())?;
+    steward
+        .admit_respondent(
+            Box::new(match iface {
+                Some(a) => SourceDlna::from_interface(a),
+                None => SourceDlna::new(),
+            }),
+            now,
+        )
         .map_err(|e| e.to_string())?;
     steward
         .admit_warden(
@@ -252,55 +279,101 @@ fn bring_up(
     Ok(steward)
 }
 
-/// Ask the source for the root and pick the first track it lists,
-/// going down the first folder where a level has none (a directory
-/// holding one playlist plays that playlist's first station).
+/// Lists one path of a source, printing what came back.
+fn list(
+    steward: &mut Steward,
+    source: &ShelfRef,
+    cid: u32,
+    path: &str,
+    now: Ticks,
+) -> Result<Listing, String> {
+    let response = steward
+        .request(
+            &Request {
+                cid: CorrelationId(cid),
+                shelf: source.clone(),
+                verb: LIST.into(),
+                subject: None,
+                args: to_value(&ListArgs { path: path.into() }),
+            },
+            now,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+    let listing: Listing = match response.outcome {
+        Ok(v) => from_value(&v)?,
+        Err(f) => return Err(format!("list: {f:?}")),
+    };
+    println!(
+        "{}/{} lists {} entries in {:?}:",
+        source.rack,
+        source.shelf,
+        listing.entries.len(),
+        listing.path
+    );
+    for e in &listing.entries {
+        match e {
+            Entry::Folder { name, .. } => println!("  {name}/"),
+            Entry::Track(t) => println!("  {}", t.title),
+        }
+    }
+    Ok(listing)
+}
+
+/// The first track found walking a source's folders depth first from
+/// `root`, folders called Music ahead of the others at every level
+/// (a directory holding one playlist plays that playlist's first
+/// station); the walk is bounded so a wide library does not take the
+/// run with it.
 fn first_track(
     steward: &mut Steward,
+    source: ShelfRef,
+    root: String,
     now: Ticks,
 ) -> Result<Option<Track>, String> {
-    let mut path = String::new();
-    for cid in 1..8 {
-        let response = steward
-            .request(
-                &Request {
-                    cid: CorrelationId(cid),
-                    shelf: shelf::source_files(),
-                    verb: LIST.into(),
-                    subject: None,
-                    args: to_value(&ListArgs { path: path.clone() }),
-                },
-                now,
-            )
-            .map_err(|e| format!("{e:?}"))?;
-        let listing: Listing = match response.outcome {
-            Ok(v) => from_value(&v)?,
-            Err(f) => return Err(format!("list: {f:?}")),
-        };
-        println!(
-            "source/files lists {} entries in {:?}:",
-            listing.entries.len(),
-            listing.path
-        );
-        for e in &listing.entries {
-            match e {
-                Entry::Folder { name, .. } => println!("  {name}/"),
-                Entry::Track(t) => println!("  {}", t.title),
-            }
-        }
-        let mut first_folder = None;
+    const LISTS: u32 = 40;
+    let mut pending = vec![root];
+    for cid in 1..=LISTS {
+        let Some(path) = pending.pop() else { break };
+        let listing = list(steward, &source, cid, &path, now)?;
+        let mut folders = Vec::new();
         for e in listing.entries {
             match e {
                 Entry::Track(t) => return Ok(Some(t)),
-                Entry::Folder { path, .. } => {
-                    first_folder.get_or_insert(path);
+                Entry::Folder { path, name } => {
+                    folders.push((
+                        name.to_ascii_lowercase().contains("music"),
+                        path,
+                    ));
                 }
             }
         }
-        match first_folder {
-            Some(p) => path = p,
-            None => return Ok(None),
+        // Popped from the end: the last pushed is walked first.
+        folders.sort_by_key(|(music, _)| *music);
+        pending.extend(folders.into_iter().map(|(_, p)| p));
+    }
+    Ok(None)
+}
+
+/// The path of the DLNA server whose name has `name` in it, once the
+/// search has found it; the source is polled since the search runs on
+/// its own thread.
+fn dlna_server(
+    steward: &mut Steward,
+    name: &str,
+    now: Ticks,
+) -> Result<Option<String>, String> {
+    let wanted = name.to_ascii_lowercase();
+    for cid in 1..=20u32 {
+        let listing =
+            list(steward, &shelf::source_dlna(), 1000 + cid, "", now)?;
+        for e in listing.entries {
+            if let Entry::Folder { path, name } = e {
+                if name.to_ascii_lowercase().contains(&wanted) {
+                    return Ok(Some(path));
+                }
+            }
         }
+        std::thread::sleep(Duration::from_millis(500));
     }
     Ok(None)
 }
@@ -471,13 +544,14 @@ fn main() {
         return;
     }
 
-    let mut steward = match bring_up(&cli.dir, cli.wav.clone(), now()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    };
+    let mut steward =
+        match bring_up(&cli.dir, cli.iface, cli.wav.clone(), now()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
     println!(
         "steward up with {} plugins: {}",
         steward.plugins().count(),
@@ -488,15 +562,49 @@ fn main() {
             .join(", ")
     );
 
-    let track = match first_track(&mut steward, now()) {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            eprintln!("no audio file in {}", cli.dir.display());
-            std::process::exit(1);
+    let track = if let Some(name) = &cli.dlna {
+        // The search runs on its thread; a server takes a couple of
+        // seconds to answer.
+        let server = match dlna_server(&mut steward, name, now()) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                eprintln!(
+                    "no DLNA server called {name:?} answered in ten seconds"
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
+        match first_track(&mut steward, shelf::source_dlna(), server, now()) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                eprintln!("no track found on {name:?}");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         }
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
+    } else {
+        match first_track(
+            &mut steward,
+            shelf::source_files(),
+            String::new(),
+            now(),
+        ) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                eprintln!("no audio file in {}", cli.dir.display());
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
         }
     };
 
@@ -649,8 +757,12 @@ mod tests {
         // 300 ms at 8 kHz: short enough to play out within the test.
         sink::write_tone(&dir.join("song.wav"), 8000, 300).unwrap();
         let heard = dir.join("heard.wav");
-        let mut s = bring_up(&dir, Some(heard.clone()), Ticks(0)).unwrap();
-        let track = first_track(&mut s, Ticks(0)).unwrap().unwrap();
+        let mut s =
+            bring_up(&dir, None, Some(heard.clone()), Ticks(0)).unwrap();
+        let track =
+            first_track(&mut s, shelf::source_files(), String::new(), Ticks(0))
+                .unwrap()
+                .unwrap();
         assert_eq!(track.title, "song");
         s.assign(
             &shelf::playback_decode(),

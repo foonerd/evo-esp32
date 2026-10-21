@@ -14,6 +14,11 @@ name = "files"
 shape = 1
 description = "A tree of files: a directory on the host, a card on a device."
 
+[[racks.shelves]]
+name = "dlna"
+shape = 1
+description = "The DLNA media servers on the network, found by SSDP and browsed through ContentDirectory; their tracks play over HTTP."
+
 [[racks]]
 name = "playback"
 family = "domain"
