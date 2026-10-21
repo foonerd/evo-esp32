@@ -53,6 +53,11 @@ pub const LOW_WATER: usize = 24 * 1024;
 const READ_PATIENCE: Duration = Duration::from_secs(4);
 /// The fetch thread's read size.
 const FETCH: usize = 4096;
+/// The fetch thread's stack: it opens connections too — on a reconnect,
+/// and for every segment and playlist of an HLS station — so it has
+/// what the open thread has for a TLS handshake. Placed by the
+/// distribution (PSRAM on the board).
+const FETCH_STACK: usize = 32 * 1024;
 
 /// What is known about a stream once its headers are read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -193,7 +198,7 @@ pub fn start(
     let fetcher = Arc::downgrade(&shared);
     thread::Builder::new()
         .name("fetch".into())
-        .stack_size(16 * 1024)
+        .stack_size(FETCH_STACK)
         .spawn(move || fetch(stream, metaint, reopen, fetcher))?;
     Ok((
         Buffered {
