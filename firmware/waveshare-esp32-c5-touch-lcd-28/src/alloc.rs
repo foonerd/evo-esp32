@@ -57,6 +57,9 @@ static SRAM_BLOCKS: AtomicUsize = AtomicUsize::new(0);
 static PSRAM_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PSRAM_BLOCKS: AtomicUsize = AtomicUsize::new(0);
 static DIVERTED: AtomicUsize = AtomicUsize::new(0);
+/// The codecs' live bytes in each memory, through the hooks below.
+static CODEC_SRAM: AtomicUsize = AtomicUsize::new(0);
+static CODEC_PSRAM: AtomicUsize = AtomicUsize::new(0);
 
 /// What the heartbeat says of the medium band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +74,10 @@ pub struct Account {
     pub psram_blocks: usize,
     /// Medium allocations the floor sent to PSRAM, since boot.
     pub diverted: usize,
+    /// The codecs' live bytes in SRAM.
+    pub codec_sram: usize,
+    /// The codecs' live bytes in PSRAM.
+    pub codec_psram: usize,
 }
 
 impl Account {
@@ -82,18 +89,22 @@ impl Account {
             psram_bytes: PSRAM_BYTES.load(Relaxed),
             psram_blocks: PSRAM_BLOCKS.load(Relaxed),
             diverted: DIVERTED.load(Relaxed),
+            codec_sram: CODEC_SRAM.load(Relaxed),
+            codec_psram: CODEC_PSRAM.load(Relaxed),
         }
     }
 
     /// One line for the heartbeat.
     pub fn line(&self) -> String {
         format!(
-            "medium band {} KB in {} blocks in SRAM, {} KB in {} in PSRAM, {} sent to PSRAM by the floor",
+            "medium band {} KB in {} blocks in SRAM, {} KB in {} in PSRAM, {} sent to PSRAM by the floor; codec {} KB in SRAM, {} KB in PSRAM",
             self.sram_bytes / 1024,
             self.sram_blocks,
             self.psram_bytes / 1024,
             self.psram_blocks,
-            self.diverted
+            self.diverted,
+            self.codec_sram / 1024,
+            self.codec_psram / 1024
         )
     }
 }
@@ -108,16 +119,22 @@ fn in_psram(p: *mut u8) -> bool {
 /// The capabilities tried for `size`, in order.
 fn prefer(size: usize) -> [u32; 2] {
     if (MEDIUM..LARGE).contains(&size) {
-        // SAFETY: a plain getter; sums the registered heaps' counters.
-        let free = unsafe { sys::heap_caps_get_free_size(INTERNAL) };
-        if free < FLOOR + size {
-            DIVERTED.fetch_add(1, Relaxed);
-            [SPIRAM, INTERNAL]
-        } else {
-            [INTERNAL, SPIRAM]
-        }
+        under_floor(size)
     } else {
         [SPIRAM, INTERNAL]
+    }
+}
+
+/// SRAM first while [`FLOOR`] would still be free after `size`, else
+/// PSRAM first.
+fn under_floor(size: usize) -> [u32; 2] {
+    // SAFETY: a plain getter; sums the registered heaps' counters.
+    let free = unsafe { sys::heap_caps_get_free_size(INTERNAL) };
+    if free < FLOOR + size {
+        DIVERTED.fetch_add(1, Relaxed);
+        [SPIRAM, INTERNAL]
+    } else {
+        [INTERNAL, SPIRAM]
     }
 }
 
@@ -163,59 +180,115 @@ unsafe impl GlobalAlloc for Placed {
 // Espressif's audio codecs (the MP3 and AAC decoders) take their working
 // memory through four hooks the library defines weak, for an application
 // to place as it sees fit; the library's own go to `malloc`, which on
-// ESP-IDF means internal SRAM for anything under 16 KB. A decoder's state
-// is tens of kilobytes held for the length of a track (measured: MP3's
-// took 29 KB of internal, the floor above notwithstanding, since it is
-// not the Rust heap). Here they go to PSRAM first. These live in the
-// firmware crate, whose objects the linker takes whole, so the strong
-// definitions are present before the library's weak ones are met.
+// ESP-IDF means internal SRAM for anything under 16 KB, outside the
+// floor's reach (measured: MP3's state took 29 KB of internal). Here
+// they follow the medium band's rule: SRAM while the floor holds, PSRAM
+// after, so the decoder's hot state runs from the faster memory as far
+// as the drivers can spare it (the same state in PSRAM cost the MP3
+// decoder a quarter more of the core). These live in the firmware
+// crate, whose objects the linker takes whole, so the strong definitions
+// are present before the library's weak ones are met.
+
+fn codec_account(p: *mut c_void, freed: bool) {
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: `p` came from heap_caps; the size is the block's own.
+    let size = unsafe { sys::heap_caps_get_allocated_size(p) };
+    let bytes = if in_psram(p.cast()) {
+        &CODEC_PSRAM
+    } else {
+        &CODEC_SRAM
+    };
+    if freed {
+        bytes.fetch_sub(size, Relaxed);
+    } else {
+        bytes.fetch_add(size, Relaxed);
+    }
+}
+
+fn codec_log(module: *const core::ffi::c_char, size: usize, p: *mut c_void) {
+    let module = if module.is_null() {
+        "?"
+    } else {
+        // SAFETY: the library passes its own static name.
+        unsafe { core::ffi::CStr::from_ptr(module) }
+            .to_str()
+            .unwrap_or("?")
+    };
+    log::info!(
+        "codec: {module} takes {size} B in {}",
+        if p.is_null() {
+            "nothing (out of memory)"
+        } else if in_psram(p.cast()) {
+            "PSRAM"
+        } else {
+            "SRAM"
+        }
+    );
+}
 
 /// `module` is the codec's name, for a log the library does not keep.
 #[no_mangle]
 pub unsafe extern "C" fn media_lib_module_malloc(
-    _module: *const core::ffi::c_char,
+    module: *const core::ffi::c_char,
     size: usize,
 ) -> *mut c_void {
-    let p = sys::heap_caps_malloc(size, SPIRAM);
-    if p.is_null() {
-        sys::heap_caps_malloc(size, INTERNAL)
-    } else {
-        p
+    let mut p = core::ptr::null_mut();
+    for caps in under_floor(size) {
+        p = sys::heap_caps_malloc(size, caps);
+        if !p.is_null() {
+            break;
+        }
     }
+    codec_account(p, false);
+    codec_log(module, size, p);
+    p
 }
 
 /// As `calloc`, zeroed.
 #[no_mangle]
 pub unsafe extern "C" fn media_lib_module_calloc(
-    _module: *const core::ffi::c_char,
+    module: *const core::ffi::c_char,
     n: usize,
     size: usize,
 ) -> *mut c_void {
-    let p = sys::heap_caps_calloc(n, size, SPIRAM);
-    if p.is_null() {
-        sys::heap_caps_calloc(n, size, INTERNAL)
-    } else {
-        p
+    let mut p = core::ptr::null_mut();
+    for caps in under_floor(n.saturating_mul(size)) {
+        p = sys::heap_caps_calloc(n, size, caps);
+        if !p.is_null() {
+            break;
+        }
     }
+    codec_account(p, false);
+    codec_log(module, n.saturating_mul(size), p);
+    p
 }
 
-/// As `realloc`; a block moves to PSRAM when it grows.
+/// As `realloc`: the block is placed again by the rule at its new size.
 #[no_mangle]
 pub unsafe extern "C" fn media_lib_module_realloc(
-    _module: *const core::ffi::c_char,
+    module: *const core::ffi::c_char,
     ptr: *mut c_void,
     size: usize,
 ) -> *mut c_void {
-    let p = sys::heap_caps_realloc(ptr, size, SPIRAM);
-    if p.is_null() {
-        sys::heap_caps_realloc(ptr, size, INTERNAL)
-    } else {
-        p
+    codec_account(ptr, true);
+    let mut p = core::ptr::null_mut();
+    for caps in under_floor(size) {
+        p = sys::heap_caps_realloc(ptr, size, caps);
+        if !p.is_null() {
+            break;
+        }
     }
+    // A failed realloc leaves the old block where it was.
+    codec_account(if p.is_null() { ptr } else { p }, false);
+    codec_log(module, size, p);
+    p
 }
 
 /// The heap's `free` serves blocks from either memory.
 #[no_mangle]
 pub unsafe extern "C" fn media_lib_free(ptr: *mut c_void) {
+    codec_account(ptr, true);
     sys::heap_caps_free(ptr);
 }
