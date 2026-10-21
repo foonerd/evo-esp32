@@ -152,6 +152,7 @@ dependencies = [
  "log",
  "org-evoframework-delivery-null",
  "org-evoframework-playback-symphonia",
+ "org-evoframework-source-dlna",
  "org-evoframework-source-files",
  "serde_json",
 ]
@@ -371,6 +372,15 @@ dependencies = [
  "serde",
  "serde_json",
  "symphonia",
+]
+
+[[package]]
+name = "org-evoframework-source-dlna"
+version = "0.1.2"
+dependencies = [
+ "evo-esp32-sdk",
+ "evo-esp32-steward",
+ "log",
 ]
 
 [[package]]

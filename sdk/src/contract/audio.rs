@@ -58,6 +58,8 @@ pub mod shelf {
     pub const FILES: &str = "files";
     /// `source/radio`.
     pub const RADIO: &str = "radio";
+    /// `source/dlna`.
+    pub const DLNA: &str = "dlna";
     /// `playback/decode`.
     pub const DECODE: &str = "decode";
     /// `playback/receive`.
@@ -81,6 +83,10 @@ pub mod shelf {
     /// `source/radio` as a reference.
     pub fn source_radio() -> ShelfRef {
         ShelfRef::new(SOURCE, RADIO)
+    }
+    /// `source/dlna` as a reference.
+    pub fn source_dlna() -> ShelfRef {
+        ShelfRef::new(SOURCE, DLNA)
     }
     /// `playback/decode` as a reference.
     pub fn playback_decode() -> ShelfRef {

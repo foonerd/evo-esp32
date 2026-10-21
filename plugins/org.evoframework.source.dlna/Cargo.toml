@@ -1,0 +1,19 @@
+[package]
+name = "org-evoframework-source-dlna"
+description = "A source over the DLNA media servers on the network: found by SSDP, browsed through ContentDirectory, their tracks played over HTTP like files on the card."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+evo-esp32-sdk = { path = "../../sdk" }
+log = "0.4"
+
+[dev-dependencies]
+evo-esp32-steward = { path = "../../steward" }
