@@ -556,10 +556,7 @@ mod tests {
     #[test]
     fn references_resolve() {
         assert_eq!(
-            resolve(
-                "http://192.0.2.10:8200/rootDesc.xml",
-                "/ctl/ContentDir"
-            ),
+            resolve("http://192.0.2.10:8200/rootDesc.xml", "/ctl/ContentDir"),
             "http://192.0.2.10:8200/ctl/ContentDir"
         );
         assert_eq!(
