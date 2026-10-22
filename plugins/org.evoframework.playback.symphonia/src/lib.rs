@@ -800,9 +800,12 @@ fn open(
         let patches = flac::picture_patches(&mut file).unwrap_or_default();
         patched_in = patching.elapsed();
         pictures = patches.len();
-        let reader =
-            ahead::ReadAhead::new(flac::Patched::new(file, patches), len)
-                .map_err(|e| CustodyError(format!("reader: {e}")))?;
+        let reader = ahead::ReadAhead::with_tuning(
+            flac::Patched::new(file, patches),
+            len,
+            ahead::Tuning::network(),
+        )
+        .map_err(|e| CustodyError(format!("reader: {e}")))?;
         ahead_watch = Some(reader.watch(NETWORK_LOW_WATER));
         Box::new(reader)
     } else if is_network(uri) {
@@ -833,8 +836,12 @@ fn open(
         if let Some(len) = netfile::seekable_length(bytes.as_ref()) {
             let file =
                 netfile::NetFile::new(Arc::clone(opener), uri, bytes, len);
-            let reader = ahead::ReadAhead::new(file, len)
-                .map_err(|e| CustodyError(format!("reader: {e}")))?;
+            let reader = ahead::ReadAhead::with_tuning(
+                file,
+                len,
+                ahead::Tuning::network(),
+            )
+            .map_err(|e| CustodyError(format!("reader: {e}")))?;
             ahead_watch = Some(reader.watch(NETWORK_LOW_WATER));
             Box::new(reader)
         } else {

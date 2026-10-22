@@ -22,7 +22,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use symphonia::core::io::MediaSource;
 
@@ -99,10 +99,55 @@ const BLOCK: usize = 512;
 /// twice what a 96 kHz FLAC takes.
 const EAGER: usize = 4 * CHUNK;
 /// The pause between chunks once [`EAGER`] is in hand.
-const PACE: std::time::Duration = std::time::Duration::from_millis(6);
+const PACE: Duration = Duration::from_millis(6);
 /// The reader's stack: the file system and the card's driver, or a
 /// network transport's read.
 const STACK: usize = 12 * 1024;
+
+/// How the reader asks its source: by chunks of what size, how much it
+/// keeps ahead before it slows, and the pause between chunks then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tuning {
+    /// Bytes asked for at a time.
+    pub chunk: usize,
+    /// Below this much ahead, chunk after chunk; above, paced.
+    pub eager: usize,
+    /// The pause between chunks once eager is in hand.
+    pub pace: Duration,
+}
+
+impl Tuning {
+    /// The card: [`CHUNK`], [`EAGER`], [`PACE`] — small chunks the
+    /// card's DMA reaches, paced so the panel's bus is shared.
+    pub const fn card() -> Self {
+        Tuning {
+            chunk: CHUNK,
+            eager: EAGER,
+            pace: PACE,
+        }
+    }
+
+    /// A file on a server. The same chunk: a reply of 8 KB is six TCP
+    /// segments, what the ESP32-C5's Wi-Fi receive buffers hold at
+    /// once (a 64 KB reply overran them, was retransmitted after the
+    /// timeout, and came at a third of the link's rate). The same
+    /// pace: unpaced, the reader fires requests back to back and every
+    /// other call on the radio — the next track's open, a listing —
+    /// queues behind them (measured: opens of 60–90 ms became 0.7–3.5
+    /// s). A deeper landing zone, so a seek or an open has its first
+    /// chunks without pauses. One request is in flight at a time, so a
+    /// link that answers in 14 ms gives 570 KB/s: a 96 kHz FLAC
+    /// (576 KB/s) is at the edge over the network whatever the chunk;
+    /// 44.1 and 48 kHz are comfortable. A second request in flight is
+    /// the lever, when it is wanted.
+    pub const fn network() -> Self {
+        Tuning {
+            chunk: CHUNK,
+            eager: 8 * CHUNK,
+            pace: PACE,
+        }
+    }
+}
 
 struct State {
     /// Bytes read from the file, in file order: those behind `head`
@@ -206,8 +251,21 @@ impl ReadAhead {
 }
 
 impl ReadAhead {
-    /// Start reading `source` from its start; `len` is its length.
-    pub fn new<S>(mut source: S, len: u64) -> std::io::Result<Self>
+    /// Start reading `source` from its start, tuned for the card;
+    /// `len` is its length.
+    pub fn new<S>(source: S, len: u64) -> std::io::Result<Self>
+    where
+        S: Read + Seek + Send + 'static,
+    {
+        Self::with_tuning(source, len, Tuning::card())
+    }
+
+    /// Start reading `source` from its start with `tuning`.
+    pub fn with_tuning<S>(
+        mut source: S,
+        len: u64,
+        tuning: Tuning,
+    ) -> std::io::Result<Self>
     where
         S: Read + Seek + Send + 'static,
     {
@@ -229,7 +287,7 @@ impl ReadAhead {
         thread::Builder::new()
             .name("read".into())
             .stack_size(STACK)
-            .spawn(move || read_ahead(&mut source, &reader))?;
+            .spawn(move || read_ahead(&mut source, &reader, tuning))?;
         Ok(Self {
             shared,
             len,
@@ -240,13 +298,14 @@ impl ReadAhead {
 
 /// The reader: fill the ring from the source while there is room, wait
 /// when there is none, move when asked, stop when told.
-fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared) {
+fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
     // The buffer is taken at a four-byte boundary within a slightly
     // larger allocation: the card's driver wants that alignment for a
     // direct transfer, and a byte vector promises none.
-    let mut raw = vec![0u8; CHUNK + 4];
+    let chunk = tuning.chunk.max(BLOCK) / BLOCK * BLOCK;
+    let mut raw = vec![0u8; chunk + 4];
     let skew = raw.as_ptr().align_offset(4);
-    let buf = &mut raw[skew..skew + CHUNK];
+    let buf = &mut raw[skew..skew + chunk];
     loop {
         let (generation, want, paced) = {
             let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -277,13 +336,13 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared) {
                 }
                 break (
                     s.generation,
-                    room.min(CHUNK) / BLOCK * BLOCK,
-                    s.available() >= EAGER,
+                    room.min(chunk) / BLOCK * BLOCK,
+                    s.available() >= tuning.eager,
                 );
             }
         };
-        if paced {
-            thread::sleep(PACE);
+        if paced && !tuning.pace.is_zero() {
+            thread::sleep(tuning.pace);
         }
         // The card is waited on with the lock released: the decoder
         // keeps taking from the ring meanwhile.
@@ -570,6 +629,22 @@ mod tests {
             "the ring filled in {:?}, unpaced",
             paced_by.elapsed()
         );
+        drop(ahead);
+    }
+
+    #[test]
+    fn the_network_tuning_lands_a_deeper_eager_zone_at_once() {
+        let bytes = pattern(CAPACITY);
+        let (source, _, log) = counted(&bytes);
+        let tuning = Tuning::network();
+        assert_eq!(tuning.chunk, CHUNK);
+        let began = Instant::now();
+        let ahead =
+            ReadAhead::with_tuning(source, bytes.len() as u64, tuning).unwrap();
+        while log.lock().unwrap().len() < tuning.eager / CHUNK {
+            assert!(began.elapsed() < PACE * 20, "the eager zone paced");
+            thread::yield_now();
+        }
         drop(ahead);
     }
 }

@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The read-ahead ring is tuned per source. The card keeps small,
+  paced chunks (its DMA reaches them; the pace shares the SPI bus
+  with the panel). A file on a server reads the same 8 KB chunks — a
+  64 KB reply overran the chip's Wi-Fi receive buffers and came at a
+  third of the link's rate — with a deeper landing zone, paced after
+  it so a listing or the next track's open is not queued behind a
+  burst of reads. One request is in flight at a time: a link that
+  answers in 14 ms carries 570 KB/s, so a 96 kHz FLAC over the network
+  is at the edge of this chip's radio whatever the chunk; 44.1 and
+  48 kHz play with room to spare.
+
 - NFS version 4.1. An `nfs://` share is mounted by NFS 4.1 where the
   server speaks it, by version 3 where it does not: one TCP
   connection to the NFS port, no portmapper and no MOUNT, EXCHANGE_ID
