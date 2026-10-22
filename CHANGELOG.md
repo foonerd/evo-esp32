@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-22
+
 - Fixed: a seek into a track on the card could slow the card for the
   rest of the track. The read-ahead ring restarted at the exact byte
   the decoder asked for — a FLAC frame begins at any byte — and from
