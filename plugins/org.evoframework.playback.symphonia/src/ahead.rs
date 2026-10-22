@@ -115,14 +115,13 @@ pub struct Tuning {
     pub eager: usize,
     /// The pause between chunks once eager is in hand.
     pub pace: Duration,
-    /// What the ring holds at most, [`BEHIND`] of it behind the decoder.
+    /// What the ring holds at most, `BEHIND` of it behind the decoder.
     pub capacity: usize,
 }
 
 impl Tuning {
-    /// The card: [`CHUNK`], [`EAGER`], [`PACE`], [`CAPACITY`] — small
-    /// chunks the card's DMA reaches, paced so the panel's bus is
-    /// shared.
+    /// The card: `CHUNK`, `EAGER`, `PACE`, `CAPACITY` — small chunks
+    /// the card's DMA reaches, paced so the panel's bus is shared.
     pub const fn card() -> Self {
         Tuning {
             chunk: CHUNK,
