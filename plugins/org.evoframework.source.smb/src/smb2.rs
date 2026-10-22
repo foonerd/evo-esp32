@@ -1,7 +1,10 @@
 //! The SMB2 client: one connection, one session, one tree, spoken in
-//! dialects 2.0.2 and 2.1 ([MS-SMB2]). Signing is HMAC-SHA256 when the
-//! server asks for it; dialect 3 is not offered, so a server that
-//! insists on it is told apart from one that is down.
+//! dialects 2.0.2, 2.1 and 3.1.1 ([MS-SMB2]). Signing is HMAC-SHA256
+//! on 2.x and AES-CMAC on 3.1.1, when the server asks for it; on 3.1.1
+//! the negotiate and session setup are bound by pre-authentication
+//! integrity, and a session or share that demands encryption is
+//! sealed with AES-128-GCM. Dialects 3.0 and 3.0.2 are not offered,
+//! so a server is either on 2.x or on 3.1.1 with us.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -10,6 +13,7 @@ use std::time::Duration;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::crypto;
 use crate::ntlm::{self, Credentials};
 use crate::spnego;
 use crate::wire::{
@@ -19,11 +23,22 @@ use crate::wire::{
 
 const DIALECT_2_0_2: u16 = 0x0202;
 const DIALECT_2_1: u16 = 0x0210;
+const DIALECT_3_1_1: u16 = 0x0311;
 const SECURITY_MODE_SIGNING_ENABLED: u16 = 0x0001;
 const SECURITY_MODE_SIGNING_REQUIRED: u16 = 0x0002;
 const CAP_LARGE_MTU: u32 = 0x0000_0004;
+const CAP_ENCRYPTION: u32 = 0x0000_0040;
 const SESSION_FLAG_IS_GUEST: u16 = 0x0001;
 const SESSION_FLAG_IS_NULL: u16 = 0x0002;
+const SESSION_FLAG_ENCRYPT_DATA: u16 = 0x0004;
+const SHARE_FLAG_ENCRYPT_DATA: u32 = 0x0000_8000;
+
+const CONTEXT_PREAUTH_INTEGRITY: u16 = 0x0001;
+const CONTEXT_ENCRYPTION: u16 = 0x0002;
+const HASH_SHA512: u16 = 0x0001;
+const CIPHER_AES_128_GCM: u16 = 0x0002;
+/// The transform header's length.
+const TRANSFORM: usize = 52;
 
 const FILE_READ_DATA: u32 = 0x0000_0001;
 const FILE_LIST_DIRECTORY: u32 = 0x0000_0001;
@@ -98,16 +113,39 @@ pub struct Session {
     next_id: u64,
     session_id: u64,
     tree_id: u32,
-    signing_key: Option<[u8; 16]>,
+    signing: Option<Signing>,
+    /// The 3.1.1 keys for sealing, once the session has them.
+    seal: Option<Seal>,
+    /// Whether every message from here on is sealed: the session or
+    /// the share said so.
+    encrypt: bool,
+    /// The pre-authentication integrity hash, on 3.1.1 (and before the
+    /// dialect is known).
+    preauth: Option<crypto::Preauth>,
     max_read: u32,
     max_transact: u32,
     frame: Vec<u8>,
-    /// The dialect the server chose: 0x0202 or 0x0210.
+    /// The dialect the server chose: 0x0202, 0x0210 or 0x0311.
     pub dialect: u16,
     /// The server's name for itself, from the challenge.
     pub server_name: String,
     /// Whether the server let the session in as a guest.
     pub guest: bool,
+}
+
+/// How messages are signed.
+enum Signing {
+    /// 2.x: HMAC-SHA256 with the session key.
+    Hmac([u8; 16]),
+    /// 3.1.1: AES-CMAC with the derived signing key.
+    Cmac([u8; 16]),
+}
+
+/// The sealing keys and the nonce counter.
+struct Seal {
+    to_server: [u8; 16],
+    from_server: [u8; 16],
+    nonce: u64,
 }
 
 impl Session {
@@ -128,7 +166,10 @@ impl Session {
             next_id: 0,
             session_id: 0,
             tree_id: 0,
-            signing_key: None,
+            signing: None,
+            seal: None,
+            encrypt: false,
+            preauth: Some([0u8; 64]),
             max_read: READ_CHUNK,
             max_transact: 64 * 1024,
             frame: Vec::with_capacity(HEADER + 1024),
@@ -229,13 +270,37 @@ impl Session {
         let mut guid = [0u8; 16];
         getrandom::fill(&mut guid)
             .map_err(|e| Error::Io(format!("random: {e}")))?;
-        let mut b = Body::with_capacity(40);
+        let mut salt = [0u8; 32];
+        getrandom::fill(&mut salt)
+            .map_err(|e| Error::Io(format!("random: {e}")))?;
+        // Three dialects, then the 3.1.1 contexts on an 8-byte
+        // boundary from the start of the header.
+        let dialects: [u16; 3] = [DIALECT_2_0_2, DIALECT_2_1, DIALECT_3_1_1];
+        let dialects_end = HEADER + 36 + 2 * dialects.len();
+        let contexts_at = (dialects_end + 7) & !7;
+        let mut b = Body::with_capacity(120);
         b.u16(36)
-            .u16(2)
+            .u16(dialects.len() as u16)
             .u16(SECURITY_MODE_SIGNING_ENABLED)
             .u16(0)
-            .u32(0);
-        b.bytes(&guid).u64(0).u16(DIALECT_2_0_2).u16(DIALECT_2_1);
+            .u32(CAP_LARGE_MTU | CAP_ENCRYPTION);
+        b.bytes(&guid).u32(contexts_at as u32).u16(2).u16(0);
+        for d in dialects {
+            b.u16(d);
+        }
+        for _ in dialects_end..contexts_at {
+            b.u8(0);
+        }
+        // Pre-authentication integrity: SHA-512 and our salt.
+        b.u16(CONTEXT_PREAUTH_INTEGRITY).u16(38).u32(0);
+        b.u16(1).u16(32).u16(HASH_SHA512).bytes(&salt);
+        // 38 bytes of context data, padded to the next 8.
+        for _ in 0..2 {
+            b.u8(0);
+        }
+        // Encryption: AES-128-GCM.
+        b.u16(CONTEXT_ENCRYPTION).u16(4).u32(0);
+        b.u16(1).u16(CIPHER_AES_128_GCM);
         let reply = self.send(wire::NEGOTIATE, &b.0)?;
         self.ok(&reply)?;
         let body = &self.frame[HEADER..];
@@ -243,7 +308,7 @@ impl Session {
             return Err(Error::Malformed("negotiate reply"));
         }
         let dialect = get16(body, 4);
-        if dialect != DIALECT_2_0_2 && dialect != DIALECT_2_1 {
+        if !matches!(dialect, DIALECT_2_0_2 | DIALECT_2_1 | DIALECT_3_1_1) {
             return Err(Error::Auth(format!(
                 "server chose dialect {dialect:#06x}"
             )));
@@ -255,8 +320,51 @@ impl Session {
             dialect >= DIALECT_2_1 && capabilities & CAP_LARGE_MTU != 0;
         self.max_transact = get32(body, 28).max(1024);
         self.max_read = get32(body, 32).max(1024);
+        let mut cipher = None;
+        if dialect == DIALECT_3_1_1 {
+            // The server's contexts: its hash choice (SHA-512 is the
+            // only one) and whether it will seal with our cipher.
+            let count = get16(body, 6) as usize;
+            let mut at = get32(body, 60) as usize;
+            let mut hash_agreed = false;
+            for _ in 0..count {
+                let ctx = self
+                    .frame
+                    .get(at..at + 8)
+                    .ok_or(Error::Malformed("negotiate context"))?;
+                let kind = get16(ctx, 0);
+                let len = get16(ctx, 2) as usize;
+                let data = self
+                    .frame
+                    .get(at + 8..at + 8 + len)
+                    .ok_or(Error::Malformed("negotiate context data"))?;
+                match kind {
+                    CONTEXT_PREAUTH_INTEGRITY => {
+                        hash_agreed = data.len() >= 6
+                            && get16(data, 0) == 1
+                            && get16(data, 4) == HASH_SHA512;
+                    }
+                    CONTEXT_ENCRYPTION
+                        if data.len() >= 4
+                            && get16(data, 2) == CIPHER_AES_128_GCM =>
+                    {
+                        cipher = Some(CIPHER_AES_128_GCM);
+                    }
+                    _ => {}
+                }
+                at = (at + 8 + len + 7) & !7;
+            }
+            if !hash_agreed {
+                return Err(Error::Auth(
+                    "the server offered no pre-authentication hash".into(),
+                ));
+            }
+        } else {
+            // The chain is 3.1.1's; the 2.x keys do not use it.
+            self.preauth = None;
+        }
         log::debug!(
-            "smb2: dialect {dialect:#06x}, capabilities {capabilities:#x}, security mode {security_mode:#x}, max read {}, max transact {}",
+            "smb2: dialect {dialect:#06x}, capabilities {capabilities:#x}, security mode {security_mode:#x}, cipher {cipher:?}, max read {}, max transact {}",
             self.max_read,
             self.max_transact
         );
@@ -264,6 +372,7 @@ impl Session {
             signing_required: security_mode & SECURITY_MODE_SIGNING_REQUIRED
                 != 0,
             server_time: get64(body, 40),
+            cipher,
         })
     }
 
@@ -348,6 +457,7 @@ impl Session {
         let flags = get16(body, 2);
         self.guest =
             flags & (SESSION_FLAG_IS_GUEST | SESSION_FLAG_IS_NULL) != 0;
+        let session_encrypts = flags & SESSION_FLAG_ENCRYPT_DATA != 0;
         if let (Some(key), Some(mic)) = (
             auth.session_key,
             spnego::parse(setup_blob(&self.frame)?)
@@ -361,22 +471,78 @@ impl Session {
             }
         }
         // A guest or null session has no key the server shares; signing
-        // is for a session that proved a password.
-        if let (Some(key), false) = (auth.session_key, self.guest) {
-            if negotiated.signing_required || reply.flags & FLAG_SIGNED != 0 {
-                // The server signed its acceptance with the key we hold:
-                // verifying it proves the exchange before the tree.
-                if reply.flags & FLAG_SIGNED != 0 && !verify(&key, &self.frame)
+        // and sealing are for a session that proved a password.
+        match (auth.session_key, self.guest, self.preauth) {
+            (Some(key), false, Some(preauth)) => {
+                // 3.1.1: every key is derived from the session key and
+                // the hash of the exchange so far, the final reply
+                // left out of it.
+                let signing =
+                    crypto::derive(&key, b"SMBSigningKey\0", &preauth);
+                if reply.flags & FLAG_SIGNED != 0
+                    && !verify_cmac(&signing, &self.frame)
                 {
                     return Err(Error::Signature);
                 }
-                self.signing_key = Some(key);
+                self.signing = Some(Signing::Cmac(signing));
+                if negotiated.cipher.is_some() {
+                    self.seal = Some(Seal {
+                        to_server: crypto::derive(
+                            &key,
+                            b"SMBC2SCipherKey\0",
+                            &preauth,
+                        ),
+                        from_server: crypto::derive(
+                            &key,
+                            b"SMBS2CCipherKey\0",
+                            &preauth,
+                        ),
+                        nonce: 1,
+                    });
+                }
+                if session_encrypts {
+                    if self.seal.is_none() {
+                        return Err(Error::Auth(
+                            "the server requires encryption with a cipher it did not agree to".into(),
+                        ));
+                    }
+                    self.encrypt = true;
+                }
             }
-        } else if negotiated.signing_required {
-            log::debug!(
-                "smb: the server requires signing but the session is a guest's"
-            );
+            (Some(key), false, None) => {
+                if negotiated.signing_required || reply.flags & FLAG_SIGNED != 0
+                {
+                    // The server signed its acceptance with the key we
+                    // hold: verifying it proves the exchange before
+                    // the tree.
+                    if reply.flags & FLAG_SIGNED != 0
+                        && !verify(&key, &self.frame)
+                    {
+                        return Err(Error::Signature);
+                    }
+                    self.signing = Some(Signing::Hmac(key));
+                }
+                if session_encrypts {
+                    return Err(Error::Auth(
+                        "the server requires encryption, which needs SMB 3"
+                            .into(),
+                    ));
+                }
+            }
+            _ => {
+                if session_encrypts {
+                    return Err(Error::Auth(
+                        "the server requires encryption, which a guest session cannot have".into(),
+                    ));
+                }
+                if negotiated.signing_required {
+                    log::debug!(
+                        "smb: the server requires signing but the session is a guest's"
+                    );
+                }
+            }
         }
+        self.preauth = None;
         Ok(())
     }
 
@@ -391,6 +557,15 @@ impl Session {
         let reply = self.send(wire::TREE_CONNECT, &b.0)?;
         self.ok(&reply)?;
         self.tree_id = reply.tree_id;
+        let body = &self.frame[HEADER..];
+        if body.len() >= 16 && get32(body, 8) & SHARE_FLAG_ENCRYPT_DATA != 0 {
+            if self.seal.is_none() {
+                return Err(Error::Auth(
+                    "the share requires encryption, which needs SMB 3 and a user".into(),
+                ));
+            }
+            self.encrypt = true;
+        }
         Ok(())
     }
 
@@ -509,15 +684,32 @@ impl Session {
         let mut msg = Vec::with_capacity(HEADER + body.len());
         msg.extend_from_slice(&header.encode());
         msg.extend_from_slice(body);
-        if let Some(key) = &self.signing_key {
-            wire::put32(&mut msg, 16, FLAG_SIGNED);
-            let sig = sign(key, &msg);
-            msg[48..64].copy_from_slice(&sig);
+        // Sealed messages are not signed; the seal is the integrity.
+        if !self.encrypt {
+            match &self.signing {
+                Some(Signing::Hmac(key)) => {
+                    wire::put32(&mut msg, 16, FLAG_SIGNED);
+                    let sig = sign(key, &msg);
+                    msg[48..64].copy_from_slice(&sig);
+                }
+                Some(Signing::Cmac(key)) => {
+                    wire::put32(&mut msg, 16, FLAG_SIGNED);
+                    let sig = sign_cmac(key, &msg);
+                    msg[48..64].copy_from_slice(&sig);
+                }
+                None => {}
+            }
         }
-        let len = msg.len();
+        if let Some(preauth) = &mut self.preauth {
+            if command == wire::NEGOTIATE || command == wire::SESSION_SETUP {
+                crypto::fold(preauth, &msg);
+            }
+        }
+        let wire_msg = if self.encrypt { self.sealed(msg)? } else { msg };
+        let len = wire_msg.len();
         let nb = [0u8, (len >> 16) as u8, (len >> 8) as u8, len as u8];
         self.stream.write_all(&nb)?;
-        self.stream.write_all(&msg)?;
+        self.stream.write_all(&wire_msg)?;
         loop {
             self.recv()?;
             let reply = Reply::parse(&self.frame)?;
@@ -533,9 +725,24 @@ impl Session {
                 continue;
             }
             self.credits = self.credits.saturating_add(reply.credits_granted);
-            if let Some(key) = &self.signing_key {
-                if reply.flags & FLAG_SIGNED != 0 && !verify(key, &self.frame) {
+            if !self.encrypt && reply.flags & FLAG_SIGNED != 0 {
+                let good = match &self.signing {
+                    Some(Signing::Hmac(key)) => verify(key, &self.frame),
+                    Some(Signing::Cmac(key)) => verify_cmac(key, &self.frame),
+                    None => true,
+                };
+                if !good {
                     return Err(Error::Signature);
+                }
+            }
+            if let Some(preauth) = &mut self.preauth {
+                // The negotiate reply, and every session-setup reply
+                // but the final one, join the chain.
+                if command == wire::NEGOTIATE
+                    || (command == wire::SESSION_SETUP
+                        && reply.status == status::MORE_PROCESSING_REQUIRED)
+                {
+                    crypto::fold(preauth, &self.frame);
                 }
             }
             // The statuses a caller expects are not worth a line.
@@ -567,6 +774,62 @@ impl Session {
         }
         self.frame.resize(len, 0);
         self.stream.read_exact(&mut self.frame)?;
+        if self.frame[0..4] == [0xFD, b'S', b'M', b'B'] {
+            self.unsealed()?;
+        } else if self.encrypt {
+            // Once sealing is on, a clear reply is not the server's.
+            return Err(Error::Signature);
+        }
+        Ok(())
+    }
+
+    /// `msg` in a transform header, sealed with the next nonce.
+    fn sealed(&mut self, mut msg: Vec<u8>) -> Result<Vec<u8>, Error> {
+        let seal = self
+            .seal
+            .as_mut()
+            .ok_or_else(|| Error::Auth("no sealing keys".into()))?;
+        let mut nonce = [0u8; 12];
+        nonce[..8].copy_from_slice(&seal.nonce.to_le_bytes());
+        seal.nonce += 1;
+        let mut out = vec![0u8; TRANSFORM];
+        out[0..4].copy_from_slice(&[0xFD, b'S', b'M', b'B']);
+        out[20..32].copy_from_slice(&nonce);
+        wire::put32(&mut out, 36, msg.len() as u32);
+        wire::put16(&mut out, 42, 0x0001); // Flags: encrypted
+        wire::put64(&mut out, 44, self.session_id);
+        let aad = out[20..TRANSFORM].to_vec();
+        let tag = crypto::seal(&seal.to_server, &nonce, &aad, &mut msg);
+        out[4..20].copy_from_slice(&tag);
+        out.extend_from_slice(&msg);
+        Ok(out)
+    }
+
+    /// The frame holds a transform header: open it and leave the
+    /// message in its place.
+    fn unsealed(&mut self) -> Result<(), Error> {
+        let seal = self
+            .seal
+            .as_ref()
+            .ok_or_else(|| Error::Auth("a sealed reply with no keys".into()))?;
+        if self.frame.len() < TRANSFORM {
+            return Err(Error::Malformed("transform header"));
+        }
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&self.frame[4..20]);
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&self.frame[20..32]);
+        let size = get32(&self.frame, 36) as usize;
+        if get64(&self.frame, 44) != self.session_id {
+            return Err(Error::Malformed("transform session"));
+        }
+        let aad = self.frame[20..TRANSFORM].to_vec();
+        let mut data = self.frame[TRANSFORM..].to_vec();
+        if !crypto::open(&seal.from_server, &nonce, &aad, &mut data, &tag) {
+            return Err(Error::Signature);
+        }
+        data.truncate(size);
+        self.frame = data;
         Ok(())
     }
 
@@ -597,6 +860,8 @@ impl Drop for Session {
 struct Negotiated {
     signing_required: bool,
     server_time: u64,
+    /// The cipher the server agreed to, on 3.1.1.
+    cipher: Option<u16>,
 }
 
 fn command_name(command: u16) -> &'static str {
@@ -705,6 +970,15 @@ fn verify(key: &[u8; 16], msg: &[u8]) -> bool {
     msg.len() >= HEADER && sign(key, msg) == msg[48..64]
 }
 
+/// AES-CMAC over the message with its signature field zeroed.
+fn sign_cmac(key: &[u8; 16], msg: &[u8]) -> [u8; 16] {
+    crypto::cmac(key, &[&msg[..48], &[0u8; 16], &msg[64..]])
+}
+
+fn verify_cmac(key: &[u8; 16], msg: &[u8]) -> bool {
+    msg.len() >= HEADER && sign_cmac(key, msg) == msg[48..64]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,7 +1066,19 @@ mod tests {
                 let (status, out): (u32, Vec<u8>) = match command {
                     wire::NEGOTIATE => {
                         assert_eq!(get16(body, 0), 36);
-                        assert_eq!(get16(body, 2), 2, "two dialects offered");
+                        assert_eq!(get16(body, 2), 3, "three dialects offered");
+                        // The 3.1.1 contexts sit at the offset named,
+                        // 8-aligned, with our hash and cipher.
+                        let at = get32(body, 28) as usize;
+                        assert_eq!(at % 8, 0);
+                        assert_eq!(get16(&req, at), CONTEXT_PREAUTH_INTEGRITY);
+                        assert_eq!(get16(&req, at + 8 + 4), HASH_SHA512);
+                        let next = (at + 8 + 38 + 7) & !7;
+                        assert_eq!(get16(&req, next), CONTEXT_ENCRYPTION);
+                        assert_eq!(
+                            get16(&req, next + 8 + 2),
+                            CIPHER_AES_128_GCM
+                        );
                         let mut b = Body::with_capacity(65);
                         b.u16(65).u16(0).u16(DIALECT_2_1).u16(0);
                         b.bytes(&[7u8; 16]).u32(CAP_LARGE_MTU);

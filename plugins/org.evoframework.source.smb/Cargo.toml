@@ -19,6 +19,9 @@ md4 = "0.10"
 md-5 = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
+aes = "0.8"
+cmac = "0.7"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 getrandom = "0.4"
 
 [dev-dependencies]

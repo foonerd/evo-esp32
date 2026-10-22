@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+mod crypto;
 mod ntlm;
 pub mod smb1;
 pub mod smb2;
