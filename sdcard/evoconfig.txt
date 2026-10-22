@@ -58,7 +58,7 @@ snapserver =
 # servers it finds by itself. The protocol is in the address:
 #   share = smb://nas.local/Music            SMB 2 or later (a NAS, a PC)
 #   share = smb1://oldbox/music              SMB 1 only, for an old box
-#   share = nfs://192.168.1.5/volume1/music   NFS (version 3)
+#   share = nfs://192.0.2.5/volume1/music     NFS (4.1, or 3 on an old box)
 # A folder within the share may follow. The user and password are for
 # SMB; leave the user empty for a guest share (an encrypted share needs
 # an account); NFS has neither. A second share is share2, share2_user,

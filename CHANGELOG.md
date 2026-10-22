@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- NFS version 4.1. An `nfs://` share is mounted by NFS 4.1 where the
+  server speaks it, by version 3 where it does not: one TCP
+  connection to the NFS port, no portmapper and no MOUNT, EXCHANGE_ID
+  and CREATE_SESSION for a session with one slot, SEQUENCE at the
+  head of every compound, RECLAIM_COMPLETE, the export reached from
+  the server's pseudo file system by PUTROOTFH and LOOKUP, folders
+  listed by READDIR asking for type, size and file handle per entry,
+  files read by READ with the anonymous stateid (a reader that opens
+  nothing may, RFC 8881 §8.2.3), the session and client id destroyed
+  when the export is let go. AUTH_SYS as before; a server that wants
+  Kerberos says so in the log. A server with no version 4 answers the
+  first call with a version mismatch and is mounted by version 3 as
+  in 0.1.4; one with 4.0 only likewise. A session or lease the server
+  let go while the player was quiet is mounted again on the next
+  listing. Measured on the desk against nfs-ganesha 4.3 (NFS 4.1 only,
+  AUTH_SYS, numeric owners): list with handles, reads at the head,
+  the middle, the tail and the end, a FLAC from 30 s lands to the
+  second; the version 3 server (unfs3) still mounts by 3 through the
+  mismatch.
+
 - A track changes faster, and a pressed Next is a Next. A file on the
   card opened on the loop's thread — "a read away" — but an open is
   the file system mapping the file's clusters (fast seek) and the

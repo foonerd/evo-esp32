@@ -7,11 +7,12 @@
 //! named by the distribution (from the card's settings: `share =
 //! nfs://host/export/folder`), each a folder at the root of the
 //! listing, and below it the export's own folders and audio files,
-//! read through the client in [`nfs3`]: NFS version 3 over TCP in
-//! plain `std::net`, AUTH_SYS as uid and gid 1000, the ports from the
-//! portmapper or the URL. A file's first bytes are peeked for its rate
-//! and length, as the files source peeks the card's. Tracks are
-//! announced as `track` subjects.
+//! read through the clients in [`nfs4`] and [`nfs3`]: NFS version 4.1
+//! where the server speaks it (one connection, a session, no
+//! portmapper), version 3 where it does not; over TCP in plain
+//! `std::net`, AUTH_SYS as uid and gid 1000. A file's first bytes are
+//! peeked for its rate and length, as the files source peeks the
+//! card's. Tracks are announced as `track` subjects.
 //!
 //! [`NfsOpener`] is the other half: the playback plugin's way to read a
 //! track the listing produced, by offset, so a seek costs no reopen.
@@ -19,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 pub mod nfs3;
+pub mod nfs4;
 mod rpc;
 
 use std::fmt::Write as _;
@@ -42,8 +44,102 @@ use log::{info, warn};
 use org_evoframework_source_files::{facts_from_header, is_audio, title_of};
 use org_evoframework_source_smb::{decode_path, encode_path};
 
-pub use nfs3::Export;
+pub use nfs3::{Attr, DirEntry, Handle};
 pub use rpc::{Dialer, Error, Identity, StdDialer};
+
+/// A mounted export, by whichever version the server speaks: 4.1 is
+/// asked for first; a server with no version 4, or with 4.0 only, is
+/// mounted by version 3.
+pub enum Export {
+    /// NFS 4.1: a session on one connection.
+    V4(nfs4::Export),
+    /// NFS 3: MOUNT, then NFS.
+    V3(nfs3::Export),
+}
+
+impl Export {
+    /// Mount `cfg.path` on its server.
+    pub fn mount(cfg: &nfs3::Config) -> Result<Export, Error> {
+        match nfs4::Export::mount(cfg) {
+            Ok(e) => Ok(Export::V4(e)),
+            // No version 4 at the port (refused, or the program
+            // version not there), or 4.0 only: version 3, which also
+            // asks the portmapper where the server is.
+            Err(Error::Rejected(_))
+            | Err(Error::Io(_))
+            | Err(Error::Status(nfs4::status::MINOR_VERS_MISMATCH)) => {
+                nfs3::Export::mount(cfg).map(Export::V3)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The version spoken, as text.
+    pub fn version(&self) -> &'static str {
+        match self {
+            Export::V4(_) => "4.1",
+            Export::V3(_) => "3",
+        }
+    }
+
+    /// The handle of the folder the share names.
+    pub fn root(&self) -> &Handle {
+        match self {
+            Export::V4(e) => &e.root,
+            Export::V3(e) => &e.root,
+        }
+    }
+
+    /// The server's largest read.
+    pub fn read_max(&self) -> u32 {
+        match self {
+            Export::V4(e) => e.read_max,
+            Export::V3(e) => e.read_max,
+        }
+    }
+
+    /// The handle and attributes of `name` in `dir`.
+    pub fn lookup(
+        &mut self,
+        dir: &Handle,
+        name: &str,
+    ) -> Result<(Handle, Attr), Error> {
+        match self {
+            Export::V4(e) => e.lookup(dir, name),
+            Export::V3(e) => e.lookup(dir, name),
+        }
+    }
+
+    /// Walk `path` (`a/b`) down from the root.
+    pub fn walk(&mut self, path: &str) -> Result<(Handle, Attr), Error> {
+        match self {
+            Export::V4(e) => e.walk(path),
+            Export::V3(e) => e.walk(path),
+        }
+    }
+
+    /// The entries of the folder `dir`.
+    pub fn list(&mut self, dir: &Handle) -> Result<Vec<DirEntry>, Error> {
+        match self {
+            Export::V4(e) => e.list(dir),
+            Export::V3(e) => e.list(dir),
+        }
+    }
+
+    /// Read from `fh` at `offset` into `buf`: the bytes read, zero at
+    /// the end.
+    pub fn read(
+        &mut self,
+        fh: &Handle,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Error> {
+        match self {
+            Export::V4(e) => e.read(fh, offset, buf),
+            Export::V3(e) => e.read(fh, offset, buf),
+        }
+    }
+}
 
 /// The plugin's name, as the catalogue and the steward know it.
 pub const NAME: &str = "org.evoframework.source.nfs";
@@ -286,15 +382,29 @@ impl SourceNfs {
                 let share = &self.shares[index];
                 let export = Export::mount(&share.config(&self.dialer))?;
                 info!(
-                    "nfs: {} on {}: mounted, reads of {} bytes",
-                    share.path, share.host, export.read_max
+                    "nfs: {} on {}: mounted by NFS {}, reads of {} bytes",
+                    share.path,
+                    share.host,
+                    export.version(),
+                    export.read_max()
                 );
                 self.exports[index] = Some(export);
             }
             let export = self.exports[index].as_mut().expect("just mounted");
             match f(export) {
                 Ok(v) => return Ok(v),
-                Err(Error::Status(code)) if code != nfs3::status::STALE => {
+                // A stale handle, or a session or lease the server let
+                // go while the player was quiet: mount again. Any other
+                // answer is the answer.
+                Err(Error::Status(code))
+                    if !matches!(
+                        code,
+                        nfs3::status::STALE
+                            | nfs4::status::BADSESSION
+                            | nfs4::status::EXPIRED
+                            | nfs4::status::STALE_CLIENTID
+                    ) =>
+                {
                     return Err(Error::Status(code));
                 }
                 Err(e) => {
@@ -316,8 +426,8 @@ impl SourceNfs {
 /// The rate and length a file's header states, from its first bytes.
 fn peek(
     export: &mut Export,
-    dir: &nfs3::Handle,
-    entry: &nfs3::DirEntry,
+    dir: &Handle,
+    entry: &DirEntry,
 ) -> Result<(Option<u32>, Option<u64>), Error> {
     let ext = entry
         .name
@@ -449,7 +559,7 @@ impl FileOpener for NfsOpener {
 /// An open file on an export.
 struct NfsFile {
     export: Export,
-    fh: nfs3::Handle,
+    fh: Handle,
     size: u64,
 }
 
@@ -518,8 +628,13 @@ mod tests {
         let share = Share::parse(&url).unwrap();
         let dialer: Arc<dyn Dialer> = Arc::new(StdDialer);
         let mut export = Export::mount(&share.config(&dialer)).unwrap();
-        eprintln!("mounted {}: reads of {} bytes", share.path, export.read_max);
-        let root = export.root.clone();
+        eprintln!(
+            "mounted {} by NFS {}: reads of {} bytes",
+            share.path,
+            export.version(),
+            export.read_max()
+        );
+        let root = export.root().clone();
         let entries = export.list(&root).unwrap();
         for e in &entries {
             eprintln!(

@@ -45,7 +45,7 @@ impl std::fmt::Display for Error {
             Error::Malformed(what) => write!(f, "malformed {what}"),
             Error::Rejected(why) => f.write_str(why),
             Error::Status(code) => {
-                f.write_str(&crate::nfs3::status_name(*code))
+                f.write_str(&crate::nfs4::status_name(*code))
             }
         }
     }
