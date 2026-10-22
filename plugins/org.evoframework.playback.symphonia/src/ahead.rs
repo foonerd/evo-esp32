@@ -346,10 +346,12 @@ impl ReadAhead {
             read_ms: AtomicU32::new(0),
         });
         let reader = Arc::clone(&shared);
-        thread::Builder::new()
-            .name("read".into())
-            .stack_size(STACK)
-            .spawn(move || read_ahead(&mut source, &reader, tuning))?;
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Feed,
+            "read",
+            STACK,
+            move || read_ahead(&mut source, &reader, tuning),
+        )?;
         Ok(Self {
             shared,
             len,

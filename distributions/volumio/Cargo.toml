@@ -12,5 +12,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+evo-esp32-sdk = { path = "../../sdk", features = ["std"] }
 log = "0.4"
 serde_json = { version = "1", default-features = false, features = ["std"] }

@@ -197,10 +197,12 @@ pub fn start(
     });
     let metaint = info.metaint;
     let fetcher = Arc::downgrade(&shared);
-    thread::Builder::new()
-        .name("fetch".into())
-        .stack_size(FETCH_STACK)
-        .spawn(move || fetch(stream, metaint, reopen, fetcher))?;
+    evo_esp32_sdk::thread::spawn(
+        evo_esp32_sdk::thread::Role::Feed,
+        "fetch",
+        FETCH_STACK,
+        move || fetch(stream, metaint, reopen, fetcher),
+    )?;
     Ok((
         Buffered {
             shared: shared.clone(),

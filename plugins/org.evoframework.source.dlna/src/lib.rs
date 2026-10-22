@@ -140,11 +140,13 @@ impl SourceDlna {
         }
         let known = Arc::clone(&self.known);
         let from = self.from;
-        thread::Builder::new()
-            .name("ssdp".into())
-            .stack_size(STACK)
-            .spawn(move || search_loop(&known, from))
-            .map_err(|e| LoadError(format!("search thread: {e}")))?;
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "ssdp",
+            STACK,
+            move || search_loop(&known, from),
+        )
+        .map_err(|e| LoadError(format!("search thread: {e}")))?;
         self.searching = true;
         Ok(())
     }

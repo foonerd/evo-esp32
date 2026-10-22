@@ -45,6 +45,7 @@ mod art;
 mod config;
 mod net;
 mod sink;
+mod threads;
 
 #[global_allocator]
 static ALLOC: alloc::Placed = alloc::Placed;
@@ -59,7 +60,6 @@ use es9018k2m::Es9018k2m;
 use esp_idf_svc::hal::gpio::Pin;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys;
@@ -186,20 +186,14 @@ fn main() -> anyhow::Result<()> {
         ..
     } = Peripherals::take()?;
     memory("at start");
-    // Threads the plugins spawn from this task (a stream's fetcher) get
-    // their stacks in PSRAM: they write no flash, and internal SRAM is
-    // what the Wi-Fi driver and the DMA rings live on. A thread that
-    // does write flash (`net.rs`) asks for internal itself.
     // Threads the plugins spawn get PSRAM stacks, and so do the threads
     // those spawn (the open thread's fetcher, the listener's connection):
     // ESP-IDF applies a thread's configuration to its children only when
-    // told to inherit.
-    ThreadSpawnConfiguration {
-        stack_alloc_caps: MallocCap::Spiram | MallocCap::Cap8bit,
-        inherit: true,
-        ..Default::default()
-    }
-    .set()?;
+    // told to inherit. A thread that does write flash (`net.rs`) asks
+    // for internal itself. Each is then placed by what it is for.
+    threads::default_configuration().set()?;
+    evo_esp32_sdk::thread::place(&threads::Placing)
+        .map_err(anyhow::Error::msg)?;
 
     // The SPI bus first, so the card is read before the panel is up.
     let spi = board::spi_bus(spi2, pins.gpio6, pins.gpio7, pins.gpio8)?;
@@ -1180,12 +1174,14 @@ fn main() -> anyhow::Result<()> {
             let source = rooms.source().map_or("Card", Source::label);
             let mut state = View::new(&pb, output.as_ref(), source);
             state.caution = net.as_ref().map_or("", |n| n.state.caution());
+            let before_presence = last_face.elapsed();
             presence.set_playing(playing(&pb));
             state.shuffle = queue.shuffle();
             state.repeat = queue.repeat();
             if current.is_none() {
                 state.notice = notice.clone().unwrap_or_default();
             }
+            let before_art = last_face.elapsed();
             if let Some(track) = pb.track.as_ref() {
                 if art.track(track) {
                     face.set_art(None);
@@ -1196,8 +1192,20 @@ fn main() -> anyhow::Result<()> {
                 face.set_art(found.art);
                 presence.set_art(found.bytes.and_then(VolumioArt::sniff));
             }
+            let before_paint = last_face.elapsed();
             let painted = face.refresh(&mut board.panel, &state);
             let took = last_face.elapsed();
+            if took >= LONG_TURN {
+                info!(
+                    "face: {} ms: {} ms to the state, {} ms presence, {} ms art, {} ms paint ({:?})",
+                    took.as_millis(),
+                    before_presence.as_millis(),
+                    (before_art - before_presence).as_millis(),
+                    (before_paint - before_art).as_millis(),
+                    (took - before_paint).as_millis(),
+                    painted.as_ref().ok()
+                );
+            }
             drawing += took;
             if let (Ok(_), Some(since)) = (&painted, touch_waiting.take()) {
                 touch_wait_max = touch_wait_max.max(since.elapsed());

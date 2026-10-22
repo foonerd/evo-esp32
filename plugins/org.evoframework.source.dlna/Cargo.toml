@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-evo-esp32-sdk = { path = "../../sdk" }
+evo-esp32-sdk = { path = "../../sdk", features = ["std"] }
 log = "0.4"
 
 [dev-dependencies]

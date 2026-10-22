@@ -13,7 +13,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-evo-esp32-sdk = { path = "../../sdk" }
+evo-esp32-sdk = { path = "../../sdk", features = ["std"] }
 # Pure Rust, MPL-2.0 (file-level copyleft; linking is unaffected). No SIMD
 # feature: that pulls rustfft, and the target has no SIMD. Codecs are the
 # ones a card of music holds.

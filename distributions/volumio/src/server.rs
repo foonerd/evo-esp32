@@ -218,10 +218,17 @@ impl Server {
     }
 
     /// Bind `port` and serve until the listener fails; meant for its own
-    /// thread.
+    /// thread. Starts the thread that answers held polls.
     pub fn serve(&self, port: u16) -> io::Result<()> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
         listener.set_nonblocking(true)?;
+        let outbox = Arc::clone(&self.outbox);
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "volumio-out",
+            OUTBOX_STACK,
+            move || outbox.run(),
+        )?;
         log::info!("volumio: listening on {port}");
         let mut last_sweep = Instant::now();
         loop {
@@ -341,10 +348,11 @@ impl Server {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_else(|| self.tile.clone());
-        let spawned = std::thread::Builder::new()
-            .name("art".into())
-            .stack_size(ART_STACK)
-            .spawn(move || {
+        let spawned = evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "volumio-art",
+            ART_STACK,
+            move || {
                 let _ = stream.set_write_timeout(Some(ART_TIMEOUT));
                 if let Err(e) = write_response_with(
                     &mut stream,

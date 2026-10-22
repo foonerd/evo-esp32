@@ -13,7 +13,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-evo-esp32-sdk = { path = "../../sdk" }
+evo-esp32-sdk = { path = "../../sdk", features = ["std"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 # An older source-host sends frames as JSON with the PCM in base64.

@@ -203,23 +203,27 @@ impl Presence {
     pub fn start(&self, port: u16) -> std::io::Result<()> {
         self.lock().port = port;
         let server = self.server.clone();
-        std::thread::Builder::new()
-            .name("volumio".into())
-            .stack_size(STACK)
-            .spawn(move || {
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "volumio",
+            STACK,
+            move || {
                 if let Err(e) = server.serve(port) {
                     log::error!("volumio: server: {e}");
                 }
-            })?;
+            },
+        )?;
         let me = self.clone();
-        std::thread::Builder::new()
-            .name("volumio-tick".into())
-            .stack_size(STACK)
-            .spawn(move || loop {
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "volumio-tick",
+            STACK,
+            move || loop {
                 me.client.tick();
                 me.pump();
                 std::thread::sleep(TICK);
-            })?;
+            },
+        )?;
         Ok(())
     }
 

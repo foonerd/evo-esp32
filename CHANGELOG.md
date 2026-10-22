@@ -6,10 +6,36 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The face answers a touch while a station opens or plays, and the
+  music keeps going while the face changes. The main loop — touch, face
+  and the decoder's tick — ran below every thread the plugins start
+  (ESP-IDF's default for `std` threads), so a thread with the core to
+  itself held the loop off for its whole run: the TLS handshake of a
+  station's open, and of every segment and playlist of an HLS station,
+  each a second or two of this core. From 0.1.3, when the BBC's HLS
+  stations joined the Radio list, that was a face that stalled for
+  seconds and a touch that took five tries. Threads now stand in three
+  tiers around the loop, by what they are for: the threads that feed
+  the decoder and the sink (a file's read-ahead, a station's fetcher, a
+  room's receiver) one above it, so their bytes land the moment they
+  arrive; the loop; and everything else (a track's open, a share's
+  listing, the search for servers, the sessions with Volumio peers) one
+  below, running when the loop sleeps. Level with the loop, measured on
+  the way, the kernel sliced the core between them and a paint stage
+  took half a second while a station opened, with the music dropping
+  out behind it. A plugin says which tier a thread is for through the
+  SDK's `thread` module (its `std` feature); the distribution places it.
+  The heartbeat's core line now names every thread (`read/6`,
+  `fetch/6`, `open/4`, `peer/4`) instead of showing each as `main/5`.
+
 - Peers of the Volumio protocol are written to from their own thread.
   The main loop posted every state push into the peers' sockets
   itself; a peer slow to read could hold the loop on a send. An outbox
   thread takes the posts.
+
+- A turn of the loop that runs long names which part of the face
+  phase took it: the state, the presence, the art or the paint (with
+  the stage painted).
 
 - The read-ahead ring is tuned per source. The card keeps small,
   paced chunks (its DMA reaches them; the pace shares the SPI bus

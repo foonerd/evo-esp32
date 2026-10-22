@@ -494,11 +494,13 @@ impl Plugin for SnapcastReceiver {
             .map_err(|e| LoadError(format!("announcing: {e}")))?;
         self.subject = Some(id);
         let (link, settings) = (self.link.clone(), self.settings.clone());
-        thread::Builder::new()
-            .name("snap".into())
-            .stack_size(LINK_STACK)
-            .spawn(move || dial_forever(&link, &settings))
-            .map_err(|e| LoadError(format!("client thread: {e}")))?;
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Feed,
+            "snap",
+            LINK_STACK,
+            move || dial_forever(&link, &settings),
+        )
+        .map_err(|e| LoadError(format!("client thread: {e}")))?;
         Ok(())
     }
 

@@ -173,10 +173,12 @@ impl Client {
         });
         let inner = inner.clone();
         let addr = peer.addr;
-        let spawned = std::thread::Builder::new()
-            .name("peer".into())
-            .stack_size(STACK)
-            .spawn(move || run(inner, addr));
+        let spawned = evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "peer",
+            STACK,
+            move || run(inner, addr),
+        );
         if let Err(e) = spawned {
             log::warn!("volumio: no thread for {addr}: {e}");
             links.retain(|l| l.peer.addr != addr);

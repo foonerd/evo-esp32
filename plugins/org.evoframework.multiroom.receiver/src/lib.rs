@@ -345,11 +345,13 @@ impl Plugin for MultiroomReceiver {
         let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
         self.link.0.port.store(u32::from(port), Ordering::Relaxed);
         let (link, settings) = (self.link.clone(), self.settings.clone());
-        thread::Builder::new()
-            .name("room".into())
-            .stack_size(LISTEN_STACK)
-            .spawn(move || listen(listener, link, settings))
-            .map_err(|e| LoadError(format!("listen thread: {e}")))?;
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Feed,
+            "room",
+            LISTEN_STACK,
+            move || listen(listener, link, settings),
+        )
+        .map_err(|e| LoadError(format!("listen thread: {e}")))?;
         log::info!(
             "multiroom: listening on port {port} as {}",
             self.settings.device_id
@@ -570,10 +572,11 @@ fn listen(listener: TcpListener, link: Link, settings: Settings) {
                     "multiroom: {from} connected (connection {generation})"
                 );
                 let (link, settings) = (link.clone(), settings.clone());
-                let spawned = thread::Builder::new()
-                    .name("room-link".into())
-                    .stack_size(SERVE_STACK)
-                    .spawn(move || {
+                let spawned = evo_esp32_sdk::thread::spawn(
+                    evo_esp32_sdk::thread::Role::Feed,
+                    "room-link",
+                    SERVE_STACK,
+                    move || {
                         let why = serve(stream, &link, &settings, generation);
                         log::info!(
                             "multiroom: connection {generation} over: {why}"
@@ -592,7 +595,8 @@ fn listen(listener: TcpListener, link: Link, settings: Settings) {
                         {
                             link.clear();
                         }
-                    });
+                    },
+                );
                 if let Err(e) = spawned {
                     log::warn!("multiroom: no thread for the connection: {e}");
                 }

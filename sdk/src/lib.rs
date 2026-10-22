@@ -32,7 +32,9 @@
 //! `no_std` with `alloc`, no `unsafe`, blocking throughout. Values that
 //! cross the contract are [`Value`] (JSON), as they are on evo-core's
 //! wire, so a projection serialises for the network without translation.
-#![cfg_attr(not(test), no_std)]
+//! With the `std` feature, [`thread`] is how a plugin starts a thread:
+//! named by what it is for, placed by the distribution.
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
@@ -45,6 +47,8 @@ pub mod plugin;
 pub mod projection;
 pub mod respondent;
 pub mod subject;
+#[cfg(feature = "std")]
+pub mod thread;
 pub mod warden;
 
 /// A JSON value, the shape every contribution and projection takes.

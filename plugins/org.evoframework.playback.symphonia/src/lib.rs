@@ -52,7 +52,6 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use evo_esp32_sdk::context::Context;
@@ -380,10 +379,11 @@ impl Warden for PlaybackSymphonia {
         let (tx, rx) = mpsc::channel();
         let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
         let card_memory = self.card_memory;
-        thread::Builder::new()
-            .name("open".into())
-            .stack_size(OPEN_STACK)
-            .spawn(move || {
+        evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "open",
+            OPEN_STACK,
+            move || {
                 // The custody may be gone by now; then this is dropped.
                 let _ = tx.send(open(
                     &uri,
@@ -392,8 +392,9 @@ impl Warden for PlaybackSymphonia {
                     &files,
                     card_memory,
                 ));
-            })
-            .map_err(|e| CustodyError(format!("open thread: {e}")))?;
+            },
+        )
+        .map_err(|e| CustodyError(format!("open thread: {e}")))?;
         let state = State {
             status: Status::Opening,
             track: Some(track),
@@ -1190,6 +1191,7 @@ mod tests {
     use evo_esp32_steward::{Config, Steward};
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::thread;
 
     fn catalogue() -> Catalogue {
         Catalogue {
