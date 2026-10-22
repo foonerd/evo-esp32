@@ -65,6 +65,42 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   share: at a skip the probe's 150 ms of reads interleave with the
   new track's repaint and the folder's cover, about 500 ms in all.
 
+- A NAS running an older rpcbind and mountd mounts. An RPC record
+  over TCP is a four-byte marker and the record; the client wrote
+  them in two sends, and a server built on an older libtirpc closes
+  the connection on a marker that arrives alone (confirmed from a
+  desk host: one send answers from any port, two sends get the
+  connection closed). The marker and the record go in one send now;
+  the SMB client's NetBIOS header and message likewise.
+
+- Listing a share is a listing. The NFS and SMB listings no longer
+  open and read every audio file for its duration and sample rate —
+  a folder of forty tracks on a share over Wi-Fi cost forty opens
+  and forty reads before it showed; the browse shows the names and
+  the player learns the rest when a track is opened.
+
+- A share's mount is kept and remembered. The player mounts a share
+  once for the listing and once for the player and keeps both; a
+  mount the server let go (a stale handle, a session the server
+  expired, a connection it closed) is mounted again on the next call,
+  once, with what the first mount learnt — the portmapper's ports
+  and the root handle, so a remount is one connection and one
+  GETATTR. The version a server does not speak is remembered too: a
+  version 3 server is not asked for 4.1 on every mount.
+
+- An NFS server with no portmapper, or a firewall in front of one, is
+  still found: mountd is tried at 892, 20048 and 2049 when the
+  portmapper does not answer or lists no MOUNT service, and the
+  error says what was tried.
+
+- Reserved source ports rotate. A server with a `secure` export
+  wants a source port below 1024; the player took 1023 every time
+  and a server holding the previous connection in TIME_WAIT refused
+  it. The port now walks down from 1023 to 600 and round.
+
+- The picture scan at an open is for FLAC only; an MP3, an AAC, a
+  WAV or an Ogg is opened without it.
+
 ## [0.1.5] - 2026-10-22
 
 - Fixed: a seek into a track on the card could slow the card for the

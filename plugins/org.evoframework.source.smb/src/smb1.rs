@@ -640,13 +640,17 @@ impl Session {
             *seq += 2;
         }
         let len = msg.len();
-        self.stream.write_all(&[
+        // Header and message in one write: a server may read a header
+        // arriving alone as a broken frame.
+        let mut frame = Vec::with_capacity(4 + len);
+        frame.extend_from_slice(&[
             0,
             (len >> 16) as u8,
             (len >> 8) as u8,
             len as u8,
-        ])?;
-        self.stream.write_all(&msg)?;
+        ]);
+        frame.extend_from_slice(&msg);
+        self.stream.write_all(&frame)?;
         self.recv()?;
         if self.frame[4] != command {
             return Err(Error::Malformed("reply to another command"));

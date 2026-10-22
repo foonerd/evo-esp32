@@ -10,9 +10,11 @@
 //! read through the clients in [`nfs4`] and [`nfs3`]: NFS version 4.1
 //! where the server speaks it (one connection, a session, no
 //! portmapper), version 3 where it does not; over TCP in plain
-//! `std::net`, AUTH_SYS as uid and gid 1000. A file's first bytes are
-//! peeked for its rate and length, as the files source peeks the
-//! card's. Tracks are announced as `track` subjects.
+//! `std::net`, AUTH_SYS as uid and gid 1000. A listing is the folder's
+//! names and sizes only — no file is opened for its header, which
+//! over a share is a round trip per file; rate and length come from
+//! the probe when a track plays. Tracks are announced as `track`
+//! subjects.
 //!
 //! [`NfsOpener`] is the other half: the playback plugin's way to read a
 //! track the listing produced, by offset, so a seek costs no reopen.
@@ -24,7 +26,7 @@ pub mod nfs4;
 mod rpc;
 
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use evo_esp32_sdk::context::Context;
 use evo_esp32_sdk::contract::audio::playback::{ByteFile, FileOpener};
@@ -41,11 +43,23 @@ use evo_esp32_sdk::subject::{
     ExternalAddressing, SubjectAnnouncement, SubjectId,
 };
 use log::{info, warn};
-use org_evoframework_source_files::{facts_from_header, is_audio, title_of};
+use org_evoframework_source_files::{is_audio, title_of};
 use org_evoframework_source_smb::{decode_path, encode_path};
 
 pub use nfs3::{Attr, DirEntry, Handle};
 pub use rpc::{Dialer, Error, Identity, StdDialer};
+
+/// What a server and path taught this boot.
+#[derive(Default)]
+struct Memo {
+    /// The server refused version 4: not asked again.
+    no_v4: bool,
+    /// Version 3's ports and root handle.
+    v3: nfs3::Remembered,
+}
+
+/// Per `host:port:path`.
+static MEMOS: Mutex<Vec<(String, Memo)>> = Mutex::new(Vec::new());
 
 /// A mounted export, by whichever version the server speaks: 4.1 is
 /// asked for first; a server with no version 4, or with 4.0 only, is
@@ -58,20 +72,39 @@ pub enum Export {
 }
 
 impl Export {
-    /// Mount `cfg.path` on its server.
+    /// Mount `cfg.path` on its server. What the server said last time
+    /// this boot — no version 4, its ports, the root handle — is
+    /// remembered per server and path, so a mount made again is one
+    /// connection, not a probe, two portmapper calls, MOUNT and a
+    /// connection: a NAS met that burst with resets.
     pub fn mount(cfg: &nfs3::Config) -> Result<Export, Error> {
-        match nfs4::Export::mount(cfg) {
-            Ok(e) => Ok(Export::V4(e)),
-            // No version 4 at the port (refused, or the program
-            // version not there), or 4.0 only: version 3, which also
-            // asks the portmapper where the server is.
-            Err(Error::Rejected(_))
-            | Err(Error::Io(_))
-            | Err(Error::Status(nfs4::status::MINOR_VERS_MISMATCH)) => {
-                nfs3::Export::mount(cfg).map(Export::V3)
+        let key =
+            format!("{}:{}:{}", cfg.host, cfg.port.unwrap_or(0), cfg.path);
+        let mut memos = MEMOS.lock().unwrap_or_else(|e| e.into_inner());
+        let memo = match memos.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, m)) => m,
+            None => {
+                memos.push((key, Memo::default()));
+                &mut memos.last_mut().expect("just pushed").1
             }
-            Err(e) => Err(e),
+        };
+        if !memo.no_v4 {
+            match nfs4::Export::mount(cfg) {
+                Ok(e) => return Ok(Export::V4(e)),
+                // No version 4 at the port (refused, or the program
+                // version not there), or 4.0 only: version 3, and no
+                // asking again this boot.
+                Err(Error::Rejected(_))
+                | Err(Error::Status(nfs4::status::MINOR_VERS_MISMATCH)) => {
+                    memo.no_v4 = true;
+                }
+                // Nothing answered at the port: version 3 asks the
+                // portmapper where the server is.
+                Err(Error::Io(_)) => {}
+                Err(e) => return Err(e),
+            }
         }
+        nfs3::Export::mount(cfg, &mut memo.v3).map(Export::V3)
     }
 
     /// The version spoken, as text.
@@ -151,8 +184,6 @@ pub const UID: u32 = 1000;
 pub const GID: u32 = 1000;
 /// The name this client gives the server for itself.
 pub const MACHINE: &str = "evo-esp32";
-/// How many bytes of a file are peeked for its header.
-const PEEK: usize = 64;
 
 static STOCKS: [Stocking; 1] = [Stocking {
     rack: shelf::SOURCE,
@@ -331,15 +362,18 @@ impl SourceNfs {
                         name: e.name,
                     });
                 } else if is_audio(&e.name) {
-                    let (sample_rate, duration_ms) =
-                        peek(export, &dir, &e).unwrap_or_default();
+                    // No peek at the file's header here: over a share
+                    // that is a round trip per file, a folder of 300
+                    // tracks 300 of them, with the face waiting. Rate
+                    // and length come from the probe when the track
+                    // plays; one above the ceiling is passed over then.
                     out.push(Entry::Track(Track {
                         uri: share.uri(&child),
                         title: title_of(&e.name),
                         artist: None,
                         album: None,
-                        duration_ms,
-                        sample_rate,
+                        duration_ms: None,
+                        sample_rate: None,
                         art: None,
                         live: false,
                     }));
@@ -423,30 +457,6 @@ impl SourceNfs {
     }
 }
 
-/// The rate and length a file's header states, from its first bytes.
-fn peek(
-    export: &mut Export,
-    dir: &Handle,
-    entry: &DirEntry,
-) -> Result<(Option<u32>, Option<u64>), Error> {
-    let ext = entry
-        .name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext != "flac" && ext != "wav" {
-        return Ok((None, None));
-    }
-    let fh = match &entry.handle {
-        Some(h) => h.clone(),
-        None => export.lookup(dir, &entry.name)?.0,
-    };
-    let mut head = [0u8; PEEK];
-    let n = export.read(&fh, 0, &mut head)?;
-    Ok(facts_from_header(&entry.name, &head[..n]).unwrap_or_default())
-}
-
 impl Plugin for SourceNfs {
     fn describe(&self) -> PluginDescription {
         PluginDescription {
@@ -490,20 +500,34 @@ impl Respondent for SourceNfs {
     }
 }
 
-/// Opens `nfs://` files for the playback plugin. One mount per open
-/// file, on the reader's own thread.
+/// Opens `nfs://` files for the playback plugin. A share is mounted
+/// once and kept: each track then costs a walk, not a version probe,
+/// two portmapper calls, MOUNT and a fresh NFS connection — five
+/// connections in a tenth of a second, which a NAS met with resets
+/// and closed connections, and a track skipped for each. A file whose
+/// connection is gone under it mounts again and finds its handle
+/// afresh, once.
 pub struct NfsOpener {
     shares: Vec<Share>,
     dialer: Arc<dyn Dialer>,
+    /// One mount per configured share, made on first use.
+    mounts: Arc<Vec<Mutex<Option<Export>>>>,
 }
+
+/// A share's mount as the opener keeps it; `None` until first used or
+/// after the connection was lost.
+type Mount = Arc<Vec<Mutex<Option<Export>>>>;
 
 impl NfsOpener {
     /// An opener over the configured shares; a URI on none of them is
-    /// mounted as named.
+    /// mounted as named, and let go with the file.
     pub fn new(shares: Vec<Share>) -> Self {
+        let mounts =
+            Arc::new(shares.iter().map(|_| Mutex::new(None)).collect());
         Self {
             shares,
             dialer: Arc::new(StdDialer),
+            mounts,
         }
     }
 
@@ -520,45 +544,106 @@ impl FileOpener for NfsOpener {
     }
 
     fn open(&self, uri: &str) -> Result<Box<dyn ByteFile>, String> {
-        let (share, rel) = match self
-            .shares
-            .iter()
-            .find_map(|s| s.holds(uri).map(|r| (s.clone(), r)))
-        {
-            Some(found) => found,
-            None => {
-                // Mount the file's own folder, the file the remainder.
-                let mut s = Share::parse(uri)?;
-                let (dir, file) =
-                    s.path.rsplit_once('/').unwrap_or(("", &s.path));
-                let file = file.to_string();
-                s.path = if dir.is_empty() {
-                    "/".into()
-                } else {
-                    dir.to_string()
-                };
-                (s, file)
-            }
+        let (index, share, rel) =
+            match self.shares.iter().enumerate().find_map(|(i, s)| {
+                s.holds(uri).map(|r| (Some(i), s.clone(), r))
+            }) {
+                Some(found) => found,
+                None => {
+                    // Mount the file's own folder, the file the remainder.
+                    let mut s = Share::parse(uri)?;
+                    let (dir, file) =
+                        s.path.rsplit_once('/').unwrap_or(("", &s.path));
+                    let file = file.to_string();
+                    s.path = if dir.is_empty() {
+                        "/".into()
+                    } else {
+                        dir.to_string()
+                    };
+                    (None, s, file)
+                }
+            };
+        let cfg = share.config(&self.dialer);
+        let keep = match index {
+            Some(i) => (Arc::clone(&self.mounts), i),
+            // Not a configured share: a mount of its own, kept with the
+            // file and let go with it.
+            None => (Arc::new(vec![Mutex::new(None)]), 0),
         };
-        let mut export = Export::mount(&share.config(&self.dialer))
-            .map_err(|e| format!("{}: {e}", share.host))?;
-        let (fh, attr) = export.walk(&rel).map_err(|e| {
-            format!("{}: {e}", rel.rsplit('/').next().unwrap_or(&rel))
-        })?;
+        let (fh, attr) = with_mount(&keep, &cfg, |export| export.walk(&rel))
+            .map_err(|e| {
+                format!("{}: {e}", rel.rsplit('/').next().unwrap_or(&rel))
+            })?;
         if !attr.is_file {
             return Err(format!("{rel}: not a file"));
         }
         Ok(Box::new(NfsFile {
-            export,
+            keep,
+            cfg,
+            rel,
             fh,
             size: attr.size,
         }))
     }
 }
 
-/// An open file on an export.
+/// Run `f` on the share's kept mount, mounting first if there is none.
+/// A transport error, a stale handle or a lost session drops the mount
+/// and the call is made once more on a fresh one.
+fn with_mount<T>(
+    keep: &(Mount, usize),
+    cfg: &nfs3::Config,
+    mut f: impl FnMut(&mut Export) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let (mounts, index) = keep;
+    let mut slot = mounts[*index].lock().unwrap_or_else(|e| e.into_inner());
+    for attempt in 0..2 {
+        if slot.is_none() {
+            let export = Export::mount(cfg)?;
+            info!(
+                "nfs: {} on {}: mounted by NFS {} for the player",
+                cfg.path,
+                cfg.host,
+                export.version()
+            );
+            *slot = Some(export);
+        }
+        let export = slot.as_mut().expect("just mounted");
+        match f(export) {
+            Ok(v) => return Ok(v),
+            Err(Error::Status(code)) if !remount_worthy(code) => {
+                return Err(Error::Status(code));
+            }
+            Err(e) => {
+                warn!("nfs: {}: {e}; mounting again", cfg.host);
+                *slot = None;
+                if attempt == 1 {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    unreachable!("two attempts return")
+}
+
+/// A status after which the mount is made again rather than reported:
+/// a stale handle, a session or lease the server let go.
+fn remount_worthy(code: u32) -> bool {
+    matches!(
+        code,
+        nfs3::status::STALE
+            | nfs4::status::BADSESSION
+            | nfs4::status::EXPIRED
+            | nfs4::status::STALE_CLIENTID
+    )
+}
+
+/// An open file on an export: read through the share's kept mount,
+/// its handle found again if the mount had to be made anew.
 struct NfsFile {
-    export: Export,
+    keep: (Mount, usize),
+    cfg: nfs3::Config,
+    rel: String,
     fh: Handle,
     size: u64,
 }
@@ -576,15 +661,25 @@ impl ByteFile for NfsFile {
         if offset >= self.size {
             return Ok(0);
         }
-        self.export
-            .read(&self.fh, offset, buf)
-            .map_err(|e| e.to_string())
+        let fh = &mut self.fh;
+        let rel = &self.rel;
+        // The second attempt is on a fresh mount: the handle first.
+        let mut again = false;
+        with_mount(&self.keep, &self.cfg, |export| {
+            if again {
+                *fh = export.walk(rel)?.0;
+            }
+            again = true;
+            export.read(fh, offset, buf)
+        })
+        .map_err(|e| e.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use org_evoframework_source_files::facts_from_header;
 
     #[test]
     fn shares_parse_and_name_their_uris() {

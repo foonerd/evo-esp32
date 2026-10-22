@@ -9,10 +9,11 @@
 //! `share_domain` beside it), each a folder at the root of the listing,
 //! and below it the share's own folders and audio files, read through
 //! the client in [`smb2`]: SMB 2.0.2 and 2.1 in plain `std::net`, NTLMv2
-//! under SPNEGO, signing when the server requires it. A file's first
-//! bytes are peeked for its rate and length, as the files source peeks
-//! the card's, so the listing says what a player with a rate ceiling
-//! cannot play. Tracks are announced as `track` subjects.
+//! under SPNEGO, signing when the server requires it. A listing is the
+//! folder's names and sizes only — no file is opened for its header,
+//! which over a share is three round trips per file; rate and length
+//! come from the probe when a track plays, and one above a player's
+//! ceiling is passed over then. Tracks are announced as `track` subjects.
 //!
 //! [`SmbOpener`] is the other half: the playback plugin's way to read a
 //! track the listing produced, by position, so a seek costs no reopen.
@@ -44,7 +45,7 @@ use evo_esp32_sdk::subject::{
     ExternalAddressing, SubjectAnnouncement, SubjectId,
 };
 use log::{info, warn};
-use org_evoframework_source_files::{facts_from_header, is_audio, title_of};
+use org_evoframework_source_files::{is_audio, title_of};
 
 pub use ntlm::Credentials;
 pub use smb2::Session;
@@ -60,8 +61,6 @@ pub const SCHEME_SMB1: &str = "smb1";
 pub const PORT: u16 = 445;
 /// The name this client gives the server for itself.
 pub const WORKSTATION: &str = "evo-esp32";
-/// How many bytes of a file are peeked for its header.
-const PEEK: usize = 64;
 
 static STOCKS: [Stocking; 1] = [Stocking {
     rack: shelf::SOURCE,
@@ -410,15 +409,19 @@ impl SourceSmb {
                         name: e.name,
                     });
                 } else if is_audio(&e.name) {
-                    let (sample_rate, duration_ms) =
-                        peek(session, &rel, &e.name).unwrap_or_default();
+                    // No peek at the file's header here: over a share
+                    // that is three round trips per file (open, read,
+                    // close), a folder of 300 tracks 900 of them, with
+                    // the face waiting. Rate and length come from the
+                    // probe when the track plays; one above the ceiling
+                    // is passed over then.
                     out.push(Entry::Track(Track {
                         uri: share.uri(&rel),
                         title: title_of(&e.name),
                         artist: None,
                         album: None,
-                        duration_ms,
-                        sample_rate,
+                        duration_ms: None,
+                        sample_rate: None,
                         art: None,
                         live: false,
                     }));
@@ -504,23 +507,6 @@ impl SourceSmb {
         }
         unreachable!("two attempts return")
     }
-}
-
-/// The rate and length a file's header states, from its first bytes.
-fn peek(
-    session: &mut Link,
-    path: &str,
-    name: &str,
-) -> Result<(Option<u32>, Option<u64>), Error> {
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    if ext != "flac" && ext != "wav" {
-        return Ok((None, None));
-    }
-    let file = session.open(path)?;
-    let mut head = [0u8; PEEK];
-    let n = session.read(&file, 0, &mut head)?;
-    let _ = session.close_file(&file);
-    Ok(facts_from_header(name, &head[..n]).unwrap_or_default())
 }
 
 impl Plugin for SourceSmb {
@@ -655,6 +641,7 @@ impl Drop for SmbFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use org_evoframework_source_files::facts_from_header;
 
     #[test]
     fn shares_parse() {

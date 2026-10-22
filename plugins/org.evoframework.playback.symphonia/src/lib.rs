@@ -764,6 +764,14 @@ fn decodable(content_type: &str) -> bool {
     }
 }
 
+/// Named as a FLAC file: the only kind whose pictures are read as
+/// padding.
+fn is_flac(uri: &str) -> bool {
+    uri.split(['?', '#'])
+        .next()
+        .is_some_and(|p| p.to_ascii_lowercase().ends_with(".flac"))
+}
+
 /// Open a URI: a `file://` on the host, an `http://`/`https://`
 /// stream through the opener, or a share's file through the opener
 /// for its scheme; probe it, pick its default audio track,
@@ -797,7 +805,11 @@ fn open(
         let len = file.length();
         let mut file = FileReader { file, pos: 0, len };
         let patching = Instant::now();
-        let patches = flac::picture_patches(&mut file).unwrap_or_default();
+        let patches = if is_flac(uri) {
+            flac::picture_patches(&mut file).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         patched_in = patching.elapsed();
         pictures = patches.len();
         let reader = ahead::ReadAhead::with_tuning(
@@ -868,7 +880,11 @@ fn open(
             .map_err(|e| CustodyError(format!("{}: {e}", path.display())))?
             .len();
         let patching = Instant::now();
-        let patches = flac::picture_patches(&mut file).unwrap_or_default();
+        let patches = if is_flac(uri) {
+            flac::picture_patches(&mut file).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         patched_in = patching.elapsed();
         pictures = patches.len();
         Box::new(
@@ -1372,7 +1388,8 @@ mod tests {
         // 800 frames a write: a tenth of a second per tick.
         let (mut s, tape) = rig(800);
         play(&mut s, file_track(&path), 0).unwrap();
-        s.tick(Ticks(1));
+        // Past any tick the open's wait reached, so the warden is due.
+        s.tick(Ticks(60_000));
         let got = tape.0.borrow().frames.len() / 2;
         assert!((800..8000).contains(&got), "took {got} frames");
         let st = state(&s);

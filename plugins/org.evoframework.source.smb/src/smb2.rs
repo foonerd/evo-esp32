@@ -707,9 +707,17 @@ impl Session {
         }
         let wire_msg = if self.encrypt { self.sealed(msg)? } else { msg };
         let len = wire_msg.len();
-        let nb = [0u8, (len >> 16) as u8, (len >> 8) as u8, len as u8];
-        self.stream.write_all(&nb)?;
-        self.stream.write_all(&wire_msg)?;
+        // Header and message in one write: a server may read a header
+        // arriving alone as a broken frame.
+        let mut frame = Vec::with_capacity(4 + len);
+        frame.extend_from_slice(&[
+            0u8,
+            (len >> 16) as u8,
+            (len >> 8) as u8,
+            len as u8,
+        ]);
+        frame.extend_from_slice(&wire_msg);
+        self.stream.write_all(&frame)?;
         loop {
             self.recv()?;
             let reply = Reply::parse(&self.frame)?;

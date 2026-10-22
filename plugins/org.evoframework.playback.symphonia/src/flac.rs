@@ -23,6 +23,10 @@ const PADDING: u8 = 1;
 /// The most blocks a header chain is followed; a file is not that
 /// decorated, and a corrupt chain stops here.
 const MOST_BLOCKS: usize = 64;
+/// Read once at the start and walked in memory: the marker, STREAMINFO,
+/// a seek table and the comments fit, so the picture's header is in it
+/// for nearly every file; over a share a read is a round trip.
+const PREFIX: usize = 4096;
 
 /// The bytes to substitute so a FLAC file's pictures read as padding:
 /// `(offset, byte)` for the header byte of each PICTURE block, the
@@ -33,16 +37,32 @@ pub fn picture_patches<S: Read + Seek>(
 ) -> std::io::Result<Vec<(u64, u8)>> {
     let mut patches = Vec::new();
     source.seek(SeekFrom::Start(0))?;
-    let mut marker = [0u8; 4];
-    if source.read_exact(&mut marker).is_err() || &marker != b"fLaC" {
+    let mut prefix = vec![0u8; PREFIX];
+    let mut have = 0;
+    while have < PREFIX {
+        let n = source.read(&mut prefix[have..])?;
+        if n == 0 {
+            break;
+        }
+        have += n;
+    }
+    prefix.truncate(have);
+    if prefix.len() < 8 || &prefix[..4] != b"fLaC" {
         source.seek(SeekFrom::Start(0))?;
         return Ok(patches);
     }
     let mut at = 4u64;
     for _ in 0..MOST_BLOCKS {
         let mut header = [0u8; 4];
-        if source.read_exact(&mut header).is_err() {
-            break;
+        let end = at as usize + 4;
+        if end <= prefix.len() {
+            header.copy_from_slice(&prefix[at as usize..end]);
+        } else {
+            // The chain goes on past the prefix: a header at a time.
+            source.seek(SeekFrom::Start(at))?;
+            if source.read_exact(&mut header).is_err() {
+                break;
+            }
         }
         let last = header[0] & 0x80;
         let kind = header[0] & 0x7f;
@@ -55,7 +75,6 @@ pub fn picture_patches<S: Read + Seek>(
             break;
         }
         at += 4 + len;
-        source.seek(SeekFrom::Start(at))?;
     }
     source.seek(SeekFrom::Start(0))?;
     Ok(patches)

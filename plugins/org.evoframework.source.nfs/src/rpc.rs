@@ -99,6 +99,7 @@ pub struct Client {
     stream: TcpStream,
     prog: u32,
     vers: u32,
+    port: u16,
     xid: u32,
     identity: Identity,
     reply: Vec<u8>,
@@ -128,6 +129,7 @@ impl Client {
             stream,
             prog,
             vers,
+            port,
             xid: u32::from_le_bytes(seed),
             identity,
             reply: Vec::with_capacity(1024),
@@ -160,9 +162,16 @@ impl Client {
         w.u32(AUTH_NONE).u32(0);
         w.bytes(args);
         let record = w.0;
+        // Marker and record in one write. A server reading the marker
+        // as a segment of its own (rpcbind and mountd on a NAS, old
+        // libtirpc) closes the connection without a word; over Wi-Fi
+        // two writes sometimes coalesced and sometimes did not, which
+        // made every mount of such a server a coin toss.
         let marker = (record.len() as u32) | 0x8000_0000;
-        self.stream.write_all(&marker.to_be_bytes())?;
-        self.stream.write_all(&record)?;
+        let mut frame = Vec::with_capacity(4 + record.len());
+        frame.extend_from_slice(&marker.to_be_bytes());
+        frame.extend_from_slice(&record);
+        self.stream.write_all(&frame)?;
         loop {
             self.recv()?;
             let mut r = Reader::new(&self.reply);
@@ -194,15 +203,18 @@ impl Client {
                     data: &self.reply,
                     at,
                 }),
-                1 => Err(Error::Rejected(
-                    "program not available on the server".into(),
-                )),
-                2 => Err(Error::Rejected(
-                    "program version not available on the server".into(),
-                )),
-                3 => Err(Error::Rejected(
-                    "procedure not available on the server".into(),
-                )),
+                1 => Err(Error::Rejected(format!(
+                    "program {} not available at port {}",
+                    self.prog, self.port
+                ))),
+                2 => Err(Error::Rejected(format!(
+                    "program {} version {} not available at port {}",
+                    self.prog, self.vers, self.port
+                ))),
+                3 => Err(Error::Rejected(format!(
+                    "procedure {proc_} not available in program {} at port {}",
+                    self.prog, self.port
+                ))),
                 4 => Err(Error::Rejected(
                     "the server could not read the call".into(),
                 )),

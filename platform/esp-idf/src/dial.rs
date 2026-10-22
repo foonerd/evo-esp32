@@ -6,13 +6,27 @@
 
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::FromRawFd;
+use std::sync::atomic::{AtomicU16, Ordering::Relaxed};
 use std::time::Duration;
 
 use org_evoframework_source_nfs::Dialer;
 
-/// Connects from a port between 600 and 1023, the first free one from
-/// the top; falls back to the ordinary connect when none can be bound
-/// or the address is not IPv4.
+/// The reserved ports tried, top down.
+const LOWEST: u16 = 600;
+const HIGHEST: u16 = 1023;
+
+/// Where the next connection starts looking: one below the last port
+/// taken, round and round. A server keeps a closed connection's
+/// four-tuple in TIME_WAIT for a minute; a new connection from the
+/// same port to the same server inside that minute is reset or
+/// ignored, which is what a remount after the NAS dropped an idle
+/// connection ran into. A kernel client picks a fresh reserved port
+/// each time for the same reason.
+static NEXT: AtomicU16 = AtomicU16::new(HIGHEST);
+
+/// Connects from a port between 600 and 1023, a different one each
+/// time; falls back to the ordinary connect when none can be bound or
+/// the address is not IPv4.
 pub struct ReservedPort;
 
 impl Dialer for ReservedPort {
@@ -54,7 +68,11 @@ fn reserved(addr: &SocketAddr, timeout: Duration) -> Option<TcpStream> {
         let mut local: libc::sockaddr_in = std::mem::zeroed();
         local.sin_family = libc::AF_INET as _;
         let mut bound = false;
-        for port in (600..1024u16).rev() {
+        let span = u32::from(HIGHEST - LOWEST + 1);
+        let start = NEXT.load(Relaxed);
+        for i in 0..span {
+            let port = LOWEST
+                + ((u32::from(start - LOWEST) + span - i) % span) as u16;
             local.sin_port = port.to_be();
             if libc::bind(
                 fd,
@@ -63,6 +81,8 @@ fn reserved(addr: &SocketAddr, timeout: Duration) -> Option<TcpStream> {
             ) == 0
             {
                 bound = true;
+                let below = if port == LOWEST { HIGHEST } else { port - 1 };
+                NEXT.store(below, Relaxed);
                 break;
             }
             let errno =

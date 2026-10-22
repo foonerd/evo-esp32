@@ -129,12 +129,55 @@ pub struct Export {
     pub read_max: u32,
 }
 
+/// What a server said once and need not be asked again this boot: the
+/// ports its portmapper gave, and the root handle MOUNT gave for a
+/// path — a version 3 handle outlives the connection, so a mount made
+/// again after the server dropped an idle connection is one connection
+/// and a GETATTR, not two portmapper calls, MOUNT and a connection.
+#[derive(Clone, Default)]
+pub struct Remembered {
+    /// `(mountd, nfsd)` ports.
+    pub ports: Option<(u16, u16)>,
+    /// The root handle for `Config::path`, and the read size.
+    pub root: Option<(Handle, u32)>,
+}
+
 impl Export {
     /// Find the server's ports, mount `cfg.path` (walking up to the
     /// export the server will give out and looking the rest up), and
-    /// open the NFS connection.
-    pub fn mount(cfg: &Config) -> Result<Export, Error> {
-        let (mount_port, nfs_port) = ports(cfg)?;
+    /// open the NFS connection. With a remembered root, only the
+    /// connection is made and the root checked; a stale one falls
+    /// back to the full mount. What was learnt goes into `memo`.
+    pub fn mount(cfg: &Config, memo: &mut Remembered) -> Result<Export, Error> {
+        let (mount_port, nfs_port) = match memo.ports {
+            Some(p) => p,
+            None => ports(cfg)?,
+        };
+        memo.ports = Some((mount_port, nfs_port));
+        if let Some((root, read_max)) = memo.root.clone() {
+            let nfs = Client::connect(
+                &cfg.host,
+                nfs_port,
+                NFS_PROG,
+                NFS_VERS,
+                cfg.identity.clone(),
+                cfg.dialer.as_ref(),
+            )?;
+            let mut export = Export {
+                nfs,
+                root,
+                read_max,
+            };
+            let root = export.root.clone();
+            match export.getattr(&root) {
+                Ok(_) => return Ok(export),
+                // The server forgot the handle (a restart): mount anew.
+                Err(Error::Status(status::STALE | status::BADHANDLE)) => {
+                    memo.root = None;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         let mut mountd = Client::connect(
             &cfg.host,
             mount_port,
@@ -199,6 +242,7 @@ impl Export {
             .fsinfo()
             .unwrap_or(READ_CHUNK)
             .clamp(4096, READ_CHUNK);
+        memo.root = Some((export.root.clone(), export.read_max));
         Ok(export)
     }
 
@@ -400,14 +444,24 @@ impl Export {
 }
 
 /// The ports mountd and nfsd listen on: the URL's for both when given,
-/// else the portmapper's answer, else the defaults.
+/// else the portmapper's answer, else the places mountd is found by
+/// convention. A NAS pins mountd to 892 (DSM, QNAP, most distributions'
+/// `nfs.conf`), newer ones to 20048; a userspace server (unfs3) runs it
+/// on the NFS port itself. Each guess is a MOUNT NULL call away, so a
+/// wrong one is not mistaken for a server fault. The log says which
+/// way the ports were found.
 fn ports(cfg: &Config) -> Result<(u16, u16), Error> {
     if let Some(p) = cfg.port {
         return Ok((p, p));
     }
     let dialer = cfg.dialer.as_ref();
-    match rpc::getport(&cfg.host, MOUNT_PROG, MOUNT_VERS, &cfg.identity, dialer)
-    {
+    let why = match rpc::getport(
+        &cfg.host,
+        MOUNT_PROG,
+        MOUNT_VERS,
+        &cfg.identity,
+        dialer,
+    ) {
         Ok(Some(mount_port)) => {
             let nfs_port = rpc::getport(
                 &cfg.host,
@@ -417,13 +471,44 @@ fn ports(cfg: &Config) -> Result<(u16, u16), Error> {
                 dialer,
             )?
             .unwrap_or(NFS_PORT);
-            Ok((mount_port, nfs_port))
+            log::info!(
+                "nfs: {}: the portmapper has mountd at {mount_port}, nfsd at {nfs_port}",
+                cfg.host
+            );
+            return Ok((mount_port, nfs_port));
         }
-        // No portmapper, or no MOUNT registered: a server that runs
-        // both on the NFS port, as unfs3 and some boxes do.
-        Ok(None) | Err(Error::Io(_)) => Ok((NFS_PORT, NFS_PORT)),
-        Err(e) => Err(e),
+        Ok(None) => "the portmapper lists no MOUNT service".to_string(),
+        Err(Error::Io(e)) => {
+            format!("the portmapper could not be reached ({e})")
+        }
+        Err(e) => return Err(e),
+    };
+    for port in [892, 20048, NFS_PORT] {
+        if mountd_answers(cfg, port) {
+            log::info!(
+                "nfs: {}: {why}; mountd answers at {port}, nfsd assumed at {NFS_PORT}",
+                cfg.host
+            );
+            return Ok((port, NFS_PORT));
+        }
     }
+    Err(Error::Rejected(format!(
+        "{why}, and no mountd at 892, 20048 or {NFS_PORT}; is NFS enabled on the server?"
+    )))
+}
+
+/// Whether MOUNT version 3 answers its NULL procedure at `port`.
+fn mountd_answers(cfg: &Config, port: u16) -> bool {
+    Client::connect(
+        &cfg.host,
+        port,
+        MOUNT_PROG,
+        MOUNT_VERS,
+        cfg.identity.clone(),
+        cfg.dialer.as_ref(),
+    )
+    .and_then(|mut c| c.call(0, &[]).map(|_| ()))
+    .is_ok()
 }
 
 /// What a listing needs of fattr3.
