@@ -24,7 +24,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   encryption required: list and play, a FLAC from 30 s lands to the
   second; the default and signing-mandatory servers and a Volumio's
   share now negotiate 3.1.1 too. RFC 4493 and NIST GCM vectors are
-  unit tests.
+  unit tests. Measured on the board: sealing costs some 7 % of the
+  core at 96 kHz. A 44.1 or 48 kHz track from an encrypted share
+  plays with the usual headroom; a 96 kHz FLAC from one plays to the
+  end without an underrun but with little to spare, and is the limit
+  of this chip, whose AES block has no GCM mode to take the work.
+
+- The face paints while the decoder runs flat out. The loop gives
+  audio the core first: with less than 120 ms decoded in hand it
+  decodes and paints nothing, which a 96 kHz track from an encrypted
+  share could hold for its whole length, so a tap went unanswered
+  until the track ended. Now a second without a paint lets one paint
+  through whenever 60 ms is in hand — a stage is under 90 ms and the
+  DMA ring stands behind the reservoir — so the face answers within
+  a second at worst, and the decoder lends it one stage a second.
 
 - SMB1's old session setup proved. The `smb1://` path a server without
   extended security takes (NTLMv2 in the session setup's own fields)

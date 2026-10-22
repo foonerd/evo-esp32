@@ -60,8 +60,9 @@ snapserver =
 #   share = smb1://oldbox/music              SMB 1 only, for an old box
 #   share = nfs://192.168.1.5/volume1/music   NFS (version 3)
 # A folder within the share may follow. The user and password are for
-# SMB; leave the user empty for a guest share; NFS has neither. A second share is share2,
-# share2_user, share2_password, and so on up to share9.
+# SMB; leave the user empty for a guest share (an encrypted share needs
+# an account); NFS has neither. A second share is share2, share2_user,
+# share2_password, and so on up to share9.
 share =
 share_user =
 share_password =

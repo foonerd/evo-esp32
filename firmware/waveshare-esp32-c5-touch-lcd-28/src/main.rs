@@ -1068,12 +1068,20 @@ fn main() -> anyhow::Result<()> {
         // Audio first: a paint stage can take 90 ms, and while the decoder
         // is short of lead the loop decodes instead of painting.
         let audio_short = lead.ms().is_some_and(|ms| ms < LOW_LEAD_MS);
+        // A decoder running flat out (96 kHz over a sealed share) can
+        // keep the lead short for a whole track; the face still paints
+        // once a second, while the reservoir and the DMA ring behind it
+        // can carry a paint stage.
+        let starved = last_face.elapsed() >= FACE_STARVED
+            && lead.ms().is_some_and(|ms| ms >= STARVED_LEAD_MS);
         let face_tick = if last_touch.elapsed() < FACE_AWAKE {
             FACE_TICK
         } else {
             FACE_REST
         };
-        if !audio_short && (painting || last_face.elapsed() >= face_tick) {
+        if (!audio_short || starved)
+            && (painting || last_face.elapsed() >= face_tick)
+        {
             last_face = Instant::now();
             if face.screen() == Screen::Library
                 && browse.waiting_for_servers()
@@ -2453,6 +2461,12 @@ const DEFAULT_NAME: &str = "evo-player";
 /// decodes: a track's start, a slow passage at 96 kHz. A paint stage is
 /// up to 90 ms, and the DMA ring stands behind the reservoir.
 const LOW_LEAD_MS: u32 = 120;
+/// How long the face may go unpainted before one paint goes ahead of
+/// the decoder anyway.
+const FACE_STARVED: Duration = Duration::from_secs(1);
+/// The lead that forced paint needs: a stage's worth, the DMA ring
+/// (75 ms at 96 kHz) behind it.
+const STARVED_LEAD_MS: u32 = 60;
 
 /// A line of internal SRAM left at a point of the boot: what the DMA
 /// rings, the stacks and the Wi-Fi driver compete for.
