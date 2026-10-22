@@ -246,6 +246,9 @@ pub struct PlaybackSymphonia {
     /// How the files of other schemes (`smb://`, `nfs://`) are reached,
     /// one opener per scheme.
     files: Arc<Vec<Box<dyn FileOpener>>>,
+    /// Where the card ring's chunk buffer comes from; the heap unless
+    /// the distribution says ([`with_card_memory`](Self::with_card_memory)).
+    card_memory: ahead::ChunkMemory,
     subject: Option<SubjectId>,
     in_hand: Option<InHand>,
 }
@@ -268,9 +271,18 @@ impl PlaybackSymphonia {
             codecs: Arc::new(codecs),
             opener: None,
             files: Arc::new(Vec::new()),
+            card_memory: ahead::heap_chunk,
             subject: None,
             in_hand: None,
         }
+    }
+
+    /// The memory the card ring reads into: on a device whose card
+    /// driver reaches only part of its memory by DMA, that part (see
+    /// [`ahead::ChunkMemory`]).
+    pub fn with_card_memory(mut self, memory: ahead::ChunkMemory) -> Self {
+        self.card_memory = memory;
+        self
     }
 
     /// With a way to reach `http://` and `https://` tracks: the
@@ -367,12 +379,19 @@ impl Warden for PlaybackSymphonia {
         }
         let (tx, rx) = mpsc::channel();
         let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
+        let card_memory = self.card_memory;
         thread::Builder::new()
             .name("open".into())
             .stack_size(OPEN_STACK)
             .spawn(move || {
                 // The custody may be gone by now; then this is dropped.
-                let _ = tx.send(open(&uri, &codecs, opener.as_ref(), &files));
+                let _ = tx.send(open(
+                    &uri,
+                    &codecs,
+                    opener.as_ref(),
+                    &files,
+                    card_memory,
+                ));
             })
             .map_err(|e| CustodyError(format!("open thread: {e}")))?;
         let state = State {
@@ -803,6 +822,7 @@ fn open(
     codecs: &CodecRegistry,
     opener: Option<&Arc<dyn StreamOpener>>,
     files: &[Box<dyn FileOpener>],
+    card_memory: ahead::ChunkMemory,
 ) -> Result<(Stream, Format), CustodyError> {
     let mut hint = Hint::new();
     let mut live = None;
@@ -908,8 +928,12 @@ fn open(
         patched_in = patching.elapsed();
         pictures = patches.len();
         Box::new(
-            ahead::ReadAhead::new(flac::Patched::new(file, patches), len)
-                .map_err(|e| CustodyError(format!("reader: {e}")))?,
+            ahead::ReadAhead::with_tuning(
+                flac::Patched::new(file, patches),
+                len,
+                ahead::Tuning::card().in_memory(card_memory),
+            )
+            .map_err(|e| CustodyError(format!("reader: {e}")))?,
         )
     };
     let opened_in = began.elapsed();

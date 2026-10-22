@@ -292,3 +292,52 @@ pub unsafe extern "C" fn media_lib_free(ptr: *mut c_void) {
     codec_account(ptr, true);
     sys::heap_caps_free(ptr);
 }
+
+/// A chunk the card's driver reaches by DMA: internal, DMA-capable,
+/// asked for by capability so the band's floor has no say. The ring's
+/// 8 KB chunk is in the medium band, and left to the band it landed in
+/// SRAM or PSRAM by how much was free the instant a track opened; in
+/// PSRAM the driver copies it a block at a time through its bounce
+/// buffer, a third of the core, and a 96 kHz FLAC loses its lead (R52:
+/// the same album, 9 % of the core for the reader after one boot of
+/// 0.1.5 and 35 % after the next).
+struct DmaChunk {
+    p: *mut u8,
+    len: usize,
+}
+
+// SAFETY: the memory is owned by this value alone; heap_caps memory is
+// not tied to a thread.
+unsafe impl Send for DmaChunk {}
+
+impl org_evoframework_playback_symphonia::ahead::Chunk for DmaChunk {
+    fn bytes(&mut self) -> &mut [u8] {
+        // SAFETY: `p` is `len` bytes of live, aligned allocation.
+        unsafe { core::slice::from_raw_parts_mut(self.p, self.len) }
+    }
+}
+
+impl Drop for DmaChunk {
+    fn drop(&mut self) {
+        // SAFETY: `p` came from heap_caps and is freed once, here.
+        unsafe { sys::heap_caps_free(self.p.cast()) };
+    }
+}
+
+/// Where the card ring's chunks come from; see [`DmaChunk`].
+pub fn card_chunk(
+    len: usize,
+) -> Box<dyn org_evoframework_playback_symphonia::ahead::Chunk> {
+    let caps =
+        sys::MALLOC_CAP_DMA | sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    // SAFETY: an allocation call with a plain size and capability set.
+    let p = unsafe { sys::heap_caps_aligned_alloc(4, len, caps) };
+    if p.is_null() {
+        log::warn!(
+            "ring: no {len} B of DMA memory for the card's chunk; the heap, which may be the slow path"
+        );
+        return org_evoframework_playback_symphonia::ahead::heap_chunk(len);
+    }
+    log::info!("ring: {len} B chunk for the card in internal DMA memory");
+    Box::new(DmaChunk { p: p.cast(), len })
+}

@@ -1582,6 +1582,7 @@ fn bring_up(
                     Box::new(sink.clone()),
                     codecs(),
                 )
+                .with_card_memory(alloc::card_chunk)
                 .with_opener(Box::new(HttpOpener))
                 .with_file_opener(Box::new(SmbOpener::new(shares.clone())))
                 .with_file_opener(Box::new(SmbOpener::smb1(shares)))

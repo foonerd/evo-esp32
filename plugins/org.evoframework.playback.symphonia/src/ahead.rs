@@ -104,13 +104,43 @@ const PACE: Duration = Duration::from_millis(6);
 /// network transport's read.
 const STACK: usize = 12 * 1024;
 
-/// How the reader asks its source: by chunks of what size, how much it
-/// keeps ahead before it slows, the pause between chunks then, and how
-/// much the ring holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Memory the reader reads a chunk into.
+pub trait Chunk: Send {
+    /// The bytes, as many as were asked for.
+    fn bytes(&mut self) -> &mut [u8];
+}
+
+impl Chunk for Vec<u8> {
+    fn bytes(&mut self) -> &mut [u8] {
+        self
+    }
+}
+
+/// Where a chunk's memory comes from, by size in bytes. The default is
+/// the heap. A device whose card driver reaches only part of its memory
+/// by DMA supplies that part here: a chunk anywhere else is read a
+/// block at a time through the driver's bounce buffer, which on the
+/// ESP32-C5 cost a third of the core and, at 96 kHz, the DMA its lead
+/// — and which memory an ordinary allocation landed in depended on how
+/// much was free at the instant the track opened, so a boot was smooth
+/// or not by chance (R52, measured on 0.1.5: the same album at 9 % of
+/// the core for the reader after one boot and 35 % after another).
+pub type ChunkMemory = fn(usize) -> Box<dyn Chunk>;
+
+/// Chunks from the heap.
+pub fn heap_chunk(len: usize) -> Box<dyn Chunk> {
+    Box::new(vec![0u8; len])
+}
+
+/// How the reader asks its source: by chunks of what size, from what
+/// memory, how much it keeps ahead before it slows, the pause between
+/// chunks then, and how much the ring holds.
+#[derive(Clone, Copy)]
 pub struct Tuning {
     /// Bytes asked for at a time.
     pub chunk: usize,
+    /// Where the chunk's memory comes from.
+    pub memory: ChunkMemory,
     /// Below this much ahead, chunk after chunk; above, paced.
     pub eager: usize,
     /// The pause between chunks once eager is in hand.
@@ -121,14 +151,23 @@ pub struct Tuning {
 
 impl Tuning {
     /// The card: `CHUNK`, `EAGER`, `PACE`, `CAPACITY` — small chunks
-    /// the card's DMA reaches, paced so the panel's bus is shared.
+    /// the card's DMA reaches, paced so the panel's bus is shared. The
+    /// chunk's memory is the heap's until [`Tuning::in_memory`] says
+    /// otherwise.
     pub const fn card() -> Self {
         Tuning {
             chunk: CHUNK,
+            memory: heap_chunk,
             eager: EAGER,
             pace: PACE,
             capacity: CAPACITY,
         }
+    }
+
+    /// The same tuning with its chunks from `memory`.
+    pub const fn in_memory(mut self, memory: ChunkMemory) -> Self {
+        self.memory = memory;
+        self
     }
 
     /// A file on a server: the same chunk and ring as the card, a
@@ -146,6 +185,7 @@ impl Tuning {
     pub const fn network() -> Self {
         Tuning {
             chunk: CHUNK,
+            memory: heap_chunk,
             eager: 8 * CHUNK,
             pace: PACE,
             capacity: CAPACITY,
@@ -325,7 +365,8 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
     // larger allocation: the card's driver wants that alignment for a
     // direct transfer, and a byte vector promises none.
     let chunk = tuning.chunk.max(BLOCK) / BLOCK * BLOCK;
-    let mut raw = vec![0u8; chunk + 4];
+    let mut raw = (tuning.memory)(chunk + 4);
+    let raw = raw.bytes();
     let skew = raw.as_ptr().align_offset(4);
     let buf = &mut raw[skew..skew + chunk];
     loop {
