@@ -28,6 +28,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The heartbeat's core line now names every thread (`read/6`,
   `fetch/6`, `open/4`, `peer/4`) instead of showing each as `main/5`.
 
+- A seek in a file on a share no longer barks. After a seek the sink
+  played the first frames at once — the ones the demuxer had read on
+  its way to the target — and then waited on the share while the
+  read-ahead ring, restarted at the new place, gathered its low-water
+  mark: a burst, a gap, and then the music. A seek now gathers the
+  same quarter second of lead a track start does before the feeder
+  plays again, on every source. The decoder's wrapper also withholds
+  the frames a seek, an open or a resync leaves without their main
+  data (MPEG audio keeps up to 511 bytes of a frame in the frames
+  before it, the bit reservoir), as Symphonia's own decoder and
+  Android's do; those frames still feed the reservoir, so the next one
+  plays whole.
+
 - Peers of the Volumio protocol are written to from their own thread.
   The main loop posted every state push into the peers' sockets
   itself; a peer slow to read could hold the loop on a send. An outbox

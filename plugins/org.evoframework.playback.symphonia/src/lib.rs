@@ -1149,6 +1149,13 @@ fn next_frames(
         match stream.decoder.decode(&packet) {
             Ok(buf) => {
                 let frames = buf.frames() as u64;
+                if frames == 0 {
+                    // The packet fed the decoder and nothing came out
+                    // (an MP3 frame whose main data the decoder has
+                    // not seen); its empty buffer says nothing about
+                    // the format.
+                    continue;
+                }
                 let spec = buf.spec();
                 let rate = spec.rate();
                 let channels = spec.channels().count().clamp(1, 255) as u8;

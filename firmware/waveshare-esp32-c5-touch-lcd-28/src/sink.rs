@@ -83,7 +83,12 @@ const EMPTY_NAP: Duration = Duration::from_millis(2);
 /// first packets, and at 96 kHz the decoder gains lead slowly. The
 /// first stream after boot gathers the whole lead, since no one is
 /// waiting for it and the first frame is the longest paint; a stream
-/// following another's tail starts at once, the tail standing in.
+/// following another's tail starts at once, the tail standing in. A
+/// seek gathers the same: the frames the demuxer read on the way to
+/// the target decode at once, and what follows them waits on the
+/// source — a ring restarted on a share takes a few hundred
+/// milliseconds to reach its low-water mark — so without the gather
+/// the seek was heard as a burst, a gap and the music.
 const PRIME_MS: u32 = 250;
 
 /// Times the reservoir certainly ran dry since the last report, and the
@@ -448,6 +453,11 @@ impl<F: RateFollower> I2sSink<F> {
         Lead(self.reservoir.clone())
     }
 
+    /// Reservoir bytes of `ms` at the current rate.
+    fn prime_bytes(&self, ms: u32) -> usize {
+        (self.rate as usize * ms as usize / 1000) * FRAME_BYTES
+    }
+
     /// Wait until the reservoir and the DMA have played out; bounded.
     fn drain(&self) {
         let deadline = Instant::now()
@@ -744,9 +754,9 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         } else {
             LEAD_MS
         };
-        let prime =
-            (self.rate as usize * prime_ms as usize / 1000) * FRAME_BYTES;
-        self.reservoir.prime.store(prime, Ordering::Relaxed);
+        self.reservoir
+            .prime
+            .store(self.prime_bytes(prime_ms), Ordering::Relaxed);
         info!(
             "sink: {} {} Hz {} ch {} bit",
             format.codec, format.sample_rate, format.channels, format.bits
@@ -801,10 +811,12 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
     fn flush(&mut self) {
         // The feeder drops what the reservoir holds; the DMA's few tens of
         // milliseconds still play, which is not worth a channel restart.
-        // No priming after a seek: the ear is waiting.
+        // Then it gathers a start's lead before it plays again.
         self.carry.clear();
         self.reservoir.armed.store(false, Ordering::Relaxed);
-        self.reservoir.prime.store(0, Ordering::Relaxed);
+        self.reservoir
+            .prime
+            .store(self.prime_bytes(PRIME_MS), Ordering::Relaxed);
         self.reservoir.flush.store(true, Ordering::Release);
     }
 

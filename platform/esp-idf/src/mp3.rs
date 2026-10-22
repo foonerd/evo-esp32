@@ -10,6 +10,17 @@
 //! follows what the decoder reports, so a stream whose rate or channel
 //! count differs from the container's parameters is still right.
 //!
+//! A Layer III frame's main data may begin up to 511 bytes before the
+//! frame itself, in the frames before it (`main_data_begin`, the bit
+//! reservoir). The first frames after the decoder is opened or reset —
+//! a station joined mid-stream, a seek, a resync after a bad frame —
+//! ask for bytes it never saw; Espressif's decoder plays what it makes
+//! of the gap, a burst of noise. The wrapper reads each frame's
+//! `main_data_begin` from its side information and, while the
+//! reservoir cannot hold what the frame asks for, feeds the frame to
+//! the decoder and withholds its output (Symphonia's own decoder zeroes
+//! those granules; Android's substitutes silence for the frame).
+//!
 //! The decoder is registered at [`Tier::Preferred`], above Symphonia's
 //! own, by [`register`].
 
@@ -36,6 +47,37 @@ use symphonia_core::support_audio_codec;
 
 /// Frames in the longest MPEG audio frame (layer 3, MPEG-1).
 const MAX_FRAMES: usize = 1152;
+/// The furthest back a frame's main data may begin: nine bits of
+/// `main_data_begin` in MPEG-1 (eight in MPEG-2 and 2.5).
+const RESERVOIR: usize = 511;
+
+/// What a Layer III frame says about its main data: where it begins,
+/// in bytes before this frame, and how many bytes the frame itself
+/// adds to the reservoir. `None` for a frame that is not Layer III or
+/// is too short to say.
+fn main_data(frame: &[u8]) -> Option<(usize, usize)> {
+    let (b1, b3) = (*frame.get(1)?, *frame.get(3)?);
+    if (b1 >> 1) & 0b11 != 0b01 {
+        // Not Layer III: Layers I and II have no reservoir.
+        return None;
+    }
+    let mpeg1 = (b1 >> 3) & 0b11 == 0b11;
+    let mono = b3 >> 6 == 0b11;
+    let crc = usize::from(b1 & 1 == 0) * 2;
+    let side_info = match (mpeg1, mono) {
+        (true, true) => 17,
+        (true, false) => 32,
+        (false, true) => 9,
+        (false, false) => 17,
+    };
+    let side = frame.get(4 + crc..4 + crc + side_info)?;
+    let begin = if mpeg1 {
+        usize::from(side[0]) << 1 | usize::from(side[1] >> 7)
+    } else {
+        usize::from(side[0])
+    };
+    Some((begin, frame.len() - 4 - crc - side_info))
+}
 
 /// Put Espressif's MP3 decoder in `registry`, preferred over any other.
 pub fn register(registry: &mut CodecRegistry) {
@@ -49,6 +91,10 @@ pub struct EspMp3 {
     /// What the decoder wrote, interleaved; grown if it asks for more.
     pcm: Vec<u8>,
     buf: AudioBuffer<i16>,
+    /// Main data bytes the decoder has seen since it was opened or
+    /// reset, up to [`RESERVOIR`]: what a frame's `main_data_begin`
+    /// may reach back into.
+    reservoir: usize,
 }
 
 // SAFETY: the handle is only ever used through `&mut self`, by one task.
@@ -91,11 +137,18 @@ impl EspMp3 {
             params: params.clone(),
             pcm: vec![0; MAX_FRAMES * 2 * 2],
             buf: AudioBuffer::default(),
+            reservoir: 0,
         })
     }
 
     /// Decode one packet into `self.buf`; frames decoded.
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<usize> {
+        // Whether this frame's main data reaches into frames the
+        // decoder never saw; what it adds is counted once it is fed.
+        let (short, adds) = match main_data(packet.data) {
+            Some((begin, adds)) => (begin > self.reservoir, adds),
+            None => (false, 0),
+        };
         let mut raw = c::esp_audio_dec_in_raw_t {
             buffer: packet.data.as_ptr().cast_mut(),
             len: packet.data.len() as u32,
@@ -131,12 +184,15 @@ impl EspMp3 {
                 }
                 _ => {
                     log::warn!("esp mp3: decode failed ({ret})");
+                    self.reservoir = 0;
                     return decode_error("esp mp3: decode failed");
                 }
             }
         };
-        if decoded == 0 {
-            // A frame that only fed the bit reservoir.
+        self.reservoir = (self.reservoir + adds).min(RESERVOIR);
+        if decoded == 0 || short {
+            // A frame that only fed the bit reservoir, or one whose
+            // main data lay in frames the decoder never saw.
             self.buf.clear();
             return Ok(0);
         }
@@ -180,6 +236,7 @@ impl AudioDecoder for EspMp3 {
         if ret != c::esp_audio_err_t_ESP_AUDIO_ERR_OK {
             log::warn!("esp mp3: reset failed ({ret})");
         }
+        self.reservoir = 0;
         self.buf.clear();
     }
 
