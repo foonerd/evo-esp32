@@ -105,7 +105,8 @@ const PACE: Duration = Duration::from_millis(6);
 const STACK: usize = 12 * 1024;
 
 /// How the reader asks its source: by chunks of what size, how much it
-/// keeps ahead before it slows, and the pause between chunks then.
+/// keeps ahead before it slows, the pause between chunks then, and how
+/// much the ring holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tuning {
     /// Bytes asked for at a time.
@@ -114,37 +115,41 @@ pub struct Tuning {
     pub eager: usize,
     /// The pause between chunks once eager is in hand.
     pub pace: Duration,
+    /// What the ring holds at most, [`BEHIND`] of it behind the decoder.
+    pub capacity: usize,
 }
 
 impl Tuning {
-    /// The card: [`CHUNK`], [`EAGER`], [`PACE`] — small chunks the
-    /// card's DMA reaches, paced so the panel's bus is shared.
+    /// The card: [`CHUNK`], [`EAGER`], [`PACE`], [`CAPACITY`] — small
+    /// chunks the card's DMA reaches, paced so the panel's bus is
+    /// shared.
     pub const fn card() -> Self {
         Tuning {
             chunk: CHUNK,
             eager: EAGER,
             pace: PACE,
+            capacity: CAPACITY,
         }
     }
 
-    /// A file on a server. The same chunk: a reply of 8 KB is six TCP
-    /// segments, what the ESP32-C5's Wi-Fi receive buffers hold at
-    /// once (a 64 KB reply overran them, was retransmitted after the
-    /// timeout, and came at a third of the link's rate). The same
-    /// pace: unpaced, the reader fires requests back to back and every
-    /// other call on the radio — the next track's open, a listing —
-    /// queues behind them (measured: opens of 60–90 ms became 0.7–3.5
-    /// s). A deeper landing zone, so a seek or an open has its first
-    /// chunks without pauses. One request is in flight at a time, so a
-    /// link that answers in 14 ms gives 570 KB/s: a 96 kHz FLAC
-    /// (576 KB/s) is at the edge over the network whatever the chunk;
-    /// 44.1 and 48 kHz are comfortable. A second request in flight is
-    /// the lever, when it is wanted.
+    /// A file on a server: the same chunk and ring as the card, a
+    /// deeper landing zone so a seek or an open has its first chunks
+    /// without pauses, then the pace, which lets a listing or the next
+    /// track's open onto the radio between reads. One request is in
+    /// flight at a time, so a round trip bounds the rate: 8 KB per
+    /// 13 ms to a server on the desk is ~600 KB/s; per 25–75 ms to a
+    /// NAS over the 2.4 GHz band, 110–330 KB/s, which is not a 96 kHz
+    /// FLAC. Measured on the ESP32-C5 and set aside: 64 KB chunks into
+    /// a 1 MB ring moved fewer bytes (80–450 KB/s) and took the core —
+    /// three worker threads at 30 % beside the Wi-Fi driver and lwIP at
+    /// 23 % — for reasons the thread names did not show. The lever that
+    /// remains is a second request in flight.
     pub const fn network() -> Self {
         Tuning {
             chunk: CHUNK,
             eager: 8 * CHUNK,
             pace: PACE,
+            capacity: CAPACITY,
         }
     }
 }
@@ -211,6 +216,12 @@ struct Shared {
     filled: Condvar,
     /// Signalled when the ring has room, a seek is wanted, or on stop.
     wanted: Condvar,
+    /// What the ring holds at most.
+    capacity: usize,
+    /// This ring's own account: bytes its source gave, and the
+    /// milliseconds spent in its `read`. The rate of one track.
+    read_bytes: AtomicU32,
+    read_ms: AtomicU32,
 }
 
 /// A file as a [`MediaSource`], read ahead by a thread.
@@ -238,6 +249,15 @@ impl Watch {
         let s = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         s.available() >= self.low || s.eof || s.error.is_some()
     }
+
+    /// What this ring's source has given so far, and the milliseconds
+    /// spent in its `read`: bytes and ms.
+    pub fn tally(&self) -> (u32, u32) {
+        (
+            self.shared.read_bytes.load(Relaxed),
+            self.shared.read_ms.load(Relaxed),
+        )
+    }
 }
 
 impl ReadAhead {
@@ -245,7 +265,7 @@ impl ReadAhead {
     pub fn watch(&self, low: usize) -> Watch {
         Watch {
             shared: Arc::clone(&self.shared),
-            low: low.min(CAPACITY - BEHIND),
+            low: low.min(self.shared.capacity - BEHIND),
         }
     }
 }
@@ -271,7 +291,7 @@ impl ReadAhead {
     {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
-                ring: VecDeque::with_capacity(CAPACITY),
+                ring: VecDeque::with_capacity(tuning.capacity),
                 base: 0,
                 head: 0,
                 eof: false,
@@ -282,6 +302,9 @@ impl ReadAhead {
             }),
             filled: Condvar::new(),
             wanted: Condvar::new(),
+            capacity: tuning.capacity,
+            read_bytes: AtomicU32::new(0),
+            read_ms: AtomicU32::new(0),
         });
         let reader = Arc::clone(&shared);
         thread::Builder::new()
@@ -326,7 +349,7 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
                     }
                 }
                 s.trim();
-                let room = CAPACITY.saturating_sub(s.ring.len());
+                let room = shared.capacity.saturating_sub(s.ring.len());
                 if s.eof || s.error.is_some() || room < BLOCK {
                     s = shared
                         .wanted
@@ -349,6 +372,10 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
         let began = Instant::now();
         let got = file.read(&mut buf[..want]);
         add_ms(&READ_MS, began);
+        add_ms(&shared.read_ms, began);
+        if let Ok(n) = got {
+            shared.read_bytes.fetch_add(n as u32, Relaxed);
+        }
         let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.generation != generation {
             // A seek came while the card answered: this was the old
@@ -634,17 +661,25 @@ mod tests {
 
     #[test]
     fn the_network_tuning_lands_a_deeper_eager_zone_at_once() {
-        let bytes = pattern(CAPACITY);
+        let bytes = pattern(CAPACITY + 4 * CHUNK);
         let (source, _, log) = counted(&bytes);
         let tuning = Tuning::network();
         assert_eq!(tuning.chunk, CHUNK);
+        assert_eq!(tuning.capacity, CAPACITY);
         let began = Instant::now();
-        let ahead =
+        let mut ahead =
             ReadAhead::with_tuning(source, bytes.len() as u64, tuning).unwrap();
+        let watch = ahead.watch(16 * 1024);
         while log.lock().unwrap().len() < tuning.eager / CHUNK {
             assert!(began.elapsed() < PACE * 20, "the eager zone paced");
             thread::yield_now();
         }
+        // The bytes are the file's, and the ring's own tally counts them.
+        let mut head = vec![0u8; 3 * CHUNK];
+        ahead.read_exact(&mut head).unwrap();
+        assert_eq!(head, &bytes[..3 * CHUNK]);
+        let (tallied, _) = watch.tally();
+        assert!(tallied as usize >= 3 * CHUNK, "tallied {tallied}");
         drop(ahead);
     }
 }

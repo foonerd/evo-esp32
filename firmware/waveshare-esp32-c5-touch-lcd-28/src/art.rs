@@ -48,6 +48,13 @@ const STACK: usize = 12 * 1024;
 const WORKER_PRIORITY: u8 = 1;
 /// The main task's priority once the fetcher exists: ESP-IDF starts it
 /// at 1, level with the worker, which would share the core by turns.
+/// Below the pthread default of 5 that every thread a plugin spawns
+/// through `std` runs at — the read-ahead rings above all. Tried at 6,
+/// above them, to keep the face from being preempted by a ring's fill
+/// (measured 2026-10-22): the loop polls while a network ring is
+/// short, and above the reader it starved it — reads fell to 75–129
+/// KB/s and the DMA ran dry for 4–6 s with the main task at 96 %. The
+/// producer stays above the consumer that polls for it.
 pub const MAIN_PRIORITY: u8 = 2;
 /// A piece of the file per bus turn, and the pause that lets the music
 /// have the bus between pieces.

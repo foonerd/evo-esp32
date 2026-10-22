@@ -52,7 +52,7 @@ static ALLOC: alloc::Placed = alloc::Placed;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use companion_platform_esp_idf::Card;
+use companion_platform_esp_idf::{Band, Card};
 use embedded_hal_bus::i2c::RefCellDevice;
 use es8311::Es8311;
 use es9018k2m::Es9018k2m;
@@ -297,12 +297,20 @@ fn main() -> anyhow::Result<()> {
         Some(ssid) => {
             let password =
                 config.settings.wifi_password.clone().unwrap_or_default();
+            let band = match config.settings.wifi_band {
+                Some(evo_esp32_config::WifiBand::Five) => Band::Five,
+                Some(evo_esp32_config::WifiBand::TwoPointFour) => {
+                    Band::TwoPointFour
+                }
+                Some(evo_esp32_config::WifiBand::Auto) | None => Band::Both,
+            };
             match net::Net::start(
                 modem,
                 nvs,
                 ssid.clone(),
                 password,
                 Some(hostname.clone()),
+                band,
             ) {
                 Ok(net) => {
                     config.set_network(format!("wifi: joining '{ssid}'"));

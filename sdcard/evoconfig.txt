@@ -35,6 +35,13 @@ name = evo-player
 wifi_ssid = Your Network
 wifi_password = your password
 
+# The band to join it on when the network is on both: auto (the
+# strongest signal, usually 2.4 GHz), 5 or 2.4. A NAS over 5 GHz
+# answers in single milliseconds where 2.4 GHz takes tens; 5 GHz
+# carries less far. With 5 the player falls back to either when the
+# network is not on 5 GHz.
+wifi_band = auto
+
 # The order the queue plays in: on (shuffled) or off (as listed). And
 # what happens at its end: all (starts again), off (stops), one (the
 # same track again). Both are also a tap away in Settings.

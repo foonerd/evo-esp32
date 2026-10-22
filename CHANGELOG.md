@@ -101,6 +101,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The picture scan at an open is for FLAC only; an MP3, an AAC, a
   WAV or an Ogg is opened without it.
 
+- The chip's transport sized for a share's reads, from its sources
+  rather than its documentation. Every received frame passes through
+  the TCP/IP task's own mailbox before anything else, and a frame it
+  cannot take is freed without a word; at its default of 32 a reply
+  longer than 32 segments lost its tail every time and was sent again
+  after the server's timer. That mailbox and the socket's are 64 now,
+  the receive window 64 KB (one whole NFS or SMB read, the largest
+  without window scaling), the Wi-Fi driver's receive buffers 12
+  static, 12 in the block-ack window and 64 dynamic (Espressif's floor
+  for a PSRAM-first build is 16; 12 is what the SRAM budget beside an
+  MP3 decoder allows), lwIP's retransmission floor 500 ms instead of
+  1.5 s (a lost request is sent again at 0.5, 2.5 and 6.5 s, not 1.5,
+  7.5 and 19.5), selective acknowledgements on. Measured from a
+  server on the desk over 5 GHz: 8 KB reads at 360–440 KB/s, where the
+  same path stalled for seconds before. Tried and set aside, with the
+  numbers in the code: 64 KB reads into a 1 MB ring (fewer bytes and
+  more of the core), and the main task above the reader threads (it
+  polls while a ring is short, and starved them).
+
+- A 96 kHz FLAC from a share is at this core's limit: decode takes
+  60–65 % of it, the Wi-Fi driver, lwIP and the reader 20–25 %, and
+  the decoder falls to 0.93 of real time — the DMA runs dry each
+  second and the panel answers late. 44.1 and 48 kHz play with room.
+  The lever is the decoder's cost, which is the next work.
+
+- A share's connections keep alive, with the Linux NFS client's values
+  (60 s idle, 60 s between probes, three probes): a server that went
+  away, or a radio that came back on another path, fails the next
+  read within minutes instead of hanging it for its timeout.
+
+- `wifi_band` in evoconfig.txt: `auto` (as before: the driver's
+  search, which takes the first match it finds and remembers it),
+  `5` or `2.4`. A network on both bands was joined on whichever the
+  first search found and kept there by the remembered access point;
+  a 5 GHz access point answers a NAS in single milliseconds where
+  2.4 GHz takes tens. With `5` the player falls back to either band
+  when the network is not on 5 GHz. The companion's `WifiNet::join`
+  takes the band (c73cb2b).
+
+- A line per track from a server says what the link gave: `read:
+  1248 KB from the server in 3317 ms of reads: 376 KB/s while
+  reading` — the rate while the reader was in a read is the link's
+  ceiling for one request in flight.
+
 ## [0.1.5] - 2026-10-22
 
 - Fixed: a seek into a track on the card could slow the card for the

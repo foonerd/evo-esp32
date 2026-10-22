@@ -147,6 +147,26 @@ struct Stream {
     ahead: Option<ahead::Watch>,
 }
 
+impl Drop for Stream {
+    /// A server's file says what the link gave: the rate while the
+    /// reader was in a read is the link's ceiling for one request in
+    /// flight, the number that decides whether a second is wanted.
+    fn drop(&mut self) {
+        if let Some(watch) = &self.ahead {
+            let (bytes, ms) = watch.tally();
+            let rate = if ms > 0 {
+                u64::from(bytes) * 1000 / 1024 / u64::from(ms)
+            } else {
+                0
+            };
+            log::info!(
+                "read: {} KB from the server in {ms} ms of reads: {rate} KB/s while reading",
+                bytes / 1024
+            );
+        }
+    }
+}
+
 /// A network stream being reached on its thread: what the thread will
 /// send, and what the custody asked for meanwhile.
 struct Opening {
@@ -1304,22 +1324,27 @@ mod tests {
 
     /// Assign the track and tick until the open thread has it playing
     /// (or has failed); the ticks step by the opening idle so the
-    /// steward re-asks the warden each time.
+    /// steward re-asks the warden each time. Gives the handle and the
+    /// time of the tick that found it done: a test's clock goes on
+    /// from there, since the steward skips a custody ticked before it
+    /// is due, and under load the open takes more than one step.
     fn play(
         s: &mut Steward,
         track: Track,
         start_ms: u64,
-    ) -> Result<CustodyHandle, evo_esp32_steward::DispatchError> {
+    ) -> Result<(CustodyHandle, u64), evo_esp32_steward::DispatchError> {
         let h = assign_play(s, track, start_ms)?;
         let began = Instant::now();
         let mut t = 0;
+        let mut last = 0;
         while state(s).status == Status::Opening {
             assert!(began.elapsed() < Duration::from_secs(5), "still opening");
             thread::sleep(Duration::from_millis(2));
             s.tick(Ticks(t));
+            last = t;
             t += u64::from(OPENING_IDLE_MS);
         }
-        Ok(h)
+        Ok((h, last))
     }
 
     fn correct(s: &mut Steward, h: CustodyHandle, c: Correction, at: u64) {
@@ -1401,15 +1426,15 @@ mod tests {
     fn pause_holds_and_resume_continues() {
         let path = wav(8000);
         let (mut s, tape) = rig(800);
-        let h = play(&mut s, file_track(&path), 0).unwrap();
-        s.tick(Ticks(1));
+        let (h, t0) = play(&mut s, file_track(&path), 0).unwrap();
+        s.tick(Ticks(t0 + 1));
         let before = tape.0.borrow().frames.len();
-        correct(&mut s, h, Correction::Pause, 2);
-        s.tick(Ticks(100));
+        correct(&mut s, h, Correction::Pause, t0 + 2);
+        s.tick(Ticks(t0 + 100));
         assert_eq!(tape.0.borrow().frames.len(), before);
         assert_eq!(state(&s).status, Status::Paused);
-        correct(&mut s, h, Correction::Resume, 300);
-        s.tick(Ticks(300));
+        correct(&mut s, h, Correction::Resume, t0 + 300);
+        s.tick(Ticks(t0 + 300));
         assert!(tape.0.borrow().frames.len() > before);
     }
 
@@ -1417,12 +1442,12 @@ mod tests {
     fn seek_flushes_the_sink_and_moves_the_position() {
         let path = wav(8000);
         let (mut s, tape) = rig(800);
-        let h = play(&mut s, file_track(&path), 0).unwrap();
-        s.tick(Ticks(1));
-        correct(&mut s, h, Correction::Seek { position_ms: 500 }, 2);
+        let (h, t0) = play(&mut s, file_track(&path), 0).unwrap();
+        s.tick(Ticks(t0 + 1));
+        correct(&mut s, h, Correction::Seek { position_ms: 500 }, t0 + 2);
         assert_eq!(tape.0.borrow().flushes, 1);
         assert_eq!(state(&s).position_ms, 500);
-        s.tick(Ticks(3));
+        s.tick(Ticks(t0 + 3));
         let t = tape.0.borrow();
         // The reader lands on the packet before 500 ms and the warden
         // trims to the frame: the first sample after the flush is frame
@@ -1435,9 +1460,9 @@ mod tests {
     fn a_start_offset_is_honoured_to_the_frame() {
         let path = wav(8000);
         let (mut s, tape) = rig(800);
-        play(&mut s, file_track(&path), 250).unwrap();
+        let (_, t0) = play(&mut s, file_track(&path), 250).unwrap();
         assert_eq!(state(&s).position_ms, 250);
-        s.tick(Ticks(1));
+        s.tick(Ticks(t0 + 1));
         assert_eq!(tape.0.borrow().frames[0], 2000i16.wrapping_mul(7));
     }
 
@@ -1607,9 +1632,9 @@ mod tests {
         );
         let mut tr = file_track(Path::new("/x/station.wav"));
         tr.uri = "http://x/station".into();
-        let h = play(&mut s, tr, 0).unwrap();
-        correct(&mut s, h, Correction::Pause, 1);
-        settle(&mut s, 5000);
+        let (h, t0) = play(&mut s, tr, 0).unwrap();
+        correct(&mut s, h, Correction::Pause, t0 + 1);
+        settle(&mut s, t0 + 5000);
         assert_eq!(state(&s).status, Status::Paused);
         assert!(tape.0.borrow().frames.is_empty());
     }

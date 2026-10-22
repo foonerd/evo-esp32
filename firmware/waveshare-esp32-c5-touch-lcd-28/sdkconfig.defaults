@@ -26,15 +26,20 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # share it). The Wi-Fi driver's IRAM optimisations default on and cost
 # tens of kilobytes of it for throughput a music stream does not need;
 # the code runs from flash instead. Static RX buffers are DMA memory and
-# stay internal, so few of them; the dynamic ones are in PSRAM.
+# stay internal (1.6 KB each); Espressif's floor for a PSRAM-first
+# build is 16, and 12 is what the SRAM budget allows beside an MP3
+# decoder (R45): the six of 0.1.5 could not take a 64 KB NFS reply
+# without drops. The dynamic ones are in PSRAM and must cover a full
+# receive window in frames (65535 / 1460 = 45) or the driver drops
+# what lwIP has not yet queued.
 CONFIG_ESP_WIFI_IRAM_OPT=n
 CONFIG_ESP_WIFI_RX_IRAM_OPT=n
 CONFIG_ESP_WIFI_EXTRA_IRAM_OPT=n
 CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=12
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
 # The block-ack window may not exceed twice the static buffers.
-CONFIG_ESP_WIFI_RX_BA_WIN=6
+CONFIG_ESP_WIFI_RX_BA_WIN=12
 # A player receives; it sends acknowledgements and requests. With the
 # pools in PSRAM the TX buffers are static (the only type allowed) and
 # the cache buffers are the internal copies the MAC sends from.
@@ -45,13 +50,31 @@ CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=3
 
 # A stream over TCP gets at most one receive window per round trip. The
 # default window of four segments (5.7 KB) caps a Wi-Fi link whose round
-# trip wanders at a few tens of kilobytes a second, under a FLAC
-# multiroom stream; 32 KB lets the sender keep a quarter second of such
-# a stream in flight. The segments wait in PSRAM (the dynamic RX buffers
-# above, enough for a full window), the socket's mailbox holds a
-# window's worth of them.
-CONFIG_LWIP_TCP_WND_DEFAULT=32768
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+# trip wanders at a few tens of kilobytes a second. A NAS answers in
+# 25–75 ms over this radio: with 32 KB one connection carried at most
+# ~640 KB/s; 64 KB is the largest without window scaling. The segments
+# wait in PSRAM (the dynamic RX buffers above, enough for a full
+# window), the socket's mailbox holds a window's worth of them, and so
+# must the tcpip task's own mailbox, which every received frame passes
+# through first: a frame it cannot take is freed without a word
+# (wlanif_input → tcpip_inpkt → sys_mbox_trypost), and at its default
+# of 32 the tail of every 45-segment reply was lost and resent after
+# the server's timer.
+CONFIG_LWIP_TCP_WND_DEFAULT=65535
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+
+# lwIP's retransmission timer: the initial RTO is also its floor (the
+# variance term starts at RTO/500 ms ticks and `3 >> 2 == 0` never
+# lets it decay), and the back-off shifts it by 2, 3, 4 bits. At the
+# 1500 ms default a lost request was sent again at 1.5 s, 7.5 s and
+# 19.5 s — a 20 s RPC timeout fired right after the third. At 500 ms:
+# 0.5 s, 2.5 s, 6.5 s. A NAS acknowledges within 200 ms and answers
+# within 75 ms, so 500 ms does not retransmit what is merely slow.
+# Selective acknowledgements let the server resend the one lost
+# segment of a 45-segment reply instead of everything after it.
+CONFIG_LWIP_TCP_RTO_TIME=500
+CONFIG_LWIP_TCP_SACK_OUT=y
 
 # Sockets at once: the Snapcast stream, the Evo room's listener, the
 # station or art fetch, mDNS, and the Volumio presence (a listener, a

@@ -5,7 +5,7 @@
 //! to choose a source port, hence the sockets API through `libc`.
 
 use std::net::{SocketAddr, TcpStream};
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicU16, Ordering::Relaxed};
 use std::time::Duration;
 
@@ -14,6 +14,17 @@ use org_evoframework_source_nfs::Dialer;
 /// The reserved ports tried, top down.
 const LOWEST: u16 = 600;
 const HIGHEST: u16 = 1023;
+
+/// TCP keepalive on a share's connection, the Linux NFS client's
+/// values (`xs_tcp_set_socket_timeouts`: idle and interval of its 60 s
+/// RPC timeout, three probes). A mount is kept between tracks; a NAS
+/// that went away, or a radio that dropped and came back on another
+/// path, would otherwise leave a connection that hangs the next read
+/// for its whole timeout instead of failing it, and the remount with
+/// it. lwIP takes these in seconds.
+const KEEP_IDLE_S: libc::c_int = 60;
+const KEEP_INTERVAL_S: libc::c_int = 60;
+const KEEP_COUNT: libc::c_int = 3;
 
 /// Where the next connection starts looking: one below the last port
 /// taken, round and round. A server keeps a closed connection's
@@ -35,11 +46,35 @@ impl Dialer for ReservedPort {
         addr: SocketAddr,
         timeout: Duration,
     ) -> std::io::Result<TcpStream> {
-        match reserved(&addr, timeout) {
-            Some(stream) => Ok(stream),
-            None => TcpStream::connect_timeout(&addr, timeout),
-        }
+        let stream = match reserved(&addr, timeout) {
+            Some(stream) => stream,
+            None => TcpStream::connect_timeout(&addr, timeout)?,
+        };
+        keep_alive(&stream);
+        Ok(stream)
     }
+}
+
+/// Keepalive is advisory: a socket that refuses it still serves.
+fn keep_alive(stream: &TcpStream) {
+    let fd = stream.as_raw_fd();
+    let set = |level: libc::c_int, name: libc::c_int, value: libc::c_int| {
+        // SAFETY: a socket option on a descriptor the stream owns for
+        // the life of this call, from a value that outlives it.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                name,
+                (&value as *const libc::c_int).cast(),
+                size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    };
+    set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, KEEP_IDLE_S);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, KEEP_INTERVAL_S);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEP_COUNT);
 }
 
 fn reserved(addr: &SocketAddr, timeout: Duration) -> Option<TcpStream> {

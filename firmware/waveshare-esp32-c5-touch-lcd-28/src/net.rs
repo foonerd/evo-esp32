@@ -23,7 +23,7 @@ use log::{info, warn};
 /// thread writes NVS, and a task whose stack is in PSRAM may not run
 /// while the flash cache is off.
 const STACK: usize = 8 * 1024;
-/// Below the main task's (2, raised by the art fetcher): the join's key
+/// Below the main task's (raised by the art fetcher): the join's key
 /// derivation is a few hundred milliseconds of arithmetic, and the
 /// decoder is not to wait for it.
 const PRIORITY: u8 = 1;
@@ -149,6 +149,7 @@ impl Net {
         ssid: String,
         password: String,
         hostname: Option<String>,
+        band: Band,
     ) -> Result<Self, std::io::Error> {
         let (tx, events) = channel::<Event>();
         let before = ThreadSpawnConfiguration::get();
@@ -164,7 +165,15 @@ impl Net {
             .name("net".into())
             .stack_size(STACK)
             .spawn(move || {
-                work(modem, nvs, &ssid, &password, hostname.as_deref(), &tx)
+                work(
+                    modem,
+                    nvs,
+                    &ssid,
+                    &password,
+                    hostname.as_deref(),
+                    band,
+                    &tx,
+                )
             });
         before
             .unwrap_or_default()
@@ -214,6 +223,7 @@ fn work(
     ssid: &str,
     password: &str,
     hostname: Option<&str>,
+    preferred: Band,
     tx: &Sender<Event>,
 ) {
     let before = free_internal();
@@ -259,8 +269,12 @@ fn work(
             );
         }
     }
+    // The band asked for in evoconfig.txt; a network not found there
+    // is searched for on both from then on, so a wrong setting costs
+    // one search, not the network.
+    let mut band = preferred;
     loop {
-        match net.join(&mut store, ssid, password) {
+        match net.join(&mut store, ssid, password, band) {
             Ok(()) => {
                 let joined = Event::Up {
                     ssid: ssid.to_string(),
@@ -273,6 +287,14 @@ fn work(
                 if tx.send(joined).is_err() {
                     return;
                 }
+            }
+            Err(e) if band != Band::Both => {
+                warn!(
+                    "net: no '{ssid}' on the {} band ({e}); searching both",
+                    band_name(band)
+                );
+                band = Band::Both;
+                continue;
             }
             Err(e) => {
                 warn!("net: could not join '{ssid}': {e}; again in {RETRY:?}");
@@ -291,6 +313,15 @@ fn work(
                 break;
             }
         }
+    }
+}
+
+/// A band's name for the log.
+fn band_name(band: Band) -> &'static str {
+    match band {
+        Band::Five => "5 GHz",
+        Band::TwoPointFour => "2.4 GHz",
+        Band::Both => "either",
     }
 }
 

@@ -45,6 +45,7 @@ pub const KEYS: &[&str] = &[
     "name",
     "wifi_ssid",
     "wifi_password",
+    "wifi_band",
     "dac",
     "output",
     "shuffle",
@@ -77,6 +78,9 @@ pub struct Settings {
     pub wifi_ssid: Option<String>,
     /// Its password; empty for an open network.
     pub wifi_password: Option<String>,
+    /// The band to join it on, when the network is on both and the
+    /// player is to take one of them; not set, either.
+    pub wifi_band: Option<WifiBand>,
     /// The DAC board on the header, by the register's name, for a board
     /// the player cannot recognise by itself (an I2S-only one) or to
     /// override what it found. The distribution knows the names.
@@ -176,6 +180,38 @@ impl Output {
             "speaker" => Some(Output::Speaker),
             "hat" => Some(Output::Hat),
             "both" => Some(Output::Both),
+            _ => None,
+        }
+    }
+}
+
+/// The Wi-Fi band the player joins its network on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiBand {
+    /// Either: the driver's search, which takes the strongest signal.
+    Auto,
+    /// 5 GHz only; the player falls back to either when the network
+    /// is not there.
+    Five,
+    /// 2.4 GHz only.
+    TwoPointFour,
+}
+
+impl WifiBand {
+    /// The name [`parse`] accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            WifiBand::Auto => "auto",
+            WifiBand::Five => "5",
+            WifiBand::TwoPointFour => "2.4",
+        }
+    }
+
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "auto" | "both" => Some(WifiBand::Auto),
+            "5" | "5ghz" => Some(WifiBand::Five),
+            "2.4" | "2.4ghz" => Some(WifiBand::TwoPointFour),
             _ => None,
         }
     }
@@ -347,6 +383,15 @@ fn take(settings: &mut Settings, key: &str, value: &str) -> bool {
             // is a value, not an absence: keep the empty string.
             settings.wifi_password = Some(value.to_string());
         }
+        "wifi_band" => {
+            settings.wifi_band = match value {
+                "" => None,
+                v => match WifiBand::named(&v.to_ascii_lowercase()) {
+                    Some(b) => Some(b),
+                    None => return false,
+                },
+            }
+        }
         "dac" => settings.dac = text,
         "output" => {
             settings.output = match value {
@@ -514,6 +559,9 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
             format!("({} characters, not shown)", v.chars().count())
         };
         applied.push(("wifi_password", shown));
+    }
+    if let Some(v) = s.wifi_band {
+        applied.push(("wifi_band", v.name().to_string()));
     }
     if let Some(v) = &s.dac {
         applied.push(("dac", v.clone()));
