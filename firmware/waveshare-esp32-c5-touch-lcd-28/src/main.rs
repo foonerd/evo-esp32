@@ -297,12 +297,17 @@ fn main() -> anyhow::Result<()> {
         Some(ssid) => {
             let password =
                 config.settings.wifi_password.clone().unwrap_or_default();
+            // 5 GHz first: on the bench the same radio, server and
+            // album read at 360–440 KB/s on 5 GHz and 26–54 KB/s on 2.4
+            // GHz channel 11. A network not on 5 GHz costs one search
+            // there before the thread falls back to either band.
             let band = match config.settings.wifi_band {
-                Some(evo_esp32_config::WifiBand::Five) => Band::Five,
                 Some(evo_esp32_config::WifiBand::TwoPointFour) => {
                     Band::TwoPointFour
                 }
-                Some(evo_esp32_config::WifiBand::Auto) | None => Band::Both,
+                Some(evo_esp32_config::WifiBand::Five)
+                | Some(evo_esp32_config::WifiBand::Auto)
+                | None => Band::Five,
             };
             match net::Net::start(
                 modem,

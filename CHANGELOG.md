@@ -131,14 +131,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   away, or a radio that came back on another path, fails the next
   read within minutes instead of hanging it for its timeout.
 
-- `wifi_band` in evoconfig.txt: `auto` (as before: the driver's
-  search, which takes the first match it finds and remembers it),
-  `5` or `2.4`. A network on both bands was joined on whichever the
-  first search found and kept there by the remembered access point;
-  a 5 GHz access point answers a NAS in single milliseconds where
-  2.4 GHz takes tens. With `5` the player falls back to either band
-  when the network is not on 5 GHz. The companion's `WifiNet::join`
-  takes the band (c73cb2b).
+- `wifi_band` in evoconfig.txt: `auto` (the default: 5 GHz where the
+  network is on it, either band where it is not), `5` (the same,
+  said plainly) or `2.4`. Before, a network on both bands was joined
+  on whichever the driver's first search found and kept there by the
+  remembered access point — a coin toss between boots. Measured on the
+  bench, the same radio, server and album: 360–440 KB/s over 5 GHz,
+  26–54 KB/s over 2.4 GHz channel 11, where the player sat a third
+  idle waiting for bytes. A network not on 5 GHz costs one search
+  there at boot before the player falls back to either band. The
+  companion's `WifiNet::join` takes the band (c73cb2b).
 
 - A line per track from a server says what the link gave: `read:
   1248 KB from the server in 3317 ms of reads: 376 KB/s while

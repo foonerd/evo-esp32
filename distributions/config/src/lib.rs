@@ -188,10 +188,10 @@ impl Output {
 /// The Wi-Fi band the player joins its network on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WifiBand {
-    /// Either: the driver's search, which takes the strongest signal.
+    /// 5 GHz where the network is on it, either band where it is not;
+    /// the default.
     Auto,
-    /// 5 GHz only; the player falls back to either when the network
-    /// is not there.
+    /// The same as `Auto`, said explicitly.
     Five,
     /// 2.4 GHz only.
     TwoPointFour,
