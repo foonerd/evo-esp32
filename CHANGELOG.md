@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Peers of the Volumio protocol are written to from their own thread.
+  The main loop posted every state push into the peers' sockets
+  itself; a peer slow to read could hold the loop on a send. An outbox
+  thread takes the posts.
+
 - The read-ahead ring is tuned per source. The card keeps small,
   paced chunks (its DMA reaches them; the pace shares the SPI bus
   with the panel). A file on a server reads the same 8 KB chunks — a

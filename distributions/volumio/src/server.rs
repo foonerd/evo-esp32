@@ -5,12 +5,15 @@
 //! Engine.IO 3 over polling. A session is a queue of packets to the
 //! peer and, when the peer has a poll open, the connection to answer it
 //! with. What the peer sends arrives as posts and is handed to the
-//! owner, who decides what goes back.
+//! owner, who decides what goes back. Answers to held polls are written
+//! by a thread of the server's own: the owner announces every change of
+//! state from the thread that paints, and a write to a peer that has
+//! gone quiet blocks for its timeout.
 
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -46,8 +49,59 @@ const POST_KEEP: usize = 4096;
 const ART_TIMEOUT: Duration = Duration::from_secs(20);
 /// The stack of the thread that sends it.
 const ART_STACK: usize = 6 * 1024;
+/// The stack of the thread that answers held polls: a payload is
+/// formatted by the caller; this thread only writes it.
+const OUTBOX_STACK: usize = 4 * 1024;
 
 const TEXT: &str = "text/plain; charset=UTF-8";
+
+/// An answer to a held poll, waiting for the outbox thread to write it.
+struct Answer {
+    stream: TcpStream,
+    peer: SocketAddr,
+    payload: String,
+}
+
+/// Answers queued for the outbox thread, and its wake-up.
+#[derive(Default)]
+struct Outbox {
+    queue: Mutex<VecDeque<Answer>>,
+    ready: Condvar,
+}
+
+impl Outbox {
+    fn post(&self, answer: Answer) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(answer);
+        self.ready.notify_one();
+    }
+
+    /// Write answers as they come, for the life of the server.
+    fn run(&self) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let Some(mut answer) = queue.pop_front() else {
+                queue =
+                    self.ready.wait(queue).unwrap_or_else(|e| e.into_inner());
+                continue;
+            };
+            drop(queue);
+            if let Err(e) = write_response(
+                &mut answer.stream,
+                200,
+                "OK",
+                TEXT,
+                answer.payload.as_bytes(),
+            ) {
+                log::debug!("volumio: {} poll answer: {e}", answer.peer);
+            }
+            let _ = answer.stream.shutdown(Shutdown::Both);
+            queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
 
 /// What arrived from a peer, for the owner to act on.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,35 +141,31 @@ struct Session {
 }
 
 impl Session {
-    /// Answer the open poll with what is queued, if both are there.
-    fn flush(&mut self) {
+    /// Answer the open poll with what is queued, if both are there: the
+    /// answer goes to `outbox`, whose thread writes it.
+    fn flush(&mut self, outbox: &Outbox) {
         if self.queue.is_empty() {
             return;
         }
-        if let Some((mut stream, _)) = self.waiting.take() {
+        if let Some((stream, _)) = self.waiting.take() {
             let packets: Vec<String> = self.queue.drain(..).collect();
             let payload =
                 wire::encode_payload(packets.iter().map(String::as_str));
-            if let Err(e) =
-                write_response(&mut stream, 200, "OK", TEXT, payload.as_bytes())
-            {
-                log::debug!("volumio: {} poll answer: {e}", self.peer);
-            }
-            let _ = stream.shutdown(Shutdown::Both);
+            outbox.post(Answer {
+                stream,
+                peer: self.peer,
+                payload,
+            });
         }
     }
 
-    fn release(&mut self, why: &str) {
-        if let Some((mut stream, _)) = self.waiting.take() {
-            let payload = wire::encode_payload([why]);
-            let _ = write_response(
-                &mut stream,
-                200,
-                "OK",
-                TEXT,
-                payload.as_bytes(),
-            );
-            let _ = stream.shutdown(Shutdown::Both);
+    fn release(&mut self, why: &str, outbox: &Outbox) {
+        if let Some((stream, _)) = self.waiting.take() {
+            outbox.post(Answer {
+                stream,
+                peer: self.peer,
+                payload: wire::encode_payload([why]),
+            });
         }
     }
 }
@@ -146,6 +196,7 @@ pub struct Server {
     /// The picture served at [`ART_PATH`]: what plays, else the tile.
     art: Arc<Mutex<Option<Art>>>,
     tile: Art,
+    outbox: Arc<Outbox>,
 }
 
 impl Server {
@@ -157,6 +208,7 @@ impl Server {
             inbound: Arc::new(Mutex::new(VecDeque::new())),
             art: Arc::new(Mutex::new(None)),
             tile,
+            outbox: Arc::new(Outbox::default()),
         }
     }
 
@@ -216,13 +268,13 @@ impl Server {
                             "never polled"
                         }
                     );
-                    s.release(&wire::CLOSE.to_string());
+                    s.release(&wire::CLOSE.to_string(), &self.outbox);
                     gone.push(s.sid.clone());
                     return false;
                 }
                 if let Some((_, since)) = &s.waiting {
                     if since.elapsed() > POLL_HOLD {
-                        s.release(&wire::NOOP.to_string());
+                        s.release(&wire::NOOP.to_string(), &self.outbox);
                     }
                 }
                 true
@@ -305,7 +357,8 @@ impl Server {
                     log::debug!("volumio: {peer} art: {e}");
                 }
                 let _ = stream.shutdown(Shutdown::Both);
-            });
+            },
+        );
         if let Err(e) = spawned {
             log::warn!("volumio: no thread for the picture: {e}");
         }
@@ -379,7 +432,7 @@ impl Server {
             // The reference server treats two polls at once as a fault
             // and closes the session; so do we.
             log::warn!("volumio: {peer} polled twice, closing {sid}");
-            session.release(&wire::CLOSE.to_string());
+            session.release(&wire::CLOSE.to_string(), &self.outbox);
             let _ = write_response(
                 &mut stream,
                 400,
@@ -400,7 +453,7 @@ impl Server {
         // A held poll may wait a long time; no read is pending on it.
         let _ = stream.set_write_timeout(Some(REQUEST_TIMEOUT));
         session.waiting = Some((stream, Instant::now()));
-        session.flush();
+        session.flush(&self.outbox);
     }
 
     fn post(
@@ -453,10 +506,10 @@ impl Server {
                     other => log::debug!("volumio: {peer} sent {other:?}"),
                 }
             }
-            session.flush();
+            session.flush(&self.outbox);
             if bye {
                 if let Some(mut s) = sessions.remove(sid) {
-                    s.release(&wire::CLOSE.to_string());
+                    s.release(&wire::CLOSE.to_string(), &self.outbox);
                 }
             }
         }
@@ -503,17 +556,18 @@ impl Server {
             self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = sessions.get(sid) {
             session.queue.push_back(packet.to_string());
-            session.flush();
+            session.flush(&self.outbox);
         }
     }
 
-    /// Queue a packet to every session.
+    /// Queue a packet to every session. Nothing is written here: the
+    /// caller is the thread that paints.
     pub fn broadcast(&self, packet: &str) {
         let mut sessions =
             self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         for session in &mut sessions.list {
             session.queue.push_back(packet.to_string());
-            session.flush();
+            session.flush(&self.outbox);
         }
     }
 
