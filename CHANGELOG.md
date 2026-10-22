@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- SMB 3.1.1. The SMB client offers dialect 3.1.1 beside 2.0.2 and 2.1,
+  with the two negotiate contexts it takes (pre-authentication
+  integrity by SHA-512 with a salt, encryption by AES-128-GCM), folds
+  the negotiate and session-setup messages into the pre-authentication
+  hash, derives the signing and sealing keys from the session key and
+  that hash by SP800-108, signs with AES-CMAC where a 2.x session signs
+  with HMAC-SHA256, and seals every message in a transform header when
+  the session or the share demands encryption (Samba's `smb encrypt =
+  required`, a NAS's "encrypt data" switch). Dialects 3.0 and 3.0.2 are
+  not offered: a server is on 2.x or 3.1.1 with the player. A guest
+  session has no key to seal with, and such a share says "access
+  denied"; a 2.x server that demands encryption is told it needs SMB 3.
+  All in software for now, RustCrypto, one module to swap for a chip's
+  hardware when the measurement calls for it. Measured on the desk
+  against Samba 4.17 with minimum dialect 3.1.1, signing mandatory and
+  encryption required: list and play, a FLAC from 30 s lands to the
+  second; the default and signing-mandatory servers and a Volumio's
+  share now negotiate 3.1.1 too. RFC 4493 and NIST GCM vectors are
+  unit tests.
+
 - SMB1's old session setup proved. The `smb1://` path a server without
   extended security takes (NTLMv2 in the session setup's own fields)
   and SMB1's MAC signing were written to the specification in 0.1.4
