@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-22
+
 - The face answers a touch while a station opens or plays, and the
   music keeps going while the face changes. The main loop — touch, face
   and the decoder's tick — ran below every thread the plugins start
