@@ -36,12 +36,16 @@
 //! One custody at a time: a second `Play` while one is in hand is
 //! refused, as a single output carries one stream.
 //!
-//! A network stream is reached on a thread of its own: `take_custody`
-//! returns at once with the state `Opening`, the thread connects,
-//! buffers and probes, and the tick that finds it done starts the sink
-//! and says `Playing`; one that finds it failed ends the custody with
-//! the reason. The loop that also reads the touch and paints is never
-//! held for a connect. A file opens on the spot: it is a read away.
+//! A stream is reached on a thread of its own, a file on the card as
+//! much as one on the network: `take_custody` returns at once with the
+//! state `Opening`, the thread connects or opens, buffers and probes,
+//! and the tick that finds it done starts the sink and says `Playing`;
+//! one that finds it failed ends the custody with the reason. The loop
+//! that also reads the touch and paints is never held for an open: a
+//! file on the card is not "a read away" — its file system maps the
+//! clusters at the open and the probe reads an embedded cover whole
+//! (Symphonia 0.6 applies no limit to a FLAC picture), a quarter of a
+//! second on a card.
 #![forbid(unsafe_code)]
 
 use std::fs::File;
@@ -49,6 +53,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use evo_esp32_sdk::context::Context;
 use evo_esp32_sdk::contract::audio::playback::{
@@ -80,6 +85,7 @@ use symphonia::core::meta::{MetadataOptions, StandardTag};
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 pub mod ahead;
+pub mod flac;
 pub mod hls;
 pub mod netfile;
 pub mod stream;
@@ -326,9 +332,9 @@ impl Warden for PlaybackSymphonia {
         let play: Play = from_value(&assignment.instruction)
             .map_err(|e| CustodyError(format!("instruction: {e}")))?;
         let track = play.track;
+        let opener = self.opener.clone();
+        let files = Arc::clone(&self.files);
         if is_network(&track.uri) {
-            let opener = self.opener.clone();
-            let files = Arc::clone(&self.files);
             if opener.is_none() && !is_http(&track.uri) {
                 // A share's scheme with no opener for it is as refused
                 // as a stream with no transport, but on this thread.
@@ -338,63 +344,40 @@ impl Warden for PlaybackSymphonia {
                     "no transport for a network stream".into(),
                 ));
             }
-            let (tx, rx) = mpsc::channel();
-            let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
-            thread::Builder::new()
-                .name("open".into())
-                .stack_size(OPEN_STACK)
-                .spawn(move || {
-                    // The custody may be gone by now; then this is dropped.
-                    let _ =
-                        tx.send(open(&uri, &codecs, opener.as_ref(), &files));
-                })
-                .map_err(|e| CustodyError(format!("open thread: {e}")))?;
-            let state = State {
-                status: Status::Opening,
-                track: Some(track),
-                position_ms: 0,
-                format: None,
-            };
-            self.publish(ctx, &state);
-            self.in_hand = Some(InHand {
-                handle,
-                state,
-                stream: None,
-                opening: Some(Opening {
-                    result: rx,
-                    start_ms: play.start_ms,
-                    hold: false,
-                }),
-                pending: Vec::new(),
-                taken: 0,
-                frames_out: 0,
-                base_ms: 0,
-                skip: 0,
-                ended: false,
-            });
-            return Ok(());
         }
-        let opened = open(&track.uri, &self.codecs, None, &self.files)?;
-        let mut h = InHand {
+        let (tx, rx) = mpsc::channel();
+        let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
+        thread::Builder::new()
+            .name("open".into())
+            .stack_size(OPEN_STACK)
+            .spawn(move || {
+                // The custody may be gone by now; then this is dropped.
+                let _ = tx.send(open(&uri, &codecs, opener.as_ref(), &files));
+            })
+            .map_err(|e| CustodyError(format!("open thread: {e}")))?;
+        let state = State {
+            status: Status::Opening,
+            track: Some(track),
+            position_ms: 0,
+            format: None,
+        };
+        self.publish(ctx, &state);
+        self.in_hand = Some(InHand {
             handle,
-            state: State {
-                status: Status::Opening,
-                track: Some(track),
-                position_ms: 0,
-                format: None,
-            },
+            state,
             stream: None,
-            opening: None,
+            opening: Some(Opening {
+                result: rx,
+                start_ms: play.start_ms,
+                hold: false,
+            }),
             pending: Vec::new(),
             taken: 0,
             frames_out: 0,
             base_ms: 0,
             skip: 0,
             ended: false,
-        };
-        begin(&mut h, opened, play.start_ms, false, self.sink.as_mut())?;
-        self.publish(ctx, &h.state);
-        self.in_hand = Some(h);
+        });
         Ok(())
     }
 
@@ -796,6 +779,9 @@ fn open(
     let mut hint = Hint::new();
     let mut live = None;
     let mut ahead_watch = None;
+    let began = Instant::now();
+    let mut pictures = 0usize;
+    let mut patched_in = Duration::ZERO;
     let source: Box<dyn symphonia::core::io::MediaSource> = if is_network(uri)
         && !is_http(uri)
     {
@@ -809,8 +795,13 @@ fn open(
             hint.with_extension(ext);
         }
         let len = file.length();
+        let mut file = FileReader { file, pos: 0, len };
+        let patching = Instant::now();
+        let patches = flac::picture_patches(&mut file).unwrap_or_default();
+        patched_in = patching.elapsed();
+        pictures = patches.len();
         let reader =
-            ahead::ReadAhead::new(FileReader { file, pos: 0, len }, len)
+            ahead::ReadAhead::new(flac::Patched::new(file, patches), len)
                 .map_err(|e| CustodyError(format!("reader: {e}")))?;
         ahead_watch = Some(reader.watch(NETWORK_LOW_WATER));
         Box::new(reader)
@@ -858,7 +849,7 @@ fn open(
         }
     } else {
         let path = file_path(uri)?;
-        let file = File::open(&path)
+        let mut file = File::open(&path)
             .map_err(|e| CustodyError(format!("{}: {e}", path.display())))?;
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
@@ -869,13 +860,20 @@ fn open(
             .metadata()
             .map_err(|e| CustodyError(format!("{}: {e}", path.display())))?
             .len();
+        let patching = Instant::now();
+        let patches = flac::picture_patches(&mut file).unwrap_or_default();
+        patched_in = patching.elapsed();
+        pictures = patches.len();
         Box::new(
-            ahead::ReadAhead::new(file, len)
+            ahead::ReadAhead::new(flac::Patched::new(file, patches), len)
                 .map_err(|e| CustodyError(format!("reader: {e}")))?,
         )
     };
+    let opened_in = began.elapsed();
     let mss =
         MediaSourceStream::new(source, MediaSourceStreamOptions::default());
+    let probing = Instant::now();
+    let before = ahead::Account::now();
     let reader = symphonia::default::get_probe()
         .probe(
             &hint,
@@ -884,6 +882,17 @@ fn open(
             MetadataOptions::default(),
         )
         .map_err(|e| CustodyError(format!("probe: {e}")))?;
+    let cost = ahead::Account::now().since(before);
+    log::info!(
+        "open: {} ms to the source ({} pictures read as padding in {} ms), {} ms to probe: the source moved {} times, {} ms in its seeks, {} ms in its reads",
+        opened_in.as_millis(),
+        pictures,
+        patched_in.as_millis(),
+        probing.elapsed().as_millis(),
+        cost.restarts,
+        cost.seek_ms,
+        cost.read_ms
+    );
     if let Some(live) = &live {
         live.probed();
     }
@@ -1015,7 +1024,7 @@ fn seek(
     let secs = i64::try_from(ms / 1000).map_err(|_| beyond())?;
     let nanos = u32::try_from((ms % 1000) * 1_000_000).map_err(|_| beyond())?;
     let time = Time::try_new(secs, nanos).ok_or_else(beyond)?;
-    let began = std::time::Instant::now();
+    let began = Instant::now();
     let before = ahead::Account::now();
     let landed = stream
         .reader
@@ -1253,7 +1262,9 @@ mod tests {
         from_value(&p.subjects[0].state).unwrap()
     }
 
-    fn play(
+    /// Assign the track; the open runs on its thread, the state is
+    /// `Opening` until a tick finds it done.
+    fn assign_play(
         s: &mut Steward,
         track: Track,
         start_ms: u64,
@@ -1266,6 +1277,26 @@ mod tests {
             },
             Ticks(0),
         )
+    }
+
+    /// Assign the track and tick until the open thread has it playing
+    /// (or has failed); the ticks step by the opening idle so the
+    /// steward re-asks the warden each time.
+    fn play(
+        s: &mut Steward,
+        track: Track,
+        start_ms: u64,
+    ) -> Result<CustodyHandle, evo_esp32_steward::DispatchError> {
+        let h = assign_play(s, track, start_ms)?;
+        let began = Instant::now();
+        let mut t = 0;
+        while state(s).status == Status::Opening {
+            assert!(began.elapsed() < Duration::from_secs(5), "still opening");
+            thread::sleep(Duration::from_millis(2));
+            s.tick(Ticks(t));
+            t += u64::from(OPENING_IDLE_MS);
+        }
+        Ok(h)
     }
 
     fn correct(s: &mut Steward, h: CustodyHandle, c: Correction, at: u64) {
@@ -1461,7 +1492,7 @@ mod tests {
         let mut t = 1;
         while state(s).status == Status::Opening && t < limit {
             s.tick(Ticks(t));
-            thread::sleep(std::time::Duration::from_millis(1));
+            thread::sleep(Duration::from_millis(1));
             t += 1;
         }
         t
@@ -1483,7 +1514,7 @@ mod tests {
         let mut tr = file_track(Path::new("/x/station.wav"));
         tr.uri = "http://x/station".into();
         tr.title = "x".into();
-        play(&mut s, tr, 0).unwrap();
+        assign_play(&mut s, tr, 0).unwrap();
         // Back at once, nothing out yet.
         assert_eq!(state(&s).status, Status::Opening);
         assert!(tape.0.borrow().frames.is_empty());
@@ -1496,7 +1527,7 @@ mod tests {
         let mut i = 0;
         while tape.0.borrow().frames.len() < 800 && i < 2000 {
             s.tick(Ticks(t + i));
-            thread::sleep(std::time::Duration::from_millis(1));
+            thread::sleep(Duration::from_millis(1));
             i += 1;
         }
         assert!(tape.0.borrow().frames.len() >= 800, "{i} ticks");
@@ -1514,7 +1545,7 @@ mod tests {
         );
         let mut tr = file_track(Path::new("/x/station.wav"));
         tr.uri = "http://x/station".into();
-        let h = play(&mut s, tr, 0).unwrap();
+        let h = assign_play(&mut s, tr, 0).unwrap();
         assert_eq!(state(&s).status, Status::Opening);
         settle(&mut s, 5000);
         assert_eq!(state(&s).status, Status::Stopped);

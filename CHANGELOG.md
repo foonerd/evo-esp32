@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A track changes faster, and a pressed Next is a Next. A file on the
+  card opened on the loop's thread — "a read away" — but an open is
+  the file system mapping the file's clusters (fast seek) and the
+  demuxer reading its metadata, and the loop, the face and the finger
+  waited for it: 450 ms from Next to the new track in hand, a loop
+  turn of 750–890 ms at a track start, and at a natural track end the
+  DMA ran dry for 270–320 ms between the songs of an album. Every open
+  now runs on the open thread, a card file as a stream always did (21
+  ms from Next to the new track; no dry-out at a natural end). And a
+  user's Next or Previous drops the old track's 600 ms tail instead
+  of playing it out; a track that ends by itself keeps its tail, for
+  a gapless album.
+
+- A FLAC's embedded cover is no longer read at the open. A ripped
+  FLAC carries its picture in a PICTURE block, half a megabyte and
+  more; Symphonia 0.6 reads it whole at the probe (its limit for FLAC
+  pictures is a `TODO`) and this player takes its art from the folder.
+  The plugin reads the file's metadata headers — four bytes a block —
+  and lays a one-byte patch over each picture's header as the file is
+  read, so the demuxer sees padding and seeks past it; the file and
+  its offsets are untouched. On the card and on a share alike. A line
+  per open says what it cost (`open: 73 ms to the source (1 pictures
+  read as padding in 1 ms), 149 ms to probe: the source moved 2
+  times, 0 ms in its seeks, 129 ms in its reads`). What remains of a
+  track start on this board is the SPI bus the panel and the card
+  share: at a skip the probe's 150 ms of reads interleave with the
+  new track's repaint and the folder's cover, about 500 ms in all.
+
 ## [0.1.5] - 2026-10-22
 
 - Fixed: a seek into a track on the card could slow the card for the

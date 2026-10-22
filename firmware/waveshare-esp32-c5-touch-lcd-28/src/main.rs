@@ -365,8 +365,9 @@ fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
     );
     let (shares, exports) = shares(&config.settings);
+    let mut shared_sink = sink::Shared::new(sink);
     let mut steward = bring_up(
-        sink::Shared::new(sink),
+        shared_sink.clone(),
         &link,
         room_settings,
         &snap_link,
@@ -639,7 +640,12 @@ fn main() -> anyhow::Result<()> {
                                 }
                                 if current.is_some() {
                                     then = Some(Step::Skip);
-                                    skip(&mut steward, &mut current, t);
+                                    skip(
+                                        &mut steward,
+                                        &mut current,
+                                        &mut shared_sink,
+                                        t,
+                                    );
                                 } else {
                                     current = advance(
                                         &mut steward,
@@ -658,7 +664,12 @@ fn main() -> anyhow::Result<()> {
                                 }
                                 if current.is_some() {
                                     then = Some(Step::Previous);
-                                    skip(&mut steward, &mut current, t);
+                                    skip(
+                                        &mut steward,
+                                        &mut current,
+                                        &mut shared_sink,
+                                        t,
+                                    );
                                 } else {
                                     current = advance(
                                         &mut steward,
@@ -833,7 +844,12 @@ fn main() -> anyhow::Result<()> {
                                     start_when_up = false;
                                     if current.is_some() {
                                         then = Some(Step::Skip);
-                                        skip(&mut steward, &mut current, t);
+                                        skip(
+                                            &mut steward,
+                                            &mut current,
+                                            &mut shared_sink,
+                                            t,
+                                        );
                                     } else {
                                         current = advance(
                                             &mut steward,
@@ -2231,13 +2247,18 @@ impl Rooms {
 /// Let go of the track in custody; `custody_released` then plays the
 /// one `next` names. With nothing in custody the loop's handler does not
 /// run, so the caller has already pointed `next` where it wants to go.
+/// The reservoir's tail is dropped first: a listener who pressed Next
+/// does not want 600 ms more of the track they left (a track that ends
+/// by itself keeps its tail, for a gapless album).
 fn skip(
     steward: &mut Steward,
     current: &mut Option<CustodyHandle>,
+    sink: &mut sink::Shared<Codec>,
     now: Ticks,
 ) {
     if let Some(h) = current.take() {
         info!("touch: skip, releasing custody {}", h.0);
+        evo_esp32_sdk::contract::audio::playback::FrameSink::flush(sink);
         if let Err(e) = steward.release(h, now) {
             warn!("release {}: {e:?}", h.0);
         }

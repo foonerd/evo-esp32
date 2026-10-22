@@ -856,10 +856,23 @@ mod tests {
             Ticks(0),
         )
         .unwrap();
-        let p = s.projection(ProjectionKey::Rack {
-            name: shelf::PLAYBACK.into(),
-        });
-        let st: playback::State = from_value(&p.subjects[0].state).unwrap();
+        // The file opens on the open thread: tick until it is playing.
+        let opened = Instant::now();
+        let st = loop {
+            let p = s.projection(ProjectionKey::Rack {
+                name: shelf::PLAYBACK.into(),
+            });
+            let st: playback::State = from_value(&p.subjects[0].state).unwrap();
+            if st.status != playback::Status::Opening {
+                break st;
+            }
+            assert!(
+                opened.elapsed() < Duration::from_secs(5),
+                "still opening after 5 s"
+            );
+            s.tick(Ticks(opened.elapsed().as_millis() as u64));
+            std::thread::sleep(Duration::from_millis(5));
+        };
         assert_eq!(st.status, playback::Status::Playing);
         assert_eq!(st.track.unwrap().duration_ms, Some(300));
         assert_eq!(st.format.unwrap().sample_rate, 8000);
