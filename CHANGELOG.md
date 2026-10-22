@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- SMB1's old session setup proved. The `smb1://` path a server without
+  extended security takes (NTLMv2 in the session setup's own fields)
+  and SMB1's MAC signing were written to the specification in 0.1.4
+  and not exercised; both now are, against Samba 3.6.6 as first
+  shipped (guest, a user and password, signing mandatory, a wrong
+  password refused). A Samba 3 that took the 2016 security updates
+  refuses NTLMv2 outside NTLMSSP by policy, and the player's log now
+  says so — "the server refuses NTLMv2 in the old session setup; a
+  guest share, or SMB 2 if it has it" — where before it said "invalid
+  parameter". NTLMv1 stays unspoken.
+
 ## [0.1.4] - 2026-10-21
 
 - NFS exports in the library. A new source plugin,

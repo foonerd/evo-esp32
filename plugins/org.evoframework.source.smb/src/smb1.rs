@@ -427,7 +427,11 @@ impl Session {
         bytes.bytes(&utf16le("evo")).u16(0);
         bytes.bytes(&utf16le("evo-esp32")).u16(0);
         b.u16(bytes.0.len() as u16).bytes(&bytes.0);
-        let status = self.send(COM_SESSION_SETUP_ANDX, &b.0)?;
+        let status = match self.send(COM_SESSION_SETUP_ANDX, &b.0) {
+            Ok(s) => s,
+            Err(Error::Status(s)) => s,
+            Err(e) => return Err(e),
+        };
         self.uid = get16(&self.frame, 28);
         self.finish_setup(status, cfg, n, key)
     }
@@ -444,6 +448,17 @@ impl Session {
             status::LOGON_FAILURE if cfg.credentials.is_none() => {
                 return Err(Error::Auth(
                     "guest access refused; set a user and password".into(),
+                ));
+            }
+            // A Samba 3 with the 2016 security updates refuses NTLMv2
+            // outside NTLMSSP, which is all the old session setup can
+            // carry; NTLMv1 is not spoken here.
+            status::INVALID_PARAMETER
+                if cfg.credentials.is_some()
+                    && n.capabilities & CAP_EXTENDED_SECURITY == 0 =>
+            {
+                return Err(Error::Auth(
+                    "the server refuses NTLMv2 in the old session setup; a guest share, or SMB 2 if it has it".into(),
                 ));
             }
             other => return Err(Error::Status(other)),
@@ -473,7 +488,13 @@ impl Session {
         bytes.bytes(&utf16le("evo")).u16(0);
         bytes.bytes(&utf16le("evo-esp32")).u16(0);
         b.u16(bytes.0.len() as u16).bytes(&bytes.0);
-        self.send(COM_SESSION_SETUP_ANDX, &b.0)
+        // A refusal is a status for the caller to word, not an error
+        // here.
+        match self.send(COM_SESSION_SETUP_ANDX, &b.0) {
+            Ok(s) => Ok(s),
+            Err(Error::Status(s)) => Ok(s),
+            Err(e) => Err(e),
+        }
     }
 
     /// The security blob of a session setup reply, in the frame.
