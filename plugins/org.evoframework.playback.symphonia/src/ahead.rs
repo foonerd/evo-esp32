@@ -19,10 +19,56 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use symphonia::core::io::MediaSource;
+
+/// Since boot: how often a reader moved its source, and the milliseconds
+/// its sources spent in `seek` and in `read`. A decoder's seek is a run
+/// of moves (a FLAC seek probes by bisection); the difference across
+/// one says what it cost and where.
+static RESTARTS: AtomicU32 = AtomicU32::new(0);
+static SEEK_MS: AtomicU32 = AtomicU32::new(0);
+static READ_MS: AtomicU32 = AtomicU32::new(0);
+
+/// The readers' account since boot: moves of the source, milliseconds
+/// in the source's `seek`, milliseconds in its `read`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Account {
+    /// Moves of the source: a seek beyond what the ring held.
+    pub restarts: u32,
+    /// Milliseconds the sources spent in `seek`.
+    pub seek_ms: u32,
+    /// Milliseconds the sources spent in `read`.
+    pub read_ms: u32,
+}
+
+impl Account {
+    /// The account now.
+    pub fn now() -> Self {
+        Self {
+            restarts: RESTARTS.load(Relaxed),
+            seek_ms: SEEK_MS.load(Relaxed),
+            read_ms: READ_MS.load(Relaxed),
+        }
+    }
+
+    /// What happened since `earlier`.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            restarts: self.restarts.wrapping_sub(earlier.restarts),
+            seek_ms: self.seek_ms.wrapping_sub(earlier.seek_ms),
+            read_ms: self.read_ms.wrapping_sub(earlier.read_ms),
+        }
+    }
+}
+
+fn add_ms(to: &AtomicU32, since: Instant) {
+    to.fetch_add(since.elapsed().as_millis() as u32, Relaxed);
+}
 
 /// What the ring holds at most: 384 KB, of which [`BEHIND`] may be
 /// behind the decoder — so at least 256 KB ahead, about a second of a
@@ -44,6 +90,16 @@ const CHUNK: usize = 8 * 1024;
 /// The card's block: reads are asked for in whole blocks from a whole
 /// block, which the file system passes straight to the card.
 const BLOCK: usize = 512;
+/// With less than this ahead of the decoder the reader reads chunk after
+/// chunk; with this much in hand it pauses [`PACE`] between chunks. A
+/// ring refilling from empty (a seek, a track's start) otherwise holds
+/// the card's bus — which on the ESP32-C5 board is the panel's bus too
+/// — for the whole 384 KB, and a paint stage of 90 ms took 450 ms
+/// behind it. Paced, the reader still brings 8 KB in 6 ms, 1.3 MB/s,
+/// twice what a 96 kHz FLAC takes.
+const EAGER: usize = 4 * CHUNK;
+/// The pause between chunks once [`EAGER`] is in hand.
+const PACE: std::time::Duration = std::time::Duration::from_millis(6);
 /// The reader's stack: the file system and the card's driver, or a
 /// network transport's read.
 const STACK: usize = 12 * 1024;
@@ -72,7 +128,7 @@ struct State {
 impl State {
     /// Bytes the decoder has not taken yet.
     fn available(&self) -> usize {
-        self.ring.len() - self.head
+        self.ring.len().saturating_sub(self.head)
     }
 
     /// Let go of what lies further behind the decoder than the window
@@ -86,11 +142,19 @@ impl State {
         }
     }
 
-    /// Start the ring afresh at `at`.
+    /// Start the ring afresh for a decoder at `at`. The ring begins at
+    /// the block boundary at or before it, so every read the source
+    /// sees starts on a block and asks for whole blocks: a read that
+    /// starts inside a block the card's file system splits into a
+    /// partial block through its own buffer and the rest into the
+    /// caller's buffer at an odd offset, which the card driver cannot
+    /// address directly and copies block by block through a bounce
+    /// buffer — a third of the ESP32-C5's core, for the rest of the
+    /// file, after a seek into a 96 kHz FLAC.
     fn restart(&mut self, at: u64) {
         self.ring.clear();
-        self.base = at;
-        self.head = 0;
+        self.base = at - at % BLOCK as u64;
+        self.head = (at - self.base) as usize;
         self.eof = false;
         self.error = None;
     }
@@ -184,7 +248,7 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared) {
     let skew = raw.as_ptr().align_offset(4);
     let buf = &mut raw[skew..skew + CHUNK];
     loop {
-        let (generation, want) = {
+        let (generation, want, paced) = {
             let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if s.stop {
@@ -192,7 +256,12 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared) {
                 }
                 if let Some(to) = s.seek_to.take() {
                     s.restart(to);
-                    if let Err(e) = file.seek(SeekFrom::Start(to)) {
+                    let from = s.base;
+                    RESTARTS.fetch_add(1, Relaxed);
+                    let began = Instant::now();
+                    let moved = file.seek(SeekFrom::Start(from));
+                    add_ms(&SEEK_MS, began);
+                    if let Err(e) = moved {
                         s.error = Some(format!("seek: {e}"));
                         shared.filled.notify_all();
                     }
@@ -206,12 +275,21 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared) {
                         .unwrap_or_else(|e| e.into_inner());
                     continue;
                 }
-                break (s.generation, room.min(CHUNK) / BLOCK * BLOCK);
+                break (
+                    s.generation,
+                    room.min(CHUNK) / BLOCK * BLOCK,
+                    s.available() >= EAGER,
+                );
             }
         };
+        if paced {
+            thread::sleep(PACE);
+        }
         // The card is waited on with the lock released: the decoder
         // keeps taking from the ring meanwhile.
+        let began = Instant::now();
         let got = file.read(&mut buf[..want]);
+        add_ms(&READ_MS, began);
         let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if s.generation != generation {
             // A seek came while the card answered: this was the old
@@ -377,34 +455,50 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// A source that counts how often it is moved.
+    /// A source that counts how often it is moved, and where to, and
+    /// how much is asked of it at a time.
     struct Counted {
         inner: std::io::Cursor<Vec<u8>>,
         seeks: Arc<std::sync::atomic::AtomicUsize>,
+        log: Arc<Mutex<Vec<(u64, usize)>>>,
     }
 
     impl Read for Counted {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let at = self.inner.position();
+            self.log.lock().unwrap().push((at, buf.len()));
             self.inner.read(buf)
         }
     }
 
     impl Seek for Counted {
         fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-            self.seeks
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.seeks.fetch_add(1, Relaxed);
             self.inner.seek(pos)
         }
+    }
+
+    fn counted(
+        bytes: &[u8],
+    ) -> (
+        Counted,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<Mutex<Vec<(u64, usize)>>>,
+    ) {
+        let seeks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let source = Counted {
+            inner: std::io::Cursor::new(bytes.to_vec()),
+            seeks: Arc::clone(&seeks),
+            log: Arc::clone(&log),
+        };
+        (source, seeks, log)
     }
 
     #[test]
     fn a_seek_back_within_the_window_does_not_move_the_source() {
         let bytes = pattern(CAPACITY + 50_000);
-        let seeks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let source = Counted {
-            inner: std::io::Cursor::new(bytes.clone()),
-            seeks: Arc::clone(&seeks),
-        };
+        let (source, seeks, _) = counted(&bytes);
         let mut ahead = ReadAhead::new(source, bytes.len() as u64).unwrap();
         let watch = ahead.watch(16 * 1024);
         // Read past the window's size, then come back to the start: the
@@ -415,16 +509,67 @@ mod tests {
         let mut head = [0u8; 64];
         ahead.read_exact(&mut head).unwrap();
         assert_eq!(&head[..], &bytes[..64]);
-        assert_eq!(seeks.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(seeks.load(Relaxed), 0);
         // Far beyond what is held: the source moves once.
         let far = bytes.len() as u64 - 1000;
         ahead.seek(SeekFrom::Start(far)).unwrap();
         ahead.read_exact(&mut head).unwrap();
         assert_eq!(&head[..], &bytes[far as usize..far as usize + 64]);
-        assert_eq!(seeks.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(seeks.load(Relaxed), 1);
         // At the end the watch says ready whatever the ring holds.
         let mut rest = Vec::new();
         ahead.read_to_end(&mut rest).unwrap();
         assert!(watch.ready());
+    }
+
+    #[test]
+    fn after_a_seek_the_source_is_read_in_whole_blocks_from_a_block() {
+        let bytes = pattern(2 * CAPACITY + 4321);
+        let (source, _, log) = counted(&bytes);
+        let mut ahead = ReadAhead::new(source, bytes.len() as u64).unwrap();
+        // A FLAC frame begins where it begins: an odd offset far away.
+        let target = CAPACITY as u64 + 100_003;
+        ahead.seek(SeekFrom::Start(target)).unwrap();
+        let mut got = [0u8; 2000];
+        ahead.read_exact(&mut got).unwrap();
+        assert_eq!(&got[..], &bytes[target as usize..target as usize + 2000]);
+        let reads = log.lock().unwrap().clone();
+        let after = reads
+            .iter()
+            .skip_while(|(at, _)| *at < CAPACITY as u64)
+            .collect::<Vec<_>>();
+        assert!(!after.is_empty());
+        let block = BLOCK as u64;
+        assert_eq!(after[0].0, target - target % block);
+        for (at, len) in after {
+            assert_eq!(at % block, 0, "a read from inside a block at {at}");
+            assert_eq!(len % BLOCK, 0, "a read of {len} bytes at {at}");
+        }
+    }
+
+    #[test]
+    fn the_refill_is_eager_at_first_and_paced_after() {
+        let bytes = pattern(CAPACITY);
+        let (source, _, log) = counted(&bytes);
+        let ahead = ReadAhead::new(source, bytes.len() as u64).unwrap();
+        // Nothing is taken: the ring fills from empty, as after a seek.
+        let eager_by = Instant::now();
+        while log.lock().unwrap().len() < EAGER / CHUNK {
+            assert!(eager_by.elapsed() < PACE * 20, "the eager zone paced");
+            thread::yield_now();
+        }
+        // The rest comes at the pace, not all at once.
+        let paced_by = Instant::now();
+        let whole = CAPACITY / CHUNK;
+        while log.lock().unwrap().len() < whole {
+            thread::sleep(PACE / 3);
+        }
+        let paced = whole - EAGER / CHUNK;
+        assert!(
+            paced_by.elapsed() >= PACE * (paced as u32 - 2),
+            "the ring filled in {:?}, unpaced",
+            paced_by.elapsed()
+        );
+        drop(ahead);
     }
 }

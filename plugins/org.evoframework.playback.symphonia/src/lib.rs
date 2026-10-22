@@ -1015,6 +1015,8 @@ fn seek(
     let secs = i64::try_from(ms / 1000).map_err(|_| beyond())?;
     let nanos = u32::try_from((ms % 1000) * 1_000_000).map_err(|_| beyond())?;
     let time = Time::try_new(secs, nanos).ok_or_else(beyond)?;
+    let began = std::time::Instant::now();
+    let before = ahead::Account::now();
     let landed = stream
         .reader
         .seek(
@@ -1025,6 +1027,14 @@ fn seek(
             },
         )
         .map_err(|e| CustodyError(format!("seek: {e}")))?;
+    let cost = ahead::Account::now().since(before);
+    log::info!(
+        "seek to {ms} ms took {} ms: the source moved {} times, {} ms in its seeks, {} ms in its reads",
+        began.elapsed().as_millis(),
+        cost.restarts,
+        cost.seek_ms,
+        cost.read_ms
+    );
     stream.decoder.reset();
     let landed_ms = stream
         .time_base

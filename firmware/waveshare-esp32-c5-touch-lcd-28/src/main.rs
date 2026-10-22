@@ -561,19 +561,31 @@ fn main() -> anyhow::Result<()> {
     let mut last_idle = Instant::now();
     let mut shares = CoreShares::new();
     let mut busy = Duration::ZERO;
+    // What a finger waits for: the first touch report of a run until the
+    // face next looks; and the longest turn of the loop, which is the
+    // longest a report can wait to be read.
+    let mut touch_waiting: Option<Instant> = None;
+    let mut touch_wait_max = Duration::ZERO;
+    let mut touch_waits = 0u32;
+    let mut turn_started = Instant::now();
+    let mut turn_max = Duration::ZERO;
     loop {
+        turn_max = turn_max.max(turn_started.elapsed());
+        turn_started = Instant::now();
         // SAFETY: resets this task's entry; harmless if it has none.
         unsafe { sys::esp_task_wdt_reset() };
         let t = now();
         let tick_started = Instant::now();
         let due = steward.tick(t);
         busy += tick_started.elapsed();
+        let ticked = Instant::now();
         // A report waits while INT is low; a finger that was down is read
         // until the controller says it lifted.
         if board.touch_int.is_low() || tracker.down() {
             match board.touch.report() {
                 Ok(r) => {
                     last_touch = Instant::now();
+                    touch_waiting.get_or_insert(last_touch);
                     let p = face.layout().map_touch(r.x, r.y);
                     if let Some(intent) =
                         tracker.sample(|p| face.hit(p), r.touching(), p, t.0)
@@ -1067,19 +1079,27 @@ fn main() -> anyhow::Result<()> {
         }
         // Audio first: a paint stage can take 90 ms, and while the decoder
         // is short of lead the loop decodes instead of painting.
+        let handled = Instant::now();
         let audio_short = lead.ms().is_some_and(|ms| ms < LOW_LEAD_MS);
         // A decoder running flat out (96 kHz over a sealed share) can
-        // keep the lead short for a whole track; the face still paints
-        // once a second, while the reservoir and the DMA ring behind it
-        // can carry a paint stage.
-        let starved = last_face.elapsed() >= FACE_STARVED
-            && lead.ms().is_some_and(|ms| ms >= STARVED_LEAD_MS);
+        // keep the lead short for a whole track. The face is owed a
+        // paint anyway when a finger has touched since it last looked,
+        // when a frame is half painted, or once a second: the reservoir
+        // and the DMA ring behind it carry a stage at this lead. And a
+        // decoder that cannot keep any lead (a card read gone slow) is
+        // already dropping out: after two seconds dark the face paints
+        // regardless, so the player can still be told to stop.
+        let owed = (lead.ms().is_some_and(|ms| ms >= OWED_LEAD_MS)
+            && (painting
+                || last_touch > last_face
+                || last_face.elapsed() >= FACE_STARVED))
+            || last_face.elapsed() >= FACE_DEAD;
         let face_tick = if last_touch.elapsed() < FACE_AWAKE {
             FACE_TICK
         } else {
             FACE_REST
         };
-        if (!audio_short || starved)
+        if (!audio_short || owed)
             && (painting || last_face.elapsed() >= face_tick)
         {
             last_face = Instant::now();
@@ -1150,6 +1170,10 @@ fn main() -> anyhow::Result<()> {
             let painted = face.refresh(&mut board.panel, &state);
             let took = last_face.elapsed();
             drawing += took;
+            if let (Ok(_), Some(since)) = (&painted, touch_waiting.take()) {
+                touch_wait_max = touch_wait_max.max(since.elapsed());
+                touch_waits += 1;
+            }
             match painted {
                 Ok(Repaint::Partial) => {
                     if !painting {
@@ -1190,6 +1214,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        let faced = Instant::now();
         for h in steward.happenings_since(seen).happenings {
             seen = h.seq;
             let kind = serde_json::to_string(&h.kind).unwrap_or_default();
@@ -1295,11 +1320,16 @@ fn main() -> anyhow::Result<()> {
                 )
             };
             info!(
-                "heartbeat: free heap {free} B (internal {internal} B), low-water {min} B, main stack low-water {stack} B, ticking {:.0}% and drawing {:.0}% of the time, {full_frames} full frames",
+                "heartbeat: free heap {free} B (internal {internal} B), low-water {min} B, main stack low-water {stack} B, ticking {:.0}% and drawing {:.0}% of the time, {full_frames} full frames, the longest turn {} ms, {touch_waits} touches waited up to {} ms",
                 busy_share * 100.0,
-                drawing_share * 100.0
+                drawing_share * 100.0,
+                turn_max.as_millis(),
+                touch_wait_max.as_millis()
             );
             full_frames = 0;
+            turn_max = Duration::ZERO;
+            touch_wait_max = Duration::ZERO;
+            touch_waits = 0;
             report_playback(&steward, track_started.elapsed());
             info!("core: {}", shares.line());
             if let Some(line) = sink::report_dry() {
@@ -1360,6 +1390,17 @@ fn main() -> anyhow::Result<()> {
         // comes once in [`IDLE_EVERY`]: a 96 kHz FLAC at the edge of the
         // core lost 7% to these sleeps (measured by the kernel's run-time
         // counters) and ran dry for it.
+        let turn = turn_started.elapsed();
+        if turn >= LONG_TURN {
+            info!(
+                "loop: a turn of {} ms: tick {} ms, touch and network {} ms, face {} ms, the rest {} ms",
+                turn.as_millis(),
+                ticked.duration_since(tick_started).as_millis(),
+                handled.duration_since(ticked).as_millis(),
+                faced.duration_since(handled).as_millis(),
+                faced.elapsed().as_millis()
+            );
+        }
         let due_now = painting || due.is_some_and(|d| d.0 <= t.0);
         if due_now && audio_short && last_idle.elapsed() < IDLE_EVERY {
             std::thread::yield_now();
@@ -2464,9 +2505,14 @@ const LOW_LEAD_MS: u32 = 120;
 /// How long the face may go unpainted before one paint goes ahead of
 /// the decoder anyway.
 const FACE_STARVED: Duration = Duration::from_secs(1);
-/// The lead that forced paint needs: a stage's worth, the DMA ring
-/// (75 ms at 96 kHz) behind it.
-const STARVED_LEAD_MS: u32 = 60;
+/// The lead an owed paint needs: a stage's worth, the DMA ring (75 ms
+/// at 96 kHz) behind it.
+const OWED_LEAD_MS: u32 = 60;
+/// Dark this long, the face paints whatever the lead.
+const FACE_DEAD: Duration = Duration::from_secs(2);
+/// A turn of the loop this long is logged with its phases: a finger
+/// waits that long to be read.
+const LONG_TURN: Duration = Duration::from_millis(300);
 
 /// A line of internal SRAM left at a point of the boot: what the DMA
 /// rings, the stacks and the Wi-Fi driver compete for.

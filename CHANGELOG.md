@@ -6,6 +6,53 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Fixed: a seek into a track on the card could slow the card for the
+  rest of the track. The read-ahead ring restarted at the exact byte
+  the decoder asked for — a FLAC frame begins at any byte — and from
+  there the file system served every read as a partial block through
+  its own buffer plus the remainder into the ring's buffer at an odd
+  offset, which the card driver cannot address directly and copies
+  block by block through a bounce buffer: a third of the core, until
+  the track ended, three seeks in four. At 96 kHz the decoder then
+  starved (the DMA ran dry several times a second) and, audio first,
+  the face stopped painting: a tap waited 10–16 s for the track to
+  end. In 0.1.4 since the ring (`ahead::ReadAhead`). The ring now
+  restarts on a 512-byte boundary and the decoder's head starts inside
+  it, so the card sees whole blocks from a block boundary after every
+  seek; a unit test records what the file is asked. Measured on the
+  board: the reader back at 4–8 % after a seek (was 30–34 %).
+
+- Seeking a 96 kHz FLAC on the card is faster. Three things made a
+  seek hold the loop for 1.6 s — and the finger with it. FatFs walked
+  the file's cluster chain from the start for every one of the
+  demuxer's 10–14 bisection probes: fast seek is on, with a 2 KB
+  cluster map per open file (the default 64-word map failed on every
+  file of a well-used card and fell back to the walk). The ring then
+  refilled all 384 KB back to back, holding the SPI bus — the panel's
+  bus too on this board — so the paint stage after the seek took
+  450 ms instead of 90: the reader is eager only until 32 KB is ahead
+  of the decoder and then takes one 8 KB chunk per 6 ms, 1.3 MB/s,
+  twice what a 96 kHz FLAC needs. Measured on the board: the
+  demuxer's seek 110–200 ms, the loop's turn 315–490 ms (was 660–830
+  with fast seek alone, 1.6 s before). A line per seek says what it
+  cost and where (`seek to 103075 ms took 179 ms: the source moved 13
+  times, 0 ms in its seeks, 157 ms in its reads`).
+
+- The face answers while the decoder runs flat out. The loop gives
+  audio the core first: with less than 120 ms decoded in hand it
+  decodes and paints nothing, which a 96 kHz track from an encrypted
+  share holds for its whole length. Now a touch since the face last
+  looked, a frame half painted, or a second without a paint lets a
+  stage through whenever 60 ms is in hand (a stage is under 90 ms and
+  the DMA ring stands behind the reservoir); and two seconds dark the
+  face paints whatever the lead, so a player whose decoder cannot keep
+  up can still be told to stop.
+
+- The heartbeat says what a finger waits: the loop's longest turn in
+  the period (the longest a touch report can wait to be read) and how
+  many touches waited for the face, up to how long; a turn over 300 ms
+  is logged with its phases (tick, touch and network, face, the rest).
+
 - SMB 3.1.1. The SMB client offers dialect 3.1.1 beside 2.0.2 and 2.1,
   with the two negotiate contexts it takes (pre-authentication
   integrity by SHA-512 with a salt, encryption by AES-128-GCM), folds
@@ -29,15 +76,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plays with the usual headroom; a 96 kHz FLAC from one plays to the
   end without an underrun but with little to spare, and is the limit
   of this chip, whose AES block has no GCM mode to take the work.
-
-- The face paints while the decoder runs flat out. The loop gives
-  audio the core first: with less than 120 ms decoded in hand it
-  decodes and paints nothing, which a 96 kHz track from an encrypted
-  share could hold for its whole length, so a tap went unanswered
-  until the track ended. Now a second without a paint lets one paint
-  through whenever 60 ms is in hand — a stage is under 90 ms and the
-  DMA ring stands behind the reservoir — so the face answers within
-  a second at worst, and the decoder lends it one stage a second.
 
 - SMB1's old session setup proved. The `smb1://` path a server without
   extended security takes (NTLMv2 in the session setup's own fields)

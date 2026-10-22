@@ -73,9 +73,17 @@ CONFIG_MBEDTLS_HARDWARE_AES=n
 
 # The card: long file names (the default is 8.3 only), buffers on the heap,
 # and names handed to the application as UTF-8 (the default is the OEM code
-# page, which Rust strings cannot hold).
+# page, which Rust strings cannot hold). Fast seek: a file opened for
+# reading gets a map of its clusters at the open, so a seek into it is
+# arithmetic rather than a walk of the FAT chain from the file's start
+# (a FLAC seek probes several places); a file in more fragments than
+# the map holds falls back to the walk by itself. The map is 2 KB per
+# open file, room for 255 fragments: the default of 64 words (31
+# fragments) failed on every file of a well-used card.
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_API_ENCODING_UTF_8=y
+CONFIG_FATFS_USE_FASTSEEK=y
+CONFIG_FATFS_FAST_SEEK_BUFFER_SIZE=512
 
 # The console on the USB Serial/JTAG port the board is programmed through,
 # so UART0's pins (GPIO11, GPIO12 on J6) are free for the HAT's I2S data.
