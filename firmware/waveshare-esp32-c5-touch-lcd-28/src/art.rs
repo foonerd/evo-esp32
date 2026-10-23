@@ -126,7 +126,7 @@ impl Fetcher {
         ThreadSpawnConfiguration {
             name: Some(c"art"),
             stack_size: STACK,
-            priority: crate::threads::ART_PRIORITY,
+            priority: crate::threads::BACKGROUND_PRIORITY,
             // The stack lives in PSRAM: this thread never runs while the
             // flash cache is off (it writes no flash), and internal SRAM
             // is what the Wi-Fi stack and the DMA rings compete for.

@@ -17,8 +17,10 @@
 //! (measured the same day) the kernel sliced the core between them and
 //! a paint stage of 20 ms took 450–630 ms while a station opened; below
 //! the loop (0.1.3–0.1.5) they held the loop off for their whole run.
-//! The art worker is below them all: a cover's decode is a second of
-//! core and nothing waits on it.
+//! The art worker is background work too and sits with them. Below
+//! them (at 1, in 0.1.6) it ran only when every other task slept, and
+//! under a 96 kHz FLAC that is almost never: a 35 KB cover took 150 s
+//! to read off the card and a logo's TLS handshake timed out.
 //!
 //! Plugins say which of the two a thread is through
 //! [`evo_esp32_sdk::thread`]; this module places it: the priority, the
@@ -37,10 +39,9 @@ use evo_esp32_sdk::thread::{Placement, Role};
 pub const MAIN_PRIORITY: u8 = 5;
 /// Threads that feed the decoder or the sink: one above the loop.
 pub const FEED_PRIORITY: u8 = 6;
-/// Threads that open, list, search and talk to peers: one below.
+/// Threads that open, list, search, talk to peers and fetch art: one
+/// below.
 pub const BACKGROUND_PRIORITY: u8 = 4;
-/// The art worker, below them all.
-pub const ART_PRIORITY: u8 = 1;
 
 /// The threads' placement on this board.
 pub struct Placing;
