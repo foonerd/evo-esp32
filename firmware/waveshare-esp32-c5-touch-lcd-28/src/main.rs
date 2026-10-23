@@ -130,6 +130,12 @@ const HW_GAIN_HALF_DB: i16 = -7;
 const MUSIC: &str = companion_platform_esp_idf::card::MOUNT_POINT;
 /// How often the loop logs the heap and the stack.
 const HEARTBEAT: Duration = Duration::from_secs(10);
+/// A finger held this long on the panel, from the moment it lights,
+/// returns the player to the factory copy …
+const HOLD_TO_RETURN: Duration = Duration::from_secs(5);
+/// … and only within this long of the loop's start: later, a long press
+/// is a long press.
+const HOLD_WINDOW: Duration = Duration::from_secs(15);
 /// How long the loop sleeps between ticks when the fabric is idle.
 const TICK: Duration = Duration::from_millis(5);
 /// How often the loop sleeps a millisecond for the idle task while the
@@ -636,6 +642,14 @@ fn main() -> anyhow::Result<()> {
     let mut turn_max = Duration::ZERO;
     // The page's ask to stop, answered once the face shows it.
     let mut update_ack: Option<std::sync::mpsc::Sender<()>> = None;
+    // A finger held on the panel from the moment it lights, for five
+    // seconds, returns the player to the factory copy: the way back from
+    // a firmware that runs but is wrong, without a computer. The board's
+    // BOOT button cannot serve: it is the chip's download strap, and
+    // held at power-on it gives download mode, not the bootloader.
+    let loop_started = Instant::now();
+    let mut held_since: Option<Instant> = None;
+    let mut returning = false;
     loop {
         turn_max = turn_max.max(turn_started.elapsed());
         turn_started = Instant::now();
@@ -707,6 +721,28 @@ fn main() -> anyhow::Result<()> {
         let due = steward.tick(t);
         busy += tick_started.elapsed();
         let ticked = Instant::now();
+        if !returning && loop_started.elapsed() < HOLD_WINDOW {
+            if tracker.down() {
+                let since = *held_since.get_or_insert(Instant::now());
+                if since.elapsed() >= HOLD_TO_RETURN {
+                    match update::boot_factory() {
+                        Ok(()) => {
+                            returning = true;
+                            notice = Some(
+                                "Returning to the factory firmware".into(),
+                            );
+                            last_face = Instant::now() - FACE_TICK;
+                        }
+                        Err(why) => {
+                            warn!("update: not returning: {why}");
+                            held_since = None;
+                        }
+                    }
+                }
+            } else {
+                held_since = None;
+            }
+        }
         // A report waits while INT is low; a finger that was down is read
         // until the controller says it lifted.
         if board.touch_int.is_low() || tracker.down() {

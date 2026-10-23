@@ -531,6 +531,20 @@ impl Status {
              itself yet. Once an update has run and proved itself, it can be kept here.</p>"
                 .to_string()
         };
+        let back = if self
+            .slots
+            .iter()
+            .any(|s| s.running && s.label != "factory")
+        {
+            "<form method=\"post\" action=\"/boot-factory\" class=\"row\">\
+             <button class=\"secondary\" type=\"submit\">Restart into the factory copy</button></form>\
+             <p class=\"note\">For a firmware that runs but is not what you want. The update slots keep \
+             their firmware; the next update goes on as before. On the player itself: hold a finger on the \
+             panel for five seconds from the moment it lights after power-on.</p>"
+                .to_string()
+        } else {
+            String::new()
+        };
         let last = if self.last.is_empty() {
             String::new()
         } else {
@@ -586,7 +600,7 @@ impl Status {
              into it — about a minute in all. The new firmware runs on trial first: if it does not start \
              healthily, the player returns to this one by itself. Keep the player powered meanwhile.</p>\
              </section>\
-             <section><h2>Factory copy</h2>{keep}</section>\
+             <section><h2>Factory copy</h2>{keep}{back}</section>\
              <footer>evo-esp32 · <a href=\"/status\">status as text</a></footer>\
              </main></body></html>",
             name = escape(&self.name),

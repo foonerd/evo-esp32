@@ -118,6 +118,9 @@ pub enum Standing {
     NotYet,
     /// Reading the manifest now.
     Checking,
+    /// Put off: the player has no room for a TLS session right now (a
+    /// heavy track playing); looked at again in a while.
+    Deferred,
     /// The running firmware is the latest the manifest knows.
     Current,
     /// A newer release exists.
@@ -135,6 +138,7 @@ impl Standing {
             Standing::Off => "updates off".into(),
             Standing::NotYet => "not checked yet".into(),
             Standing::Checking => "checking\u{2026}".into(),
+            Standing::Deferred => "waiting for a quiet moment".into(),
             Standing::Current => "up to date".into(),
             Standing::Available(m) => format!("{} available", m.version),
             Standing::Failed(why) => format!("check failed: {why}"),

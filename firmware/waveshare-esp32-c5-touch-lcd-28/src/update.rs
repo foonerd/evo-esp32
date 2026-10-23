@@ -104,6 +104,15 @@ const FIRST_CHECK: Duration = Duration::from_secs(90);
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// After a failed look, the next.
 const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
+/// Internal memory a look needs free before it starts: a TLS session
+/// takes ten to fifteen kilobytes of it on the way in, and the SD and
+/// panel drivers allocate from the same pool for every transfer. A look
+/// begun with less, under a 96 kHz FLAC, took internal memory to 9.9 KB
+/// and the SD driver crashed on a failed allocation (core dump,
+/// 2026-10-23). Below the floor the look waits.
+const CHECK_FLOOR: usize = 26 * 1024;
+/// How long a look waits for the floor before asking again.
+const DEFER_FOR: Duration = Duration::from_secs(10 * 60);
 /// A tap on the row arms the install; a second within this applies it.
 const ARM_WINDOW: Duration = Duration::from_secs(12);
 /// `update = auto` applies a release once nothing has played this long.
@@ -212,7 +221,9 @@ fn app_slots() -> Vec<*const sys::esp_partition_t> {
 /// Where the player runs from and how the bootloader holds it. A slot
 /// whose last write never finished (power cut, a reset) is left as
 /// nothing: the bootloader never pointed at it, but its first sector
-/// may read as an image to anyone who looks.
+/// may read as an image to anyone who looks. A slot the bootloader has
+/// no record of but whose image verifies whole (both records go when
+/// the player returns to the factory copy) is kept.
 pub fn standing() -> (String, Standing) {
     // SAFETY: plain getters on the partition table and otadata.
     let running = unsafe { sys::esp_ota_get_running_partition() };
@@ -229,7 +240,12 @@ pub fn standing() -> (String, Standing) {
         let got = unsafe { sys::esp_ota_get_state_partition(p, &mut state) };
         let recorded = got == sys::ESP_OK
             && state != sys::esp_ota_img_states_t_ESP_OTA_IMG_UNDEFINED;
-        if !recorded && !described(p).0.is_empty() {
+        if recorded || described(p).0.is_empty() {
+            continue;
+        }
+        if verifies(p) {
+            info!("update: {} holds a whole image the bootloader has no record of; kept", label(p));
+        } else {
             info!("update: {} holds an unfinished write; blanked", label(p));
             blank(p);
         }
@@ -249,6 +265,61 @@ pub fn standing() -> (String, Standing) {
 /// What the page and the status file say.
 pub fn status(name: &str, last: &str) -> Status {
     status_with(name, last, "", None)
+}
+
+/// Whether the image in `p` verifies whole (its hash, and its signature
+/// where signatures are required).
+fn verifies(p: *const sys::esp_partition_t) -> bool {
+    // SAFETY: `p` is a table entry; the position names its extent.
+    let pos = unsafe {
+        sys::esp_partition_pos_t {
+            offset: (*p).address,
+            size: (*p).size,
+        }
+    };
+    let mut data: sys::esp_image_metadata_t = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        sys::esp_image_verify(
+            sys::esp_image_load_mode_t_ESP_IMAGE_VERIFY_SILENT,
+            &pos,
+            &mut data,
+        )
+    };
+    ret == sys::ESP_OK
+}
+
+/// Return to the factory copy: the bootloader's records of the update
+/// slots go (ESP-IDF erases otadata for a factory choice), the images
+/// in them stay and show as kept, and the player restarts. For a
+/// firmware that boots and runs but is wrong for its owner; a firmware
+/// that does not boot is returned by the bootloader's own trial.
+pub fn boot_factory() -> Result<(), String> {
+    // SAFETY: plain lookups on the partition table.
+    let running = unsafe { sys::esp_ota_get_running_partition() };
+    let factory = unsafe {
+        sys::esp_partition_find_first(
+            sys::esp_partition_type_t_ESP_PARTITION_TYPE_APP,
+            sys::esp_partition_subtype_t_ESP_PARTITION_SUBTYPE_APP_FACTORY,
+            std::ptr::null(),
+        )
+    };
+    if factory.is_null() {
+        return Err("no factory slot".into());
+    }
+    if factory == running {
+        return Err("the factory copy is running already".into());
+    }
+    if !verifies(factory) {
+        return Err("the factory copy does not verify".into());
+    }
+    // SAFETY: `factory` is a table entry holding a verified image.
+    let ret = unsafe { sys::esp_ota_set_boot_partition(factory) };
+    if ret != sys::ESP_OK {
+        return Err(format!("could not select the factory copy: {}", err(ret)));
+    }
+    info!("update: returning to the factory copy; restarting");
+    restart_soon();
+    Ok(())
 }
 
 /// As [`status`], with where the player stands with releases.
@@ -611,7 +682,7 @@ impl Page {
             http_port: PORT,
             stack_size: SERVER_STACK,
             max_open_sockets: SERVER_SOCKETS,
-            max_uri_handlers: 8,
+            max_uri_handlers: 10,
             ..Default::default()
         })
         .map_err(|e| format!("http server: {e}"))?;
@@ -856,6 +927,29 @@ impl Page {
                 )
             })
             .map_err(|e| format!("route /pull: {e}"))?;
+
+        let s = Arc::clone(&shared);
+        server
+            .fn_handler::<anyhow::Error, _>("/boot-factory", Method::Post, move |req| {
+                let req = match s.admit(req, "POST") {
+                    Ok(r) => r,
+                    Err(sent) => return sent,
+                };
+                let browser = wants_html(&req);
+                match boot_factory() {
+                    Ok(()) => reply(
+                        req,
+                        &s.name,
+                        browser,
+                        true,
+                        "Restarting into the factory copy",
+                        "The update slots keep their firmware. Back in a minute.",
+                        Some(60),
+                    ),
+                    Err(why) => reply(req, &s.name, browser, false, "Not restarting", &format!("{why}."), None),
+                }
+            })
+            .map_err(|e| format!("route /boot-factory: {e}"))?;
 
         info!(
             "update: the page is on port {PORT}{}",
@@ -1461,6 +1555,8 @@ pub struct Pull {
     next_check: Option<Instant>,
     armed: Option<Instant>,
     applied: bool,
+    /// The line last reported, so a change is reported once.
+    shown: String,
 }
 
 impl Pull {
@@ -1470,15 +1566,17 @@ impl Pull {
             .strip_prefix("evo-esp32-")
             .unwrap_or(env!("CARGO_PKG_NAME"))
             .to_string();
+        let standing = if mode == Update::Off {
+            manifest::Standing::Off
+        } else {
+            manifest::Standing::NotYet
+        };
         Self {
             mode,
             url: url.unwrap_or(manifest::DEFAULT_URL).to_string(),
             board,
-            standing: if mode == Update::Off {
-                manifest::Standing::Off
-            } else {
-                manifest::Standing::NotYet
-            },
+            shown: standing.line(),
+            standing,
             events,
             tx,
             asks,
@@ -1518,6 +1616,8 @@ impl Pull {
     }
 
     /// Look now, on a thread; the standing says `Checking` meanwhile.
+    /// With too little internal memory for a TLS session the look is
+    /// put off (`Deferred`) and tried again in [`DEFER_FOR`].
     pub fn check(&mut self) {
         if self.mode == Update::Off
             || matches!(
@@ -1525,6 +1625,15 @@ impl Pull {
                 manifest::Standing::Checking | manifest::Standing::Applying(_)
             )
         {
+            return;
+        }
+        let internal = internal_free();
+        if internal < CHECK_FLOOR {
+            info!(
+                "update: release check deferred: {internal} B of internal memory free, {CHECK_FLOOR} needed"
+            );
+            self.standing = manifest::Standing::Deferred;
+            self.next_check = Some(Instant::now() + DEFER_FOR);
             return;
         }
         self.standing = manifest::Standing::Checking;
@@ -1537,6 +1646,7 @@ impl Pull {
             "pull",
             FETCH_STACK,
             move || {
+                let (before, low_before) = (internal_free(), internal_low());
                 let outcome = read_manifest(&url).and_then(|m| {
                     if m.is_newer_for(&board, env!("CARGO_PKG_VERSION")) {
                         Ok(manifest::Standing::Available(m))
@@ -1546,6 +1656,11 @@ impl Pull {
                         Ok(manifest::Standing::Current)
                     }
                 });
+                info!(
+                    "update: release check: internal memory {before} B before, {} B after; low-water {low_before} B before, {} B after",
+                    internal_free(),
+                    internal_low()
+                );
                 let _ = tx.send(match outcome {
                     Ok(s) => s,
                     Err(why) => manifest::Standing::Failed(why),
@@ -1655,13 +1770,16 @@ impl Pull {
     }
 
     /// Once a tick: the looks that are due, the answers that came, and
-    /// `auto`'s own install once nothing has played for a while. The
+    /// `auto`'s own install once nothing has played for a while. A look
+    /// put off for memory is taken as soon as nothing plays. The
     /// standing's line when it changed, for the log and the status.
     pub fn tick(&mut self, idle_for: Option<Duration>) -> Option<String> {
-        if self.next_check.is_some_and(|at| Instant::now() >= at) {
+        let due = self.next_check.is_some_and(|at| Instant::now() >= at);
+        let quiet_now = idle_for.is_some()
+            && matches!(self.standing, manifest::Standing::Deferred);
+        if due || quiet_now {
             self.check();
         }
-        let mut changed = None;
         while let Ok(s) = self.events.try_recv() {
             self.next_check = Some(
                 Instant::now()
@@ -1670,19 +1788,20 @@ impl Pull {
                         _ => CHECK_EVERY,
                     },
             );
-            if s != self.standing {
-                self.standing = s;
-                changed = Some(self.standing.line());
-            }
+            self.standing = s;
         }
         if self.mode == Update::Auto
             && self.available().is_some()
             && idle_for.is_some_and(|d| d >= AUTO_IDLE)
         {
             self.apply();
-            changed = Some(self.standing.line());
         }
-        changed
+        let line = self.standing.line();
+        if line != self.shown {
+            self.shown = line.clone();
+            return Some(line);
+        }
+        None
     }
 
     /// The install that was running failed; the standing says so and a
@@ -1694,6 +1813,18 @@ impl Pull {
             self.next_check = Some(Instant::now() + RETRY_AFTER);
         }
     }
+}
+
+/// Internal memory free now, bytes.
+fn internal_free() -> usize {
+    // SAFETY: a plain getter.
+    unsafe { sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL) }
+}
+
+/// The least internal memory that has been free since boot, bytes.
+fn internal_low() -> usize {
+    // SAFETY: a plain getter.
+    unsafe { sys::heap_caps_get_minimum_free_size(sys::MALLOC_CAP_INTERNAL) }
 }
 
 /// GET the manifest and read it.
