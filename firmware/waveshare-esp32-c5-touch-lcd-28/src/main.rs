@@ -461,6 +461,15 @@ fn main() -> anyhow::Result<()> {
     let mut page: Option<update::Page> = None;
     let mut gate = update::Gate::new(standing);
     let mut sink_seen = false;
+    // Releases: looked for once the link is up, shown in Settings and
+    // on the page, installed on a deliberate tap or by `update = auto`.
+    let mut pull = update::Pull::new(
+        config.settings.update.unwrap_or_default(),
+        config.settings.update_url.as_deref(),
+        asks_tx.clone(),
+    );
+    // Since when nothing has played, for `auto`.
+    let mut idle_since = Instant::now();
     // A station named by `start` waits for the network before it is
     // asked for; a file does not.
     let mut start_when_up = false;
@@ -655,6 +664,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 update::Ask::Failed(why) => {
                     notice = Some(format!("Update failed: {why}"));
+                    pull.failed(&why);
                     if std::mem::take(&mut card_update) {
                         config.note(format!("update: {why}"));
                         config.write_status(&status_head);
@@ -685,6 +695,8 @@ fn main() -> anyhow::Result<()> {
                         track_started = Instant::now();
                     }
                 }
+                update::Ask::Check => pull.check(),
+                update::Ask::Pull => pull.apply(),
             }
         }
         if updating && update_ack.is_none() {
@@ -839,6 +851,7 @@ fn main() -> anyhow::Result<()> {
                                         &network_line(&net),
                                         &queue,
                                         &device_id,
+                                        &pull.standing().line(),
                                     )),
                                     _ => {}
                                 }
@@ -849,6 +862,22 @@ fn main() -> anyhow::Result<()> {
                                     let fact =
                                         face.about().first + usize::from(i);
                                     match settings_row(fact) {
+                                        Some(SettingsRow::Update) => {
+                                            notice = Some(match pull.tap() {
+                                                update::Tap::Checking => {
+                                                    "Looking for a release\u{2026}".to_string()
+                                                }
+                                                update::Tap::Armed(v) => {
+                                                    format!("Tap again to install {v}")
+                                                }
+                                                update::Tap::Installing(v) => {
+                                                    format!("Installing {v}\u{2026}")
+                                                }
+                                                update::Tap::Off => {
+                                                    "Updates are off (update = off on the card)".to_string()
+                                                }
+                                            });
+                                        }
                                         Some(SettingsRow::Theme) => {
                                             let next = next_theme(face.theme());
                                             face.set_theme(next);
@@ -919,6 +948,7 @@ fn main() -> anyhow::Result<()> {
                                         &network_line(&net),
                                         &queue,
                                         &device_id,
+                                        &pull.standing().line(),
                                     ));
                                     continue;
                                 }
@@ -1031,6 +1061,33 @@ fn main() -> anyhow::Result<()> {
                         .map(|n| matches!(n.state, net::State::Up { .. })),
                 );
             }
+            if current.is_some() {
+                idle_since = Instant::now();
+            }
+            if let Some(line) =
+                pull.tick(current.is_none().then(|| idle_since.elapsed()))
+            {
+                info!("update: release: {line}");
+                config.note(format!("update: release: {line}"));
+                config.write_status(&status_head);
+                if let Some(p) = &page {
+                    p.set_release(
+                        &line,
+                        pull.available().map(|m| m.version.as_str()),
+                    );
+                }
+                if face.screen() == Screen::Settings {
+                    face.set_about(facts(
+                        &face,
+                        card_mb,
+                        card_tracks,
+                        &network_line(&net),
+                        &queue,
+                        &device_id,
+                        &pull.standing().line(),
+                    ));
+                }
+            }
             // A network source sending to this device takes the sink from
             // the queue; it comes back when the source stops.
             if rooms.custody.is_none() {
@@ -1096,6 +1153,7 @@ fn main() -> anyhow::Result<()> {
                 };
                 config.set_network(line);
                 config.write_status(&status_head);
+                pull.link(matches!(event, net::Event::Up { .. }));
                 if let net::Event::Up { address, .. } = &event {
                     presence.set_address(address.parse().ok());
                     // Power save as the driver has it now (R37): the net
@@ -1134,7 +1192,14 @@ fn main() -> anyhow::Result<()> {
                             asks_tx.clone(),
                             credentials,
                         ) {
-                            Ok(p) => page = Some(p),
+                            Ok(p) => {
+                                p.set_release(
+                                    &pull.standing().line(),
+                                    pull.available()
+                                        .map(|m| m.version.as_str()),
+                                );
+                                page = Some(p);
+                            }
                             Err(e) => warn!("update: no page: {e}"),
                         }
                     }
@@ -1171,6 +1236,7 @@ fn main() -> anyhow::Result<()> {
                         &network_line(&net),
                         &queue,
                         &device_id,
+                        &pull.standing().line(),
                     ));
                 }
             }
@@ -2765,6 +2831,7 @@ fn facts(
     network: &str,
     queue: &Queue<Track>,
     device_id: &str,
+    release: &str,
 ) -> About {
     let fact = |name: &str, value: String| Fact {
         name: name.to_string(),
@@ -2773,6 +2840,7 @@ fn facts(
     About {
         facts: vec![
             fact("Player", format!("evo-esp32 {}", env!("CARGO_PKG_VERSION"))),
+            fact("Update \u{203a}", release.to_string()),
             fact("Wi-Fi", network.to_string()),
             fact(
                 "Build",
@@ -2801,6 +2869,7 @@ fn facts(
 
 /// The settings rows a tap acts on, by their place in [`facts`].
 enum SettingsRow {
+    Update,
     Theme,
     Style,
     Rotation,
@@ -2810,11 +2879,12 @@ enum SettingsRow {
 
 fn settings_row(i: usize) -> Option<SettingsRow> {
     match i {
-        4 => Some(SettingsRow::Theme),
-        5 => Some(SettingsRow::Style),
-        6 => Some(SettingsRow::Rotation),
-        7 => Some(SettingsRow::Shuffle),
-        8 => Some(SettingsRow::Repeat),
+        1 => Some(SettingsRow::Update),
+        5 => Some(SettingsRow::Theme),
+        6 => Some(SettingsRow::Style),
+        7 => Some(SettingsRow::Rotation),
+        8 => Some(SettingsRow::Shuffle),
+        9 => Some(SettingsRow::Repeat),
         _ => None,
     }
 }

@@ -909,6 +909,7 @@ name = "evo-esp32-update"
 version = "0.1.6"
 dependencies = [
  "md-5",
+ "serde_json",
 ]
 
 [[package]]

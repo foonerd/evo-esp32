@@ -54,6 +54,8 @@ pub const KEYS: &[&str] = &[
     "snapserver",
     "web_user",
     "web_password",
+    "update",
+    "update_url",
 ];
 
 /// The schemes a `share` may name.
@@ -106,6 +108,13 @@ pub struct Settings {
     pub web_user: Option<String>,
     /// Its password.
     pub web_password: Option<String>,
+    /// Whether the player looks for a newer release: `check` (the
+    /// default: look, and say so in Settings), `auto` (look, and apply
+    /// it when nothing plays) or `off`.
+    pub update: Option<Update>,
+    /// Where the release manifest is, `http://` or `https://`; not set,
+    /// the project's releases.
+    pub update_url: Option<String>,
     /// The network shares the library lists, in the file's numbering:
     /// `share` (1) and `share2` to `share9`, each with its credentials
     /// from `share_user`, `share_password`, `share_domain` (`share2_user`
@@ -127,6 +136,39 @@ pub struct ShareSetting {
     pub password: Option<String>,
     /// The account's domain, for SMB.
     pub domain: Option<String>,
+}
+
+/// Whether the player looks for a newer release, and what it does with
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Update {
+    /// Look, and say so in Settings; the owner applies it.
+    #[default]
+    Check,
+    /// Look, and apply it when nothing plays.
+    Auto,
+    /// Never look.
+    Off,
+}
+
+impl Update {
+    /// The name [`parse`] accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            Update::Check => "check",
+            Update::Auto => "auto",
+            Update::Off => "off",
+        }
+    }
+
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "check" | "notify" | "on" => Some(Update::Check),
+            "auto" | "automatic" => Some(Update::Auto),
+            "off" | "no" | "never" => Some(Update::Off),
+            _ => None,
+        }
+    }
 }
 
 /// What happens at the end of the queue.
@@ -458,6 +500,24 @@ fn take(settings: &mut Settings, key: &str, value: &str) -> bool {
             }
             settings.web_password = text;
         }
+        "update" => {
+            settings.update = match text {
+                None => None,
+                Some(t) => match Update::named(&t) {
+                    Some(u) => Some(u),
+                    None => return false,
+                },
+            }
+        }
+        "update_url" => {
+            if !value.is_empty()
+                && !(value.starts_with("http://")
+                    || value.starts_with("https://"))
+            {
+                return false;
+            }
+            settings.update_url = text;
+        }
         _ => return false,
     }
     true
@@ -614,6 +674,12 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
             "web_password",
             format!("({} characters, not shown)", v.chars().count()),
         ));
+    }
+    if let Some(v) = s.update {
+        applied.push(("update", v.name().to_string()));
+    }
+    if let Some(v) = &s.update_url {
+        applied.push(("update_url", v.clone()));
     }
     if applied.is_empty() && s.shares.is_empty() {
         lines.push("read: no settings in the file".to_string());
@@ -808,6 +874,24 @@ mod tests {
     fn a_repeated_key_keeps_its_last_line() {
         let p = parse("volume = 10\nvolume = 20\n");
         assert_eq!(p.settings.volume, Some(20));
+    }
+
+    #[test]
+    fn the_update_keys_take_a_mode_and_a_web_address() {
+        let p = parse(
+            "update = auto\nupdate_url = https://example.net/evo/manifest.json\n",
+        );
+        assert_eq!(p.settings.update, Some(Update::Auto));
+        assert_eq!(
+            p.settings.update_url.as_deref(),
+            Some("https://example.net/evo/manifest.json")
+        );
+        assert!(p.invalid.is_empty());
+        let p = parse("update = sometimes\nupdate_url = ftp://x/y\n");
+        assert_eq!(p.settings.update, None);
+        assert_eq!(p.settings.update_url, None);
+        assert_eq!(p.invalid.len(), 2);
+        assert_eq!(parse("update =\n").settings.update, None);
     }
 
     #[test]

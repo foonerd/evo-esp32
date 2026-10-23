@@ -82,6 +82,18 @@ share_password =
 web_user =
 web_password =
 
+# Newer releases. The player looks once a day while on the network and
+# shows what it found in Settings (Update ›) and on its web page:
+#   check   look, and show it; you install it with two taps on the row
+#           or from the page (the default)
+#   auto    look, and install it by itself once nothing has played for
+#           a minute
+#   off     never look
+# update_url names another place to look (http:// or https://); left
+# empty, the project's releases.
+update =
+update_url =
+
 # The DAC board on the header, when the player cannot tell by itself
 # (a board with no I2C part, such as a PCM5102A) or to override what it
 # found; the names are on the wiki's Audio out page. And where the

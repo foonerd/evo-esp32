@@ -20,6 +20,7 @@
 use std::io;
 
 pub mod lock;
+pub mod manifest;
 
 /// The first bytes of every ESP32 application image.
 pub const IMAGE_MAGIC: u8 = 0xE9;
@@ -422,6 +423,11 @@ pub struct Status {
     pub may_keep: bool,
     /// The last update's outcome, for the page; empty when none.
     pub last: String,
+    /// Where the player stands with releases, as [`manifest::Standing::line`]
+    /// says it; empty when the player does not look.
+    pub release: String,
+    /// The version of a release that waits to be installed, when one does.
+    pub may_pull: Option<String>,
 }
 
 impl Status {
@@ -538,6 +544,28 @@ impl Status {
                 escape(&self.last)
             )
         };
+        let release = if self.release.is_empty() {
+            String::new()
+        } else {
+            let install = match &self.may_pull {
+                Some(v) => format!(
+                    "<form method=\"post\" action=\"/pull\" class=\"row\">\
+                     <button class=\"primary\" type=\"submit\">Install {}</button></form>",
+                    escape(v)
+                ),
+                None => String::new(),
+            };
+            format!(
+                "<section><h2>Releases</h2><p class=\"release\">{}</p>{install}\
+                 <form method=\"post\" action=\"/check\" class=\"row\">\
+                 <button class=\"secondary\" type=\"submit\">Check now</button></form>\
+                 <p class=\"note\">The player looks for a newer release once a day while on the network \
+                 (<code>update</code> on the card: <code>check</code>, <code>auto</code> or <code>off</code>). \
+                 Installing one is the same as an update from a file: playback stops, the player restarts into \
+                 it on trial.</p></section>",
+                escape(&self.release)
+            )
+        };
         format!(
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
              <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
@@ -548,6 +576,7 @@ impl Status {
              <div class=\"sub\">evo-esp32 {version} <span class=\"muted\">{build}</span></div></div></header>\
              {last}\
              <section><h2>Firmware on this player</h2><div class=\"slots\">{rows}</div></section>\
+             {release}\
              <section><h2>Update</h2>\
              <form method=\"post\" action=\"/update\" enctype=\"multipart/form-data\" class=\"upload\">\
              <label class=\"file\"><input type=\"file\" name=\"firmware\" accept=\".bin\" required>\
@@ -606,6 +635,7 @@ button.primary{background:var(--accent);color:var(--accent-fg)}button.primary:ho
 button.secondary{background:var(--secondary);color:var(--fg);border-color:var(--border)}button.secondary:hover{border-color:var(--accent)}\
 .row{margin:0 0 .5rem}\
 .note{color:var(--muted);font-size:.9rem;margin:.75rem 0 0}\
+.release{font-size:1.05rem;margin:0 0 .75rem}\
 footer{color:var(--muted);font-size:.8rem;border-top:1px solid var(--border);padding-top:1rem}\
 footer a{color:var(--muted)}footer a:hover{color:var(--accent)}\
 a.back{color:var(--accent);text-decoration:none;font-weight:600}a.back:hover{text-decoration:underline}\
@@ -900,6 +930,8 @@ mod tests {
             ],
             may_keep: true,
             last: "written ota_0, confirmed after 71 s".into(),
+            release: "0.3.0 available".into(),
+            may_pull: Some("0.3.0".into()),
         };
         assert_eq!(
             s.lines(),

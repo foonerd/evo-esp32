@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 md-5 = "0.10"
+serde_json = { workspace = true, features = ["std"] }

@@ -39,7 +39,7 @@ use std::ffi::CStr;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -51,11 +51,15 @@ use esp_idf_svc::http::server::{
 use esp_idf_svc::http::Method;
 use esp_idf_svc::io::{Read, Write};
 use esp_idf_svc::sys;
+use evo_esp32_config::Update;
+use evo_esp32_platform_esp_idf::http::HttpOpener;
+use evo_esp32_sdk::contract::audio::playback::StreamOpener;
 use evo_esp32_update::lock::Lock;
 use evo_esp32_update::{
     applied_name, image_identity, image_length, is_card_image, is_whole,
-    judge_head, outcome_page, refused_name, short_id, signature_block_at, Form,
-    Framing, Slot, Status, HEAD_LEN, SIGNATURE_MAGIC, SIGNATURE_SECTOR,
+    judge_head, manifest, outcome_page, refused_name, short_id,
+    signature_block_at, Form, Framing, Slot, Status, HEAD_LEN, SIGNATURE_MAGIC,
+    SIGNATURE_SECTOR,
 };
 use log::{info, warn};
 
@@ -93,6 +97,22 @@ const GATE_DEADLINE: Duration = if cfg!(feature = "gate-test") {
 };
 /// The pause between the answer and the restart, so the answer leaves.
 const RESTART_AFTER: Duration = Duration::from_millis(800);
+/// The first look at the manifest, after the link comes up: the join,
+/// mDNS and the page's start are over by then.
+const FIRST_CHECK: Duration = Duration::from_secs(90);
+/// Looks after the first: once a day.
+const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// After a failed look, the next.
+const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
+/// A tap on the row arms the install; a second within this applies it.
+const ARM_WINDOW: Duration = Duration::from_secs(12);
+/// `update = auto` applies a release once nothing has played this long.
+const AUTO_IDLE: Duration = Duration::from_secs(60);
+/// The threads that talk HTTPS: TLS wants the room (the radio's fetcher
+/// has the same); their stacks are in PSRAM, as they write no flash.
+const FETCH_STACK: usize = 32 * 1024;
+/// Chunks in flight between the fetcher and the writer.
+const IN_FLIGHT: usize = 4;
 
 /// What the page asks of the loop, and what the loop answers.
 pub enum Ask {
@@ -104,6 +124,10 @@ pub enum Ask {
     Failed(String),
     /// Something finished without a restart; `what` is for the face.
     Done(String),
+    /// The page asks for a look at the release manifest.
+    Check,
+    /// The page asks for the release the manifest named.
+    Pull,
 }
 
 /// The slot the player runs from, and how the bootloader holds it.
@@ -224,6 +248,16 @@ pub fn standing() -> (String, Standing) {
 
 /// What the page and the status file say.
 pub fn status(name: &str, last: &str) -> Status {
+    status_with(name, last, "", None)
+}
+
+/// As [`status`], with where the player stands with releases.
+fn status_with(
+    name: &str,
+    last: &str,
+    release: &str,
+    may_pull: Option<String>,
+) -> Status {
     // SAFETY: plain getters.
     let running = unsafe { sys::esp_ota_get_running_partition() };
     let boot = unsafe { sys::esp_ota_get_boot_partition() };
@@ -262,6 +296,8 @@ pub fn status(name: &str, last: &str) -> Status {
         slots,
         may_keep,
         last: last.to_string(),
+        release: release.to_string(),
+        may_pull,
     }
 }
 
@@ -479,6 +515,9 @@ struct Shared {
     asks: Sender<Ask>,
     /// The last update's outcome, for the page.
     last: Mutex<String>,
+    /// Where the player stands with releases: the line, and the version
+    /// that may be installed.
+    release: Mutex<(String, Option<String>)>,
     /// One update at a time.
     busy: Mutex<()>,
     /// The page's lock, when the card sets `web_user` and `web_password`.
@@ -529,9 +568,20 @@ fn uptime_secs() -> u64 {
 /// The page, on port 80, for the life of the firmware.
 pub struct Page {
     _server: EspHttpServer<'static>,
+    shared: Arc<Shared>,
 }
 
 impl Page {
+    /// Tell the page where the player stands with releases.
+    pub fn set_release(&self, line: &str, may_pull: Option<&str>) {
+        *self
+            .shared
+            .release
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            (line.to_string(), may_pull.map(str::to_string));
+    }
+
     /// Start the page; `asks` reach the loop, which stops playback
     /// before a write and shows what is happening. With `credentials`
     /// (a name and a password from the card) every request is asked
@@ -553,6 +603,7 @@ impl Page {
             name: name.to_string(),
             asks,
             last: Mutex::new(String::new()),
+            release: Mutex::new((String::new(), None)),
             busy: Mutex::new(()),
             lock,
         });
@@ -575,7 +626,10 @@ impl Page {
                 };
                 let last =
                     s.last.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let page = status(&s.name, &last).page();
+                let (release, may_pull) =
+                    s.release.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let page =
+                    status_with(&s.name, &last, &release, may_pull).page();
                 let mut resp = req.into_response(
                     200,
                     Some("OK"),
@@ -601,11 +655,19 @@ impl Page {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .clone();
-                    let st = status(&s.name, &last);
+                    let (release, may_pull) = s
+                        .release
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let st = status_with(&s.name, &last, &release, may_pull);
                     let mut text =
                         format!("{} {} {}\n", st.name, st.version, st.build);
                     for l in st.lines() {
                         let _ = writeln!(text, "{l}");
+                    }
+                    if !st.release.is_empty() {
+                        let _ = writeln!(text, "release: {}", st.release);
                     }
                     if !st.last.is_empty() {
                         let _ = writeln!(text, "last: {}", st.last);
@@ -743,6 +805,58 @@ impl Page {
             })
             .map_err(|e| format!("route /factory: {e}"))?;
 
+        let s = Arc::clone(&shared);
+        server
+            .fn_handler::<anyhow::Error, _>("/check", Method::Post, move |req| {
+                let req = match s.admit(req, "POST") {
+                    Ok(r) => r,
+                    Err(sent) => return sent,
+                };
+                let browser = wants_html(&req);
+                let _ = s.asks.send(Ask::Check);
+                reply(
+                    req,
+                    &s.name,
+                    browser,
+                    true,
+                    "Looking for a release",
+                    "The player reads the release manifest now; the page shows what it found in a moment.",
+                    Some(8),
+                )
+            })
+            .map_err(|e| format!("route /check: {e}"))?;
+
+        let s = Arc::clone(&shared);
+        server
+            .fn_handler::<anyhow::Error, _>("/pull", Method::Post, move |req| {
+                let req = match s.admit(req, "POST") {
+                    Ok(r) => r,
+                    Err(sent) => return sent,
+                };
+                let browser = wants_html(&req);
+                let waiting = s
+                    .release
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .1
+                    .clone();
+                let Some(version) = waiting else {
+                    return reply(req, &s.name, browser, false, "No release to install", "The player knows of no newer release. Check now, then try again.", None);
+                };
+                let _ = s.asks.send(Ask::Pull);
+                reply(
+                    req,
+                    &s.name,
+                    browser,
+                    true,
+                    &format!("Installing {version}"),
+                    "Playback stops, the release is fetched into the free slot, and the player restarts into it \
+                     on trial — a minute or two. Keep the player powered meanwhile.",
+                    Some(120),
+                )
+            })
+            .map_err(|e| format!("route /pull: {e}"))?;
+
         info!(
             "update: the page is on port {PORT}{}",
             if shared.lock.is_some() {
@@ -751,7 +865,10 @@ impl Page {
                 ", open to the network"
             }
         );
-        Ok(Self { _server: server })
+        Ok(Self {
+            _server: server,
+            shared,
+        })
     }
 }
 
@@ -1260,4 +1377,340 @@ pub fn apply_from_card(
         .set()
         .map_err(std::io::Error::other)?;
     spawned.map(|_| ())
+}
+
+/// A thread with an internal stack that writes bytes from `read` into
+/// the free slot, through the loop's asks as the page and the card do,
+/// and restarts into the slot. `what` names the source for the log and
+/// the face.
+fn write_in_thread<F>(
+    name: &'static str,
+    what: String,
+    asks: Sender<Ask>,
+    read: F,
+) -> std::io::Result<()>
+where
+    F: FnMut(&mut [u8]) -> Result<usize, String> + Send + 'static,
+{
+    let before = ThreadSpawnConfiguration::get();
+    ThreadSpawnConfiguration {
+        name: Some(c"update-write"),
+        stack_size: CARD_STACK,
+        priority: crate::threads::BACKGROUND_PRIORITY,
+        ..Default::default()
+    }
+    .set()
+    .map_err(std::io::Error::other)?;
+    let spawned = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(CARD_STACK)
+        .spawn(move || {
+            let (tx, rx) = channel();
+            let _ = asks.send(Ask::Quiet(tx));
+            let _ = rx.recv_timeout(STOP_WAIT);
+            let began = Instant::now();
+            match write_from(read, Framing::Raw) {
+                Ok((slot, bytes)) => {
+                    info!(
+                        "update: written {bytes} bytes from {what} to {slot} in {} s; restarting into it",
+                        began.elapsed().as_secs()
+                    );
+                    let _ = asks.send(Ask::Restarting(slot));
+                    restart_soon();
+                }
+                Err(why) => {
+                    warn!("update: {what}: {why}");
+                    let _ = asks.send(Ask::Failed(format!("{what}: {why}")));
+                }
+            }
+        });
+    before
+        .unwrap_or_default()
+        .set()
+        .map_err(std::io::Error::other)?;
+    spawned.map(|_| ())
+}
+
+/// What a tap on the Settings row did.
+pub enum Tap {
+    /// A look at the manifest begins.
+    Checking,
+    /// The release is named; a second tap within the window installs it.
+    Armed(String),
+    /// The install begins.
+    Installing(String),
+    /// Nothing to do: updates are off.
+    Off,
+}
+
+/// Looks for a newer release and brings it in: the manifest at `url`
+/// read on a thread of its own once the link is up and then daily, the
+/// standing shown in Settings and on the page, the release fetched over
+/// HTTPS into the free slot on a tap (twice, deliberately), from the
+/// page, or by itself when `update = auto` and nothing has played for a
+/// minute. The image is signed like any other; the manifest only says
+/// where it is.
+pub struct Pull {
+    mode: Update,
+    url: String,
+    board: String,
+    standing: manifest::Standing,
+    events: Receiver<manifest::Standing>,
+    tx: Sender<manifest::Standing>,
+    asks: Sender<Ask>,
+    next_check: Option<Instant>,
+    armed: Option<Instant>,
+    applied: bool,
+}
+
+impl Pull {
+    pub fn new(mode: Update, url: Option<&str>, asks: Sender<Ask>) -> Self {
+        let (tx, events) = channel();
+        let board = env!("CARGO_PKG_NAME")
+            .strip_prefix("evo-esp32-")
+            .unwrap_or(env!("CARGO_PKG_NAME"))
+            .to_string();
+        Self {
+            mode,
+            url: url.unwrap_or(manifest::DEFAULT_URL).to_string(),
+            board,
+            standing: if mode == Update::Off {
+                manifest::Standing::Off
+            } else {
+                manifest::Standing::NotYet
+            },
+            events,
+            tx,
+            asks,
+            next_check: None,
+            armed: None,
+            applied: false,
+        }
+    }
+
+    /// Where the player stands with releases.
+    pub fn standing(&self) -> &manifest::Standing {
+        &self.standing
+    }
+
+    /// Whether a release waits to be installed.
+    pub fn available(&self) -> Option<&manifest::Manifest> {
+        match &self.standing {
+            manifest::Standing::Available(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// The link came up (`true`) or went down.
+    pub fn link(&mut self, up: bool) {
+        if self.mode == Update::Off {
+            return;
+        }
+        if up {
+            if self.next_check.is_none()
+                && !matches!(self.standing, manifest::Standing::Available(_))
+            {
+                self.next_check = Some(Instant::now() + FIRST_CHECK);
+            }
+        } else {
+            self.next_check = None;
+        }
+    }
+
+    /// Look now, on a thread; the standing says `Checking` meanwhile.
+    pub fn check(&mut self) {
+        if self.mode == Update::Off
+            || matches!(
+                self.standing,
+                manifest::Standing::Checking | manifest::Standing::Applying(_)
+            )
+        {
+            return;
+        }
+        self.standing = manifest::Standing::Checking;
+        self.next_check = None;
+        let url = self.url.clone();
+        let board = self.board.clone();
+        let tx = self.tx.clone();
+        let spawned = evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "pull",
+            FETCH_STACK,
+            move || {
+                let outcome = read_manifest(&url).and_then(|m| {
+                    if m.is_newer_for(&board, env!("CARGO_PKG_VERSION")) {
+                        Ok(manifest::Standing::Available(m))
+                    } else if m.board != board {
+                        Err(format!("the manifest is for {}", m.board))
+                    } else {
+                        Ok(manifest::Standing::Current)
+                    }
+                });
+                let _ = tx.send(match outcome {
+                    Ok(s) => s,
+                    Err(why) => manifest::Standing::Failed(why),
+                });
+            },
+        );
+        if let Err(e) = spawned {
+            self.standing =
+                manifest::Standing::Failed(format!("no thread: {e}"));
+            self.next_check = Some(Instant::now() + RETRY_AFTER);
+        }
+    }
+
+    /// Fetch the release the manifest named into the free slot.
+    pub fn apply(&mut self) {
+        let Some(m) = self.available().cloned() else {
+            return;
+        };
+        if self.applied {
+            return;
+        }
+        self.applied = true;
+        self.standing = manifest::Standing::Applying(m.version.clone());
+        let (chunks_tx, chunks_rx) =
+            std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(IN_FLIGHT);
+        let url = m.url.clone();
+        let fetch = evo_esp32_sdk::thread::spawn(
+            evo_esp32_sdk::thread::Role::Background,
+            "pull-fetch",
+            FETCH_STACK,
+            move || {
+                let mut stream = match HttpOpener.open(&url) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = chunks_tx.send(Err(e));
+                        return;
+                    }
+                };
+                loop {
+                    let mut buf = vec![0u8; CHUNK];
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.truncate(n);
+                            if chunks_tx.send(Ok(buf)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = chunks_tx.send(Err(e));
+                            return;
+                        }
+                    }
+                }
+            },
+        );
+        if let Err(e) = fetch {
+            self.standing =
+                manifest::Standing::Failed(format!("no thread: {e}"));
+            self.applied = false;
+            return;
+        }
+        let mut pending: Vec<u8> = Vec::new();
+        let mut done = false;
+        let read = move |buf: &mut [u8]| -> Result<usize, String> {
+            if pending.is_empty() && !done {
+                match chunks_rx.recv() {
+                    Ok(Ok(chunk)) => pending = chunk,
+                    Ok(Err(why)) => return Err(format!("the download: {why}")),
+                    Err(_) => done = true,
+                }
+            }
+            let n = pending.len().min(buf.len());
+            buf[..n].copy_from_slice(&pending[..n]);
+            pending.drain(..n);
+            Ok(n)
+        };
+        if let Err(e) = write_in_thread(
+            "pull-write",
+            format!("the release {}", m.version),
+            self.asks.clone(),
+            read,
+        ) {
+            self.standing =
+                manifest::Standing::Failed(format!("no thread: {e}"));
+            self.applied = false;
+        }
+    }
+
+    /// A tap on the Settings row: arms, installs, or looks.
+    pub fn tap(&mut self) -> Tap {
+        if self.mode == Update::Off {
+            return Tap::Off;
+        }
+        if let Some(m) = self.available() {
+            let version = m.version.clone();
+            if self.armed.is_some_and(|at| at.elapsed() < ARM_WINDOW) {
+                self.armed = None;
+                self.apply();
+                return Tap::Installing(version);
+            }
+            self.armed = Some(Instant::now());
+            return Tap::Armed(version);
+        }
+        self.check();
+        Tap::Checking
+    }
+
+    /// Once a tick: the looks that are due, the answers that came, and
+    /// `auto`'s own install once nothing has played for a while. The
+    /// standing's line when it changed, for the log and the status.
+    pub fn tick(&mut self, idle_for: Option<Duration>) -> Option<String> {
+        if self.next_check.is_some_and(|at| Instant::now() >= at) {
+            self.check();
+        }
+        let mut changed = None;
+        while let Ok(s) = self.events.try_recv() {
+            self.next_check = Some(
+                Instant::now()
+                    + match &s {
+                        manifest::Standing::Failed(_) => RETRY_AFTER,
+                        _ => CHECK_EVERY,
+                    },
+            );
+            if s != self.standing {
+                self.standing = s;
+                changed = Some(self.standing.line());
+            }
+        }
+        if self.mode == Update::Auto
+            && self.available().is_some()
+            && idle_for.is_some_and(|d| d >= AUTO_IDLE)
+        {
+            self.apply();
+            changed = Some(self.standing.line());
+        }
+        changed
+    }
+
+    /// The install that was running failed; the standing says so and a
+    /// later tap may try again.
+    pub fn failed(&mut self, why: &str) {
+        if matches!(self.standing, manifest::Standing::Applying(_)) {
+            self.standing = manifest::Standing::Failed(why.to_string());
+            self.applied = false;
+            self.next_check = Some(Instant::now() + RETRY_AFTER);
+        }
+    }
+}
+
+/// GET the manifest and read it.
+fn read_manifest(url: &str) -> Result<manifest::Manifest, String> {
+    let mut stream = HttpOpener.open(url)?;
+    let mut text = Vec::with_capacity(1024);
+    let mut buf = [0u8; 512];
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        text.extend_from_slice(&buf[..n]);
+        if text.len() > manifest::MAX_LEN {
+            return Err("the manifest is too long to be one".into());
+        }
+    }
+    let text = String::from_utf8(text).map_err(|_| "not text".to_string())?;
+    manifest::Manifest::parse(&text)
 }
