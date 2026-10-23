@@ -2,7 +2,11 @@
 # Assemble the flashable image for one firmware crate.
 #
 # Usage: scripts/image.sh firmware/<vendor>-<model>     (after cargo build --release there)
-# Needs: python3; esptool 5.x as a python module, on PATH, or in ESP-IDF's python_env
+# Needs: python3; esptool 5.x (with espsecure) as a python module, on PATH,
+#        or in ESP-IDF's python_env
+# Env:   EVO_SIGNING_KEY=<pem>  the ECDSA P-256 key the app is signed with,
+#        required when the crate's sdkconfig.defaults requires signed apps
+#        (make one: espsecure generate-signing-key --version 2 --scheme ecdsa256 key.pem)
 #
 # Offsets and flash settings come from ESP-IDF's flasher_args.json, so they
 # track the crate's sdkconfig. The app image is built from the Rust ELF; the
@@ -70,10 +74,13 @@ esac
 
 # esptool: the python module if python3 has it, else the executable on PATH
 # (a pipx install), else the one in ESP-IDF's own python environment.
+# espsecure ships with esptool and is found the same way.
 if python3 -c 'import esptool' 2>/dev/null; then
   esptool=(python3 -m esptool)
+  espsecure=(python3 -m espsecure)
 elif command -v esptool >/dev/null; then
   esptool=(esptool)
+  espsecure=(espsecure)
 else
   idf_py=$(find "$tools" -path '*python_env*/bin/python' | head -1)
   if [ -z "$idf_py" ] || ! "$idf_py" -c 'import esptool' 2>/dev/null; then
@@ -81,6 +88,7 @@ else
     exit 1
   fi
   esptool=("$idf_py" -m esptool)
+  espsecure=("$idf_py" -m espsecure)
 fi
 
 # esp-idf-sys does not feed a crate's partitions.csv to the ESP-IDF build, so
@@ -116,6 +124,25 @@ fi
 "${esptool[@]}" --chip "$chip" elf2image \
     --flash-mode "$mode" --flash-freq "$freq" --flash-size "$size" \
     -o "$out/$stem.ota.bin" "$elf"
+
+# A firmware that requires signed apps (sdkconfig) takes only an image
+# with a Secure Boot v2 signature block, checked against the key of the
+# firmware already running: the block is appended here, with the key
+# EVO_SIGNING_KEY names. The same key must sign every image a player is
+# to accept after this one; a different key means a USB flash.
+if grep -q '^CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y' "$crate/sdkconfig.defaults"; then
+  key="${EVO_SIGNING_KEY:-}"
+  if [ -z "$key" ] || [ ! -f "$key" ]; then
+    echo "this firmware requires signed images: set EVO_SIGNING_KEY to an ECDSA P-256 PEM" >&2
+    echo "  (espsecure generate-signing-key --version 2 --scheme ecdsa256 key.pem; keep it out of the tree)" >&2
+    exit 1
+  fi
+  mv "$out/$stem.ota.bin" "$out/$stem.unsigned.bin"
+  "${espsecure[@]}" sign-data --version 2 --keyfile "$key" \
+      --output "$out/$stem.ota.bin" "$out/$stem.unsigned.bin" >/dev/null
+  rm -f "$out/$stem.unsigned.bin"
+  echo "app signed with $(basename "$key")"
+fi
 
 # The bootloader refuses an app longer than its partition; say so here, not
 # on the bench.

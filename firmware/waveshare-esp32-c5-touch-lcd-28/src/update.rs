@@ -53,9 +53,9 @@ use esp_idf_svc::io::{Read, Write};
 use esp_idf_svc::sys;
 use evo_esp32_update::lock::Lock;
 use evo_esp32_update::{
-    applied_name, image_identity, image_length, is_card_image, judge_head,
-    outcome_page, refused_name, short_id, Form, Framing, Slot, Status,
-    HEAD_LEN,
+    applied_name, image_identity, image_length, is_card_image, is_whole,
+    judge_head, outcome_page, refused_name, short_id, signature_block_at, Form,
+    Framing, Slot, Status, HEAD_LEN, SIGNATURE_MAGIC, SIGNATURE_SECTOR,
 };
 use log::{info, warn};
 
@@ -421,6 +421,11 @@ impl Writer {
         let ret = unsafe { sys::esp_ota_end(handle) };
         if ret != sys::ESP_OK {
             blank(target);
+            if ret == sys::ESP_ERR_OTA_VALIDATE_FAILED {
+                return Err(format!(
+                    "the image does not verify after {written} bytes: not signed with this player's key, or damaged"
+                ));
+            }
             return Err(format!(
                 "the image is not valid after {written} bytes: {}",
                 err(ret)
@@ -981,6 +986,21 @@ fn keep_as_factory() -> Result<usize, String> {
     };
     let size =
         image_length(read_at).map_err(|e| format!("the running image: {e}"))?;
+    // A signed image's block sits in the sector after it; the copy
+    // carries it, or the copy could neither be verified nor, running,
+    // accept a signed update.
+    let size = {
+        let at = signature_block_at(size);
+        let mut magic = [0u8; 1];
+        if at < slot
+            && read_at(at, &mut magic).is_ok()
+            && magic[0] == SIGNATURE_MAGIC
+        {
+            at + SIGNATURE_SECTOR
+        } else {
+            size
+        }
+    };
     if size > room {
         return Err("the running image is longer than the factory slot".into());
     }
@@ -1126,7 +1146,7 @@ pub fn on_card(root: &str) -> CardCheck {
         Ok(l) => l,
         Err(e) => return refuse(&path, &name, e.to_string()),
     };
-    if declared as u64 != size {
+    if !is_whole(size, declared) {
         return refuse(
             &path,
             &name,

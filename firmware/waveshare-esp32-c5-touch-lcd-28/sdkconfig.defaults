@@ -31,6 +31,20 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
 
+# An update must be signed. Every image carries a Secure Boot v2
+# signature block (ECDSA P-256, appended by scripts/image.sh with the
+# key EVO_SIGNING_KEY names); the running firmware accepts a new one
+# only if the block's key is the key of its own block. No eFuse is
+# burned: the bootloader does not verify, so the board stays flashable
+# over USB with anything, and a USB flash is how a player moves to a
+# firmware signed with another key. The images are signed here, not in
+# the ESP-IDF build, because the app is the Rust ELF, not ESP-IDF's.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_ECDSA_V2_SCHEME=y
+CONFIG_SECURE_BOOT_ECDSA_KEY_LEN_256_BITS=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
+
 # Board has 8 MB PSRAM, and the player leans on it: the album art, the
 # decoder's buffers, and the Wi-Fi driver's and LwIP's pools go there.
 # A board without PSRAM therefore panics at init (the log says so)

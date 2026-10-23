@@ -100,6 +100,29 @@ pub fn short_id(sha256: &[u8; 32]) -> String {
     sha256[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A signed image carries a Secure Boot v2 signature block in the
+/// 4 KB sector after the image, padded to a sector.
+pub const SIGNATURE_SECTOR: usize = 4096;
+/// The signature block's first byte.
+pub const SIGNATURE_MAGIC: u8 = 0xE7;
+
+/// Where the signature block of an image of `len` bytes sits.
+pub fn signature_block_at(len: usize) -> usize {
+    len.div_ceil(SIGNATURE_SECTOR) * SIGNATURE_SECTOR
+}
+
+/// The length of an image of `len` bytes with its signature block.
+pub fn signed_length(len: usize) -> usize {
+    signature_block_at(len) + SIGNATURE_SECTOR
+}
+
+/// Whether a file of `size` bytes is a whole copy of an image whose
+/// header declares `len` bytes: the image alone, or the image with a
+/// signature block.
+pub fn is_whole(size: u64, len: usize) -> bool {
+    size == len as u64 || size == signed_length(len) as u64
+}
+
 /// How many bytes of an upload are held back and judged before the
 /// flash is touched: the image header, the first segment's header and
 /// the descriptor's magic word. ESP-IDF's `esp_ota_begin` erases the
@@ -820,6 +843,17 @@ mod tests {
         let blank = [0xFFu8; HEAD_LEN];
         let why = judge_head(&blank).unwrap_err();
         assert!(why.contains("blank flash"), "{why}");
+    }
+
+    #[test]
+    fn a_signed_image_is_whole_with_its_block() {
+        assert_eq!(signature_block_at(4096), 4096);
+        assert_eq!(signature_block_at(4097), 8192);
+        assert_eq!(signed_length(4_410_624), 4_415_488);
+        assert!(is_whole(4_410_624, 4_410_624));
+        assert!(is_whole(4_415_488, 4_410_624));
+        assert!(!is_whole(4_410_000, 4_410_624));
+        assert!(!is_whole(4_419_584, 4_410_624));
     }
 
     #[test]
