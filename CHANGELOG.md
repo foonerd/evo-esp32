@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The card is the third way to update. One `<name>.ota.bin` in the
+  card's root is applied at boot, before anything plays: the face says
+  "Updating: do not switch off", the image is written to the free slot,
+  the file is renamed `<name>.ota.applied`, and the player restarts into
+  the new firmware on the same trial as an update from the page. A file
+  that is the firmware already running is marked applied without a
+  write; one that is not whole, or not an application image, or does
+  not verify, is renamed `.ota.refused` with the reason in
+  `evostatus.txt`; with more than one `.ota.bin` on the card none is
+  touched and the status says so.
+
+- A file that is not a firmware image costs nothing. The first bytes of
+  an upload are judged before the update slot is opened: ESP-IDF's
+  `esp_ota_begin` erases the previous firmware's boot record the moment
+  it is called, so an earlier build that opened the slot first and
+  judged after lost the "previous firmware, kept" to a wrong file (the
+  slot was then blanked as an unfinished write). Now a `.factory.bin`
+  is named as the likely mistake ("the .factory.bin is for USB; the
+  page takes the .ota.bin"), any other file is refused as not a
+  firmware image, the answer comes in a second or two however large the
+  file, and both slots stay as they were.
+
+- A main loop that stops turning restarts the player. The task watchdog
+  now panics after five seconds instead of printing register dumps for
+  ever with the panel frozen, and the panic leaves an ELF core dump of
+  every task in a `coredump` partition (256 KB, carved from the unused
+  `storage` region) for the bench to read back with the build's ELF.
+
 - Updates over the network. A player on the Wi-Fi serves a page at
   `http://<name>.local/` with the firmware in each of its three slots
   and a form that takes the release's `.ota.bin`: playback stops, the
@@ -30,7 +58,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The flash is laid out for it: three app slots of 5.3 MB (`factory`,
   `ota_0`, `ota_1`) below 16 MB, which is as far as the cache maps, and
-  `otadata` for the bootloader's choice; `scripts/image.sh` now writes
+  `otadata` for the bootloader's choice, `coredump` for a panic's dump;
+  `scripts/image.sh` now writes
   `<stem>.factory.bin`, the whole flash for USB, and `<stem>.ota.bin`,
   the app for the page, and the release carries both. A player on 0.1.6
   or earlier takes the USB flash once, as its table has no update slots;
