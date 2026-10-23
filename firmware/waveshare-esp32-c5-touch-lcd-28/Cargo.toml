@@ -30,6 +30,7 @@ anyhow = "1"
 # target, but the code it runs is this repository's.
 evo-esp32-config = { path = "../../distributions/config" }
 evo-esp32-face = { path = "../../distributions/face" }
+evo-esp32-update = { path = "../../distributions/update" }
 evo-esp32-platform-esp-idf = { path = "../../platform/esp-idf" }
 evo-esp32-queue = { path = "../../distributions/queue" }
 evo-esp32-sdk = { path = "../../sdk", features = ["std"] }
@@ -47,6 +48,15 @@ org-evoframework-delivery-null = { path = "../../plugins/org.evoframework.delive
 org-evoframework-multiroom-receiver = { path = "../../plugins/org.evoframework.multiroom.receiver" }
 org-evoframework-snapcast-receiver = { path = "../../plugins/org.evoframework.snapcast.receiver" }
 serde_json = { version = "1", default-features = false, features = ["alloc", "std"] }
+
+[features]
+# A firmware that never confirms itself after an update and is rolled
+# back by the bootloader half a minute in: the bench's proof that the
+# return path works. Never released.
+gate-test = []
+# A firmware whose page is locked as `bench`/`bench` when the card
+# names no web_user: the bench's proof of the lock. Never released.
+lock-test = []
 
 [build-dependencies]
 embuild = "0.33.5"

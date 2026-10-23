@@ -905,6 +905,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "evo-esp32-update"
+version = "0.1.6"
+dependencies = [
+ "md-5",
+]
+
+[[package]]
 name = "evo-esp32-volumio"
 version = "0.1.6"
 dependencies = [
@@ -932,6 +939,7 @@ dependencies = [
  "evo-esp32-queue",
  "evo-esp32-sdk",
  "evo-esp32-steward",
+ "evo-esp32-update",
  "evo-esp32-volumio",
  "log",
  "org-evoframework-delivery-null",

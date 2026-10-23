@@ -46,6 +46,7 @@ mod config;
 mod net;
 mod sink;
 mod threads;
+mod update;
 
 #[global_allocator]
 static ALLOC: alloc::Placed = alloc::Placed;
@@ -176,6 +177,8 @@ fn main() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
         env!("EVO_BUILD_ID")
     );
+    let (running_slot, standing) = update::standing();
+    info!("update: running from {running_slot}, {standing:?}");
 
     let Peripherals {
         i2c0,
@@ -446,6 +449,12 @@ fn main() -> anyhow::Result<()> {
     });
     // Why the last thing asked for did not play, for the status strip.
     let mut notice: Option<String> = None;
+    // An update in hand: playback stopped for it, the queue held.
+    let mut updating = false;
+    let (asks_tx, asks) = std::sync::mpsc::channel::<update::Ask>();
+    let mut page: Option<update::Page> = None;
+    let mut gate = update::Gate::new(standing);
+    let mut sink_seen = false;
     // A station named by `start` waits for the network before it is
     // asked for; a file does not.
     let mut start_when_up = false;
@@ -539,6 +548,13 @@ fn main() -> anyhow::Result<()> {
             face.layout().style.name(),
         ),
     ];
+    let mut status_head = status_head.to_vec();
+    status_head.extend(
+        update::status(&hostname, "")
+            .lines()
+            .into_iter()
+            .map(|l| format!("firmware {l}")),
+    );
     config.write_status(&status_head);
     // Album art, fetched beneath this task; the face shows it when it lands.
     let mut art =
@@ -577,12 +593,68 @@ fn main() -> anyhow::Result<()> {
     let mut touch_waits = 0u32;
     let mut turn_started = Instant::now();
     let mut turn_max = Duration::ZERO;
+    // The page's ask to stop, answered once the face shows it.
+    let mut update_ack: Option<std::sync::mpsc::Sender<()>> = None;
     loop {
         turn_max = turn_max.max(turn_started.elapsed());
         turn_started = Instant::now();
         // SAFETY: resets this task's entry; harmless if it has none.
         unsafe { sys::esp_task_wdt_reset() };
         let t = now();
+        // The page's asks: playback stops before the flash is written,
+        // the face says what is happening, and the loop then idles
+        // until it is over — while flash is erased the panel's bus
+        // crawls and every task that runs from flash waits anyway.
+        while let Ok(ask) = asks.try_recv() {
+            match ask {
+                update::Ask::Quiet(done) => {
+                    updating = true;
+                    if let Some(h) = current.take() {
+                        if let Err(e) = steward.release(h, t) {
+                            warn!("release {}: {e:?}", h.0);
+                        }
+                    }
+                    notice = Some("Updating: do not switch off".into());
+                    update_ack = Some(done);
+                    last_face = Instant::now() - FACE_TICK;
+                }
+                update::Ask::Restarting(slot) => {
+                    notice = Some(format!("Restarting into {slot}"));
+                }
+                update::Ask::Failed(why) => {
+                    notice = Some(format!("Update failed: {why}"));
+                    if std::mem::take(&mut updating) {
+                        current = advance(
+                            &mut steward,
+                            &mut queue,
+                            Step::Current,
+                            now(),
+                            wanted,
+                            &mut notice,
+                        );
+                        track_started = Instant::now();
+                    }
+                }
+                update::Ask::Done(what) => {
+                    notice = Some(what);
+                    if std::mem::take(&mut updating) {
+                        current = advance(
+                            &mut steward,
+                            &mut queue,
+                            Step::Current,
+                            now(),
+                            wanted,
+                            &mut notice,
+                        );
+                        track_started = Instant::now();
+                    }
+                }
+            }
+        }
+        if updating && update_ack.is_none() {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         let tick_started = Instant::now();
         let due = steward.tick(t);
         busy += tick_started.elapsed();
@@ -911,6 +983,18 @@ fn main() -> anyhow::Result<()> {
         // reach the sink while the card's track is short of lead too.
         if last_net.elapsed() >= FACE_TICK {
             last_net = Instant::now();
+            // A pending firmware is confirmed once the player has shown
+            // itself healthy, or rolled back when it has not in time.
+            if gate.pending() {
+                sink_seen |= lead.ms().is_some();
+                gate.observe(
+                    lit,
+                    sink_seen,
+                    card_tracks > 0,
+                    net.as_ref()
+                        .map(|n| matches!(n.state, net::State::Up { .. })),
+                );
+            }
             // A network source sending to this device takes the sink from
             // the queue; it comes back when the source stops.
             if rooms.custody.is_none() {
@@ -992,6 +1076,31 @@ fn main() -> anyhow::Result<()> {
                     }
                     if mdns.is_none() {
                         mdns = advertise(&hostname, &device_id, &identity);
+                    }
+                    if page.is_none() {
+                        let credentials = config
+                            .settings
+                            .web_user
+                            .as_deref()
+                            .zip(config.settings.web_password.as_deref())
+                            .filter(|(u, p)| !u.is_empty() && !p.is_empty());
+                        if credentials.is_none()
+                            && (config.settings.web_user.is_some()
+                                || config.settings.web_password.is_some())
+                        {
+                            warn!("update: the page is open: web_user and web_password must both be set to lock it");
+                        }
+                        #[cfg(feature = "lock-test")]
+                        let credentials =
+                            credentials.or(Some(("bench", "bench")));
+                        match update::Page::start(
+                            &hostname,
+                            asks_tx.clone(),
+                            credentials,
+                        ) {
+                            Ok(p) => page = Some(p),
+                            Err(e) => warn!("update: no page: {e}"),
+                        }
                     }
                     // The server the card names is dialled once the
                     // link is up; with none named, the network is asked.
@@ -1194,6 +1303,13 @@ fn main() -> anyhow::Result<()> {
             }
             let before_paint = last_face.elapsed();
             let painted = face.refresh(&mut board.panel, &state);
+            if let Some(done) = update_ack.take() {
+                // The whole face with the notice, then the page may write.
+                if let Err(e) = face.refresh_whole(&mut board.panel, &state) {
+                    warn!("panel: {e:?}");
+                }
+                let _ = done.send(());
+            }
             let took = last_face.elapsed();
             if took >= LONG_TURN {
                 info!(
@@ -1298,6 +1414,10 @@ fn main() -> anyhow::Result<()> {
                 if room_took_the_sink {
                     // The decoder let go for the room; nothing moves on.
                     room_took_the_sink = false;
+                    continue;
+                }
+                if updating {
+                    // Stopped for an update; the queue holds its place.
                     continue;
                 }
                 // A station that ends on its own (the fetcher gave up on
@@ -2130,15 +2250,22 @@ fn advertise(
         let txt: Vec<(&str, &str)> =
             txt.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         m.add_service(volumio::SERVICE, "_tcp", volumio::PORT, &txt)?;
+        m.add_service(
+            "_http",
+            "_tcp",
+            update::PORT,
+            &[("path", "/"), ("vendor", "evo-esp32")],
+        )?;
         Ok(m)
     });
     match started {
         Ok(m) => {
             info!(
-                "mdns: {hostname}.local, _evo._tcp on port {} as {device_id}, {}._tcp on port {}",
+                "mdns: {hostname}.local, _evo._tcp on port {} as {device_id}, {}._tcp on port {}, _http._tcp on port {}",
                 org_evoframework_multiroom_receiver::CONTROL_PORT,
                 volumio::SERVICE,
-                volumio::PORT
+                volumio::PORT,
+                update::PORT
             );
             Some(m)
         }
