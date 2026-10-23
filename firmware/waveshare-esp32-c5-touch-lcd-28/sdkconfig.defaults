@@ -6,13 +6,20 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
 CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
 
-# The board's flash is 32 MB and the C5's MMU reaches all of it (512
-# pages of 64 KB). partitions.csv lays it out (one 8 MB app for now);
-# scripts/image.sh generates the table from it, as esp-idf-sys does not
-# pass a crate's CSV to the ESP-IDF build. The stock table named here is
-# a stand-in for that build only.
+# The board's flash is 32 MB; the cache maps the first 16 MB of it (the
+# option for more is experimental), so partitions.csv keeps every app
+# slot below 16 MB (factory, ota_0, ota_1) and the data above (otadata,
+# storage); scripts/image.sh generates the table from it, as esp-idf-sys
+# does not pass a crate's CSV to the ESP-IDF build. The stock table named
+# here is a stand-in for that build only.
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# An update boots once as "pending": the firmware marks it valid after a
+# healthy start (panel lit, card listed, the loop turning, the sink
+# opened), else the bootloader returns to the slot it came from on the
+# next reset.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # Board has 8 MB PSRAM, and the player leans on it: the album art, the
 # decoder's buffers, and the Wi-Fi driver's and LwIP's pools go there.

@@ -85,22 +85,41 @@ fi
 
 # esp-idf-sys does not feed a crate's partitions.csv to the ESP-IDF build, so
 # the table in flasher_args.json is ESP-IDF's default. A crate that ships its
-# own partitions.csv gets it generated here with ESP-IDF's own tool.
+# own partitions.csv gets it generated here with ESP-IDF's own tool, and the
+# app goes where that table puts its factory slot (the first app slot when
+# there is no factory), not where ESP-IDF's default would.
 if [ -f "$crate/partitions.csv" ]; then
   gen=$(find "$tools" -name gen_esp32part.py | head -1)
   [ -n "$gen" ] || { echo "gen_esp32part.py not found under $tools" >&2; exit 1; }
   python3 "$gen" -q "$crate/partitions.csv" "$out/$stem-partition-table.bin"
+  app_off=$(python3 -I - "$out/$stem-partition-table.bin" <<'PY'
+import struct, sys
+table = open(sys.argv[1], "rb").read()
+first = None
+for i in range(0, len(table), 32):
+    e = table[i:i+32]
+    if e[:2] != b"\xaa\x50":
+        break
+    typ, sub, off = e[2], e[3], struct.unpack("<I", e[4:8])[0]
+    if typ == 0 and sub == 0:
+        print(hex(off)); sys.exit(0)
+    if typ == 0 and first is None:
+        first = off
+print(hex(first) if first is not None else "")
+PY
+)
+  [ -n "$app_off" ] || { echo "partitions.csv has no app partition" >&2; exit 1; }
 else
   cp "$build/$pt_file" "$out/$stem-partition-table.bin"
 fi
 
 "${esptool[@]}" --chip "$chip" elf2image \
     --flash-mode "$mode" --flash-freq "$freq" --flash-size "$size" \
-    -o "$out/$stem-app.bin" "$elf"
+    -o "$out/$stem.ota.bin" "$elf"
 
 # The bootloader refuses an app longer than its partition; say so here, not
 # on the bench.
-read -r app_size app_cap < <(python3 -I - "$out/$stem-app.bin" "$out/$stem-partition-table.bin" "$app_off" <<'PY'
+read -r app_size app_cap < <(python3 -I - "$out/$stem.ota.bin" "$out/$stem-partition-table.bin" "$app_off" <<'PY'
 import struct, sys, os
 app = os.path.getsize(sys.argv[1])
 table = open(sys.argv[2], "rb").read()
@@ -122,17 +141,20 @@ if [ "$app_size" -gt "$app_cap" ]; then
 fi
 echo "app $app_size bytes in a $app_cap byte partition"
 
-"${esptool[@]}" --chip "$chip" merge-bin -o "$out/$stem.bin" \
+# Two images: `.factory.bin` is the whole flash from 0x0 (bootloader,
+# table, the app in the factory slot) for USB; `.ota.bin` is the app alone,
+# what the player takes over the air, from the card, or from the page.
+"${esptool[@]}" --chip "$chip" merge-bin -o "$out/$stem.factory.bin" \
     --flash-mode "$mode" --flash-freq "$freq" --flash-size "$size" \
     "$boot_off" "$out/$stem-bootloader.bin" \
     "$pt_off" "$out/$stem-partition-table.bin" \
-    "$app_off" "$out/$stem-app.bin"
+    "$app_off" "$out/$stem.ota.bin"
 
 # The firmware carries `build:<git describe>` and logs it at boot. The image
 # must carry this tree's id, or it is some other build and must not be
 # flashed as this one.
 want="build:$(git describe --always --dirty --tags 2>/dev/null || echo unknown)"
-if grep -q -a -F -- "$want" "$out/$stem.bin"; then
+if grep -q -a -F -- "$want" "$out/$stem.ota.bin"; then
   echo "image carries $want"
 else
   echo "image does not carry $want: it is not a build of this tree" >&2
@@ -140,4 +162,5 @@ else
 fi
 
 (cd "$out" && sha256sum "$stem"*.bin | tee "$stem.SHA256SUMS")
-echo "flash: esptool --chip $chip --port <PORT> write-flash 0x0 dist/$stem.bin"
+echo "flash (USB, the whole flash): esptool --chip $chip --port <PORT> write-flash 0x0 dist/$stem.factory.bin"
+echo "update (over the air):        scripts/push.sh <player> dist/$stem.ota.bin"

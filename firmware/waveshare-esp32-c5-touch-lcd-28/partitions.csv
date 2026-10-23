@@ -1,7 +1,20 @@
-# Name,     Type, SubType, Offset,   Size, Flags
-# 32 MB of flash (sdkconfig.defaults). One 8 MB app, the rest unallocated
-# for what comes (an update pair, data). NVS keeps the Wi-Fi hint; its
-# offset stays where it has been so a new table keeps it.
-nvs,        data, nvs,     0x9000,   0x6000,
-phy_init,   data, phy,     0xF000,   0x1000,
-factory,    app,  factory, 0x10000,  8M,
+# Name,     Type, SubType, Offset,    Size, Flags
+# 32 MB of flash (sdkconfig.defaults). Three app slots of 5.3 MB, all
+# below 16 MB: the cache maps 24-bit flash addresses only, and the option
+# that lifts that is experimental (Espressif: not stable on every chip),
+# so an app above 16 MB can neither be verified nor booted; data is read
+# through the flash driver and may sit above. `factory` is what USB
+# flashes and what the bootloader falls back to when both update slots
+# fail (and what a user may later keep a proven firmware in); an update
+# is written to whichever of ota_0/ota_1 is not running; otadata says
+# which boots and whether it is confirmed. NVS keeps the Wi-Fi hint; its
+# offset stays where it has been so a new table keeps it. storage is for
+# what the player caches (logos, a directory). scripts/image.sh refuses
+# an app larger than its slot; the app is 4.35 MB at 0.1.6.
+nvs,        data, nvs,     0x9000,    0x6000,
+otadata,    data, ota,     0xF000,    0x2000,
+phy_init,   data, phy,     0x11000,   0x1000,
+factory,    app,  factory, 0x20000,   0x540000,
+ota_0,      app,  ota_0,   0x560000,  0x550000,
+ota_1,      app,  ota_1,   0xAB0000,  0x550000,
+storage,    data, fat,     0x1000000, 0x1000000,
