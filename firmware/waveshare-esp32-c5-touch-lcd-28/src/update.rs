@@ -110,7 +110,7 @@ const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 /// begun with less, under a 96 kHz FLAC, took internal memory to 9.9 KB
 /// and the SD driver crashed on a failed allocation (core dump,
 /// 2026-10-23). Below the floor the look waits.
-const CHECK_FLOOR: usize = 26 * 1024;
+const CHECK_FLOOR: usize = 24 * 1024;
 /// How long a look waits for the floor before asking again.
 const DEFER_FOR: Duration = Duration::from_secs(10 * 60);
 /// A tap on the row arms the install; a second within this applies it.
