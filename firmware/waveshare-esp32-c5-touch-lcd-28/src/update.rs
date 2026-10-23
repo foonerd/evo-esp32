@@ -245,6 +245,9 @@ pub fn standing() -> (String, Standing) {
         }
         if verifies(p) {
             info!("update: {} holds a whole image the bootloader has no record of; kept", label(p));
+        } else if signed_whole(p) {
+            info!("update: {} holds a whole image signed with another key; blanked", label(p));
+            blank(p);
         } else {
             info!("update: {} holds an unfinished write; blanked", label(p));
             blank(p);
@@ -286,6 +289,42 @@ fn verifies(p: *const sys::esp_partition_t) -> bool {
         )
     };
     ret == sys::ESP_OK
+}
+
+/// A reader of the slot `p` for the image-geometry helpers: bytes at an
+/// offset, refused past the slot's end.
+fn slot_reader(
+    p: *const sys::esp_partition_t,
+) -> impl Fn(usize, &mut [u8]) -> std::io::Result<()> {
+    // SAFETY: a table entry.
+    let slot = unsafe { (*p).size } as usize;
+    move |at: usize, buf: &mut [u8]| {
+        if at + buf.len() > slot {
+            return Err(std::io::Error::other("past the slot"));
+        }
+        // SAFETY: `buf` holds its length; `at + len` is within the slot.
+        let ret = unsafe {
+            sys::esp_partition_read(p, at, buf.as_mut_ptr().cast(), buf.len())
+        };
+        if ret == sys::ESP_OK {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(err(ret)))
+        }
+    }
+}
+
+/// Whether `p` holds an image whose segments are all there and a
+/// signature block after them: whole, then, and refused by
+/// [`verifies`] for its key rather than for a write that stopped.
+fn signed_whole(p: *const sys::esp_partition_t) -> bool {
+    let read_at = slot_reader(p);
+    let Ok(len) = image_length(&read_at) else {
+        return false;
+    };
+    let mut magic = [0u8; 1];
+    read_at(signature_block_at(len), &mut magic).is_ok()
+        && magic[0] == SIGNATURE_MAGIC
 }
 
 /// Return to the factory copy: the bootloader's records of the update
@@ -1176,27 +1215,9 @@ fn keep_as_factory() -> Result<usize, String> {
     }
     let slot = unsafe { (*running).size } as usize;
     let room = unsafe { (*factory).size } as usize;
-    let read_at = |at: usize, buf: &mut [u8]| -> std::io::Result<()> {
-        if at + buf.len() > slot {
-            return Err(std::io::Error::other("past the slot"));
-        }
-        // SAFETY: `buf` holds its length; `at + len` is within the slot.
-        let ret = unsafe {
-            sys::esp_partition_read(
-                running,
-                at,
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-            )
-        };
-        if ret == sys::ESP_OK {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(err(ret)))
-        }
-    };
-    let size =
-        image_length(read_at).map_err(|e| format!("the running image: {e}"))?;
+    let read_at = slot_reader(running);
+    let size = image_length(&read_at)
+        .map_err(|e| format!("the running image: {e}"))?;
     // A signed image's block sits in the sector after it; the copy
     // carries it, or the copy could neither be verified nor, running,
     // accept a signed update.
