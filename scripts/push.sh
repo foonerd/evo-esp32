@@ -60,10 +60,20 @@ fi
 [ -f "$image" ] || { echo "no such image: $image" >&2; exit 1; }
 
 # The status first: a locked page refuses here, before 4 MB are sent.
-before=$("${curl[@]}" "http://$player/status") || {
-  [ -n "$user" ] || echo "the page is locked: pass --user NAME (web_user on the card)" >&2
+code=0
+before=$("${curl[@]}" --write-out '\n%{http_code}' "http://$player/status") || code=$?
+http=${before##*$'\n'}
+before=${before%$'\n'*}
+if [ "$code" -ne 0 ]; then
+  if [ "$http" = "401" ] && [ -z "$user" ]; then
+    echo "the page is locked: pass --user NAME (web_user on the card)" >&2
+  elif [ "$http" = "401" ]; then
+    echo "the page refused the name or the password" >&2
+  else
+    echo "no answer from $player (curl exit $code${http:+, HTTP $http})" >&2
+  fi
   exit 1
-}
+fi
 echo "before: $(echo "$before" | head -1)"
 echo "sending $(basename "$image") ($(stat -c %s "$image") bytes) to $player"
 "${curl[@]}" -X POST -H 'Content-Type: application/octet-stream' \
