@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Updates are signed. Every image carries a Secure Boot v2 signature
+  block (ECDSA P-256), appended by `scripts/image.sh` with the key
+  `EVO_SIGNING_KEY` names, and the running firmware accepts a new image
+  only if it was signed with the key of its own block: a file that is
+  unsigned, signed with another key or changed in transit is refused
+  after the write ("not signed with this player's key, or damaged") and
+  the slot blanked. No eFuse is burned: the bootloader does not verify,
+  so the board stays flashable over USB, and a USB flash is how a player
+  moves to a firmware signed with another key. Releases are signed with
+  the release key held in CI; a factory copy carries the block with it.
+
 - A 96 kHz FLAC from the card no longer runs dry after a few hours up.
   The card's reader needs an 8 KB buffer in memory the card's DMA can
   reach; it was allocated at every track's start, and once internal
