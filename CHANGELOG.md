@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A 96 kHz FLAC from the card no longer runs dry after a few hours up.
+  The card's reader needs an 8 KB buffer in memory the card's DMA can
+  reach; it was allocated at every track's start, and once internal
+  memory had fragmented behind the network, the update page's server
+  and hours of tracks the allocation failed into ordinary memory, where
+  the driver copies every block through a bounce buffer: the reader at
+  a third of the core instead of a tenth, and the music breaking up
+  (955 dry runs in five minutes, measured). The buffer is now set aside
+  three seconds into boot, before anything else can claim it, and lent
+  to each track in turn. The heartbeat names the DMA-capable largest
+  free block and warns while any reader is without it.
+
 - The card is the third way to update. One `<name>.ota.bin` in the
   card's root is applied at boot, before anything plays: the face says
   "Updating: do not switch off", the image is written to the free slot,
