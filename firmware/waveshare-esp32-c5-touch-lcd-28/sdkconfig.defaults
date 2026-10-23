@@ -21,6 +21,16 @@ CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 # next reset.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
+# The main loop feeds the task watchdog every turn. A loop that stops
+# turning for five seconds is a dead player; it panics and restarts
+# instead of standing dead, and the panic leaves an ELF core dump of
+# every task in the `coredump` partition (partitions.csv) for the bench
+# to read back (esp-coredump, with the build's ELF).
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
+
 # Board has 8 MB PSRAM, and the player leans on it: the album art, the
 # decoder's buffers, and the Wi-Fi driver's and LwIP's pools go there.
 # A board without PSRAM therefore panics at init (the log says so)
