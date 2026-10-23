@@ -48,7 +48,13 @@ where
     let mut at = HEADER;
     for _ in 0..segments {
         let mut seg = [0u8; SEGMENT_HEADER];
-        read_at(at, &mut seg)?;
+        read_at(at, &mut seg).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                bad("the file ends before the image does: not a whole copy")
+            } else {
+                e
+            }
+        })?;
         let len = u32::from_le_bytes([seg[4], seg[5], seg[6], seg[7]]) as usize;
         at = at
             .checked_add(SEGMENT_HEADER + len)
@@ -846,6 +852,23 @@ mod tests {
             Ok(())
         })
         .is_err());
+        // A copy cut short inside the segments says so plainly.
+        let cut = &slot[..HEADER + SEGMENT_HEADER + 50];
+        let short = image_length(|at, buf| {
+            if at + buf.len() > cut.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                ));
+            }
+            buf.copy_from_slice(&cut[at..at + buf.len()]);
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(
+            short.to_string(),
+            "the file ends before the image does: not a whole copy"
+        );
     }
 
     #[test]

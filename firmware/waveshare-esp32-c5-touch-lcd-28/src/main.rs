@@ -515,12 +515,21 @@ fn main() -> anyhow::Result<()> {
     let mut wanted = start_level;
     // An image on the card is applied before anything plays: the queue
     // holds, the face says so, and the player restarts into the new
-    // firmware — or plays on if the image is refused.
+    // firmware — or plays on if the image is refused, the panel saying
+    // what became of it.
+    let mut card_note: Option<(&str, String)> = None;
     let mut card_update = match update::on_card(MUSIC) {
         update::CardCheck::Nothing => false,
+        update::CardCheck::Current(line) => {
+            info!("update: {line}");
+            config.note(format!("update: {line}"));
+            card_note = Some(("Done", line));
+            false
+        }
         update::CardCheck::Skip(line) => {
             info!("update: {line}");
             config.note(format!("update: {line}"));
+            card_note = Some(("Update failed", line));
             false
         }
         update::CardCheck::Apply(image) => {
@@ -578,6 +587,12 @@ fn main() -> anyhow::Result<()> {
     let theme = config.theme(theme::EVO_DEFAULT);
     let style = config.style(Style::Disc);
     let mut face = Face::new(rotation, style, theme);
+    if let Some((heading, line)) = card_note.take() {
+        face.set_message(Some(Message::new(
+            heading,
+            format!("{line}. Tap to go on."),
+        )));
+    }
     memory("after the face");
     if config.settings.dac.is_some() || config.settings.output.is_some() {
         config.note("dac, output: read; this firmware plays the speaker and a HAT both and has no register of boards yet");
@@ -1539,6 +1554,15 @@ fn main() -> anyhow::Result<()> {
                         longest_stage.as_millis()
                     );
                     if !lit {
+                        if face.message().is_some() {
+                            // A message set before the first frame (the
+                            // card's verdict) is on the panel as it lights.
+                            if let Err(e) =
+                                face.refresh_whole(&mut board.panel, &state)
+                            {
+                                warn!("panel: {e:?}");
+                            }
+                        }
                         board.backlight(BACKLIGHT_PERCENT)?;
                         lit = true;
                         info!(

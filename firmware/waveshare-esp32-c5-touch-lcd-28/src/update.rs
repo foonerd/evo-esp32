@@ -1324,6 +1324,8 @@ pub enum CardCheck {
     Nothing,
     /// One image, whole and not the firmware running: to apply.
     Apply(CardImage),
+    /// The image is the firmware running; marked applied.
+    Current(String),
     /// An image that is not applied, and why; renamed where that is
     /// the rule.
     Skip(String),
@@ -1392,12 +1394,9 @@ pub fn on_card(root: &str) -> CardCheck {
         Err(e) => return refuse(&path, &name, e.to_string()),
     };
     if Some(identity) == running_identity() {
-        let to = path.with_file_name(applied_name(&name));
-        if let Err(e) = std::fs::rename(&path, &to) {
-            warn!("update: could not rename {name}: {e}");
-        }
-        return CardCheck::Skip(format!(
-            "{name} is the firmware running; marked applied"
+        return CardCheck::Current(format!(
+            "{name} is the firmware running; {}",
+            set_aside(&path, &applied_name(&name))
         ));
     }
     CardCheck::Apply(CardImage { name, path })
@@ -1405,11 +1404,30 @@ pub fn on_card(root: &str) -> CardCheck {
 
 /// Rename a card image that is not to be applied and say why.
 fn refuse(path: &Path, name: &str, why: String) -> CardCheck {
-    let to = path.with_file_name(refused_name(name));
-    if let Err(e) = std::fs::rename(path, &to) {
-        warn!("update: could not rename {name}: {e}");
+    CardCheck::Skip(format!(
+        "{name} refused: {why}; {}",
+        set_aside(path, &refused_name(name))
+    ))
+}
+
+/// Rename the card's image to `to` beside it, in place of any earlier
+/// file of that name (FAT refuses a rename onto one), so it is not
+/// judged again at the next boot; what happened, for the status line.
+fn set_aside(path: &Path, to: &str) -> String {
+    let target = path.with_file_name(to);
+    let outcome = match std::fs::remove_file(&target) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
-    CardCheck::Skip(format!("{name} refused: {why}; renamed .ota.refused"))
+    .and_then(|()| std::fs::rename(path, &target));
+    match outcome {
+        Ok(()) => format!("renamed {to}"),
+        Err(e) => {
+            warn!("update: could not rename to {to}: {e}");
+            format!("could not be renamed {to} ({e}); remove it from the card")
+        }
+    }
 }
 
 /// The running image's ELF sha256, from its descriptor.
@@ -1462,12 +1480,10 @@ pub fn apply_from_card(
                 });
             match outcome {
                 Ok((slot, bytes)) => {
-                    let to = image.path.with_file_name(applied_name(&image.name));
-                    if let Err(e) = std::fs::rename(&image.path, &to) {
-                        warn!("update: could not rename {}: {e}", image.name);
-                    }
+                    let renamed =
+                        set_aside(&image.path, &applied_name(&image.name));
                     info!(
-                        "update: written {bytes} bytes from the card's {} to {slot} in {} s; restarting into it",
+                        "update: written {bytes} bytes from the card's {} to {slot} in {} s ({renamed}); restarting into it",
                         image.name,
                         began.elapsed().as_secs()
                     );
@@ -1475,13 +1491,11 @@ pub fn apply_from_card(
                     restart_soon();
                 }
                 Err(why) => {
-                    let to = image.path.with_file_name(refused_name(&image.name));
-                    if let Err(e) = std::fs::rename(&image.path, &to) {
-                        warn!("update: could not rename {}: {e}", image.name);
-                    }
+                    let renamed =
+                        set_aside(&image.path, &refused_name(&image.name));
                     warn!("update: the card's {}: {why}", image.name);
                     let _ = asks.send(Ask::Failed(format!(
-                        "the card's {}: {why}; renamed .ota.refused",
+                        "the card's {}: {why}; {renamed}",
                         image.name
                     )));
                 }
