@@ -61,6 +61,107 @@ where
     Ok(at)
 }
 
+/// Where the application descriptor sits in an image: after the image
+/// header and the first segment's header.
+const DESCRIPTOR_AT: usize = HEADER + SEGMENT_HEADER;
+/// The descriptor's magic word, `ESP_APP_DESC_MAGIC_WORD`.
+const DESCRIPTOR_MAGIC: [u8; 4] = 0xABCD_5432u32.to_le_bytes();
+/// The ELF's SHA-256 within the descriptor: after the magic, the secure
+/// version, two reserved words, and the version, project, time, date
+/// and IDF strings.
+const ELF_SHA_AT: usize = 4 + 4 + 8 + 32 + 32 + 16 + 16 + 32;
+
+/// The SHA-256 of the ELF an image was made from, read through
+/// `read_at` as [`image_length`] reads. esptool stamps it into the
+/// descriptor; two builds of one version differ here when nothing
+/// else tells.
+pub fn image_identity<F>(mut read_at: F) -> io::Result<[u8; 32]>
+where
+    F: FnMut(usize, &mut [u8]) -> io::Result<()>,
+{
+    let mut first = [0u8; 1];
+    read_at(0, &mut first)?;
+    if first[0] != IMAGE_MAGIC {
+        return Err(bad("not an application image"));
+    }
+    let mut magic = [0u8; 4];
+    read_at(DESCRIPTOR_AT, &mut magic)?;
+    if magic != DESCRIPTOR_MAGIC {
+        return Err(bad("no application descriptor"));
+    }
+    let mut sha = [0u8; 32];
+    read_at(DESCRIPTOR_AT + ELF_SHA_AT, &mut sha)?;
+    Ok(sha)
+}
+
+/// The short form of an image's identity for the page and the status
+/// lines: the first four bytes of its ELF SHA-256 as hex.
+pub fn short_id(sha256: &[u8; 32]) -> String {
+    sha256[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// How many bytes of an upload are held back and judged before the
+/// flash is touched: the image header, the first segment's header and
+/// the descriptor's magic word. ESP-IDF's `esp_ota_begin` erases the
+/// previous firmware's boot record the moment it is called, so it must
+/// not be called for a file that is not an application image.
+pub const HEAD_LEN: usize = DESCRIPTOR_AT + 4;
+
+/// Whether the first [`HEAD_LEN`] bytes of an upload are an application
+/// image's: the image magic, then the descriptor's magic word where the
+/// descriptor sits. A whole-flash image (`.factory.bin`) starts with the
+/// bootloader, which has the image magic but not the descriptor; it is
+/// named, as the likeliest mistake.
+pub fn judge_head(head: &[u8]) -> Result<(), String> {
+    if head.len() < HEAD_LEN {
+        return Err("not a firmware image".into());
+    }
+    if head.iter().all(|&b| b == 0xFF) {
+        return Err("the file starts with blank flash: the .factory.bin is for USB; the page takes the .ota.bin".into());
+    }
+    if head[0] != IMAGE_MAGIC {
+        return Err("not a firmware image".into());
+    }
+    if head[DESCRIPTOR_AT..DESCRIPTOR_AT + 4] != DESCRIPTOR_MAGIC {
+        return Err("not an application image (the .factory.bin is for USB; the page takes the .ota.bin)".into());
+    }
+    Ok(())
+}
+
+/// The suffix of an image file on the card, as `scripts/image.sh`
+/// names it; matched without regard to case, as FAT keeps names.
+pub const CARD_SUFFIX: &str = ".ota.bin";
+
+/// Whether a file name on the card's root is an image to apply.
+pub fn is_card_image(name: &str) -> bool {
+    name.len() > CARD_SUFFIX.len()
+        && name
+            .get(name.len() - CARD_SUFFIX.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(CARD_SUFFIX))
+}
+
+/// The name an applied image file is given, so the next boot does not
+/// apply it again and the owner sees it went: `x.ota.bin` →
+/// `x.ota.applied`.
+pub fn applied_name(name: &str) -> String {
+    renamed(name, "applied")
+}
+
+/// The name a refused image file is given: `x.ota.bin` →
+/// `x.ota.refused`; the status file says why.
+pub fn refused_name(name: &str) -> String {
+    renamed(name, "refused")
+}
+
+fn renamed(name: &str, outcome: &str) -> String {
+    let stem = if is_card_image(name) {
+        &name[..name.len() - 4]
+    } else {
+        name
+    };
+    format!("{stem}.{outcome}")
+}
+
 /// How a request carries the image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Framing {
@@ -678,6 +779,64 @@ mod tests {
             Ok(())
         })
         .is_err());
+    }
+
+    #[test]
+    fn the_image_identity_is_the_descriptors_elf_sha() {
+        // An image whose first segment opens with the descriptor.
+        let mut img = vec![0u8; HEADER];
+        img[0] = IMAGE_MAGIC;
+        img[1] = 1;
+        img.extend_from_slice(&0x4200_0000u32.to_le_bytes());
+        img.extend_from_slice(&256u32.to_le_bytes());
+        let mut desc = vec![0u8; 256];
+        desc[..4].copy_from_slice(&DESCRIPTOR_MAGIC);
+        let sha: Vec<u8> = (0x48u8..0x68).collect();
+        desc[ELF_SHA_AT..ELF_SHA_AT + 32].copy_from_slice(&sha);
+        img.extend_from_slice(&desc);
+        let read = |at: usize, buf: &mut [u8]| {
+            buf.copy_from_slice(&img[at..at + buf.len()]);
+            Ok(())
+        };
+        let got = image_identity(read).unwrap();
+        assert_eq!(&got[..], &sha[..]);
+        assert_eq!(short_id(&got), "48494a4b");
+        let mut plain = img.clone();
+        plain[DESCRIPTOR_AT] = 0;
+        assert!(image_identity(|at, buf: &mut [u8]| {
+            buf.copy_from_slice(&plain[at..at + buf.len()]);
+            Ok(())
+        })
+        .is_err());
+        // The head alone decides before any flash is touched.
+        assert_eq!(judge_head(&img[..HEAD_LEN]), Ok(()));
+        assert!(judge_head(&img[..HEAD_LEN - 1]).is_err());
+        assert!(
+            judge_head(b"PK\x03\x04 not an image at all, some bytes more")
+                .is_err()
+        );
+        let why = judge_head(&plain[..HEAD_LEN]).unwrap_err();
+        assert!(why.contains(".factory.bin"), "{why}");
+        let blank = [0xFFu8; HEAD_LEN];
+        let why = judge_head(&blank).unwrap_err();
+        assert!(why.contains("blank flash"), "{why}");
+    }
+
+    #[test]
+    fn card_images_are_named_by_suffix_and_renamed_by_outcome() {
+        assert!(is_card_image("evo-esp32-board-0.2.0.ota.bin"));
+        assert!(is_card_image("FIRMWARE.OTA.BIN"));
+        assert!(!is_card_image(".ota.bin"));
+        assert!(!is_card_image("evo-esp32-board-0.2.0.factory.bin"));
+        assert!(!is_card_image("evo-esp32-board-0.2.0.ota.applied"));
+        assert_eq!(
+            applied_name("evo-esp32-board-0.2.0.ota.bin"),
+            "evo-esp32-board-0.2.0.ota.applied"
+        );
+        assert_eq!(
+            refused_name("evo-esp32-board-0.2.0.ota.bin"),
+            "evo-esp32-board-0.2.0.ota.refused"
+        );
     }
 
     #[test]

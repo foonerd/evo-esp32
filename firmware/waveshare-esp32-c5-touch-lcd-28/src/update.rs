@@ -26,13 +26,25 @@
 //! Playback is stopped before the flash is written — the erase of each
 //! 64 KB block stalls every task that runs from flash — and the face says
 //! what is happening.
+//!
+//! The card is the third way in: one `*.ota.bin` in its root is applied
+//! at boot, before anything plays, through the same writer and the same
+//! trial — then renamed `.ota.applied`, so the next boot (and the boot
+//! after a rollback) leaves it be. A file that is the running firmware
+//! already, or is not whole, or does not verify, is renamed
+//! `.ota.refused` with the reason in the status file; with more than one
+//! such file on the card none is touched.
 
 use std::ffi::CStr;
 use std::fmt::Write as _;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
+use esp_idf_svc::handle::RawHandle;
 use esp_idf_svc::http::server::{
     Configuration, EspHttpConnection, EspHttpServer, Request,
 };
@@ -41,7 +53,9 @@ use esp_idf_svc::io::{Read, Write};
 use esp_idf_svc::sys;
 use evo_esp32_update::lock::Lock;
 use evo_esp32_update::{
-    image_length, outcome_page, Form, Framing, Slot, Status, IMAGE_MAGIC,
+    applied_name, image_identity, image_length, is_card_image, judge_head,
+    outcome_page, refused_name, short_id, Form, Framing, Slot, Status,
+    HEAD_LEN,
 };
 use log::{info, warn};
 
@@ -145,11 +159,7 @@ fn described(p: *const sys::esp_partition_t) -> (String, String) {
             .to_string_lossy()
             .into_owned()
     };
-    let id = desc.app_elf_sha256[..4]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    (version, id)
+    (version, short_id(&desc.app_elf_sha256))
 }
 
 /// The three slots, factory first.
@@ -388,9 +398,6 @@ impl Writer {
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-        if self.written == 0 && bytes.first() != Some(&IMAGE_MAGIC) {
-            return Err("not a firmware image".into());
-        }
         // SAFETY: `bytes` lives for the call; the handle is open.
         let ret = unsafe {
             sys::esp_ota_write(self.handle, bytes.as_ptr().cast(), bytes.len())
@@ -764,21 +771,39 @@ fn reply(
     back_in: Option<u32>,
 ) -> anyhow::Result<()> {
     let code = if ok { 200 } else { 400 };
-    if browser {
-        let page = outcome_page(name, headline, detail, ok, back_in);
-        let mut resp = req.into_response(
-            code,
-            None,
-            &[("Content-Type", "text/html; charset=utf-8")],
-        )?;
-        resp.write_all(page.as_bytes())?;
+    let (kind, body) = if browser {
+        (
+            "text/html; charset=utf-8",
+            outcome_page(name, headline, detail, ok, back_in),
+        )
     } else {
-        let mut resp = req.into_response(
-            code,
-            None,
-            &[("Content-Type", "text/plain; charset=utf-8")],
-        )?;
-        resp.write_all(format!("{headline}: {detail}\n").as_bytes())?;
+        (
+            "text/plain; charset=utf-8",
+            format!("{headline}: {detail}\n"),
+        )
+    };
+    let headers: &[(&str, &str)] = if ok {
+        &[("Content-Type", kind)]
+    } else {
+        &[("Content-Type", kind), ("Connection", "close")]
+    };
+    let mut resp = req.into_response(code, None, headers)?;
+    resp.write_all(body.as_bytes())?;
+    if !ok {
+        // The server would otherwise read and discard the rest of a
+        // refused upload before serving anyone else: megabytes, tens of
+        // seconds. The receiving side is shut; the answer still goes out
+        // whole (the framework closes the chunked body after this
+        // returns), then the server's purge reads nothing and ends the
+        // session. Shutting the sending side here would cut the answer.
+        let raw = resp.connection().handle();
+        // SAFETY: `raw` is the live request; the fd is its socket.
+        unsafe {
+            let fd = sys::httpd_req_to_sockfd(raw);
+            if fd >= 0 {
+                sys::lwip_shutdown(fd, sys::SHUT_RD as i32);
+            }
+        }
     }
     Ok(())
 }
@@ -792,26 +817,49 @@ fn receive<R: Read>(
 where
     R::Error: std::fmt::Debug,
 {
-    let mut writer = Writer::begin()?;
+    write_from(
+        |buf| {
+            req.read(buf)
+                .map_err(|e| format!("the upload broke off: {e:?}"))
+        },
+        framing,
+    )
+}
+
+/// Write an image into the next update slot from `read`, which fills a
+/// buffer and says how many bytes it put there, none at the end. The
+/// first [`HEAD_LEN`] bytes are held and judged before the slot is
+/// opened: `esp_ota_begin` erases the previous firmware's boot record
+/// the moment it is called (ESP-IDF, with rollback on), so a file that
+/// is not an application image must never reach it. The slot's label
+/// and the bytes written; a slot once opened is blanked on failure.
+fn write_from<F>(
+    mut read: F,
+    framing: Framing,
+) -> Result<(&'static str, usize), String>
+where
+    F: FnMut(&mut [u8]) -> Result<usize, String>,
+{
+    let mut sink = Sink::Judging(Vec::with_capacity(HEAD_LEN));
     let mut buf = vec![0u8; CHUNK];
     let mut form = match &framing {
         Framing::Form { boundary } => Some(Form::new(boundary)),
         Framing::Raw => None,
     };
     loop {
-        let n = match req.read(&mut buf) {
+        let n = match read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(e) => {
-                writer.abort();
-                return Err(format!("the upload broke off: {e:?}"));
+            Err(why) => {
+                sink.abort();
+                return Err(why);
             }
         };
         let fed = match form.as_mut() {
             Some(f) => {
                 let mut failed = None;
                 let r = f.feed(&buf[..n], &mut |bytes: &[u8]| {
-                    if let Err(e) = writer.write(bytes) {
+                    if let Err(e) = sink.take(bytes) {
                         failed = Some(e);
                         return Err(std::io::Error::other("flash"));
                     }
@@ -823,10 +871,10 @@ where
                     (Ok(()), None) => Ok(()),
                 }
             }
-            None => writer.write(&buf[..n]),
+            None => sink.take(&buf[..n]),
         };
         if let Err(why) = fed {
-            writer.abort();
+            sink.abort();
             return Err(why);
         }
         std::thread::sleep(WRITE_BREATH);
@@ -836,17 +884,56 @@ where
     }
     if let Some(f) = &form {
         if !f.done() {
-            writer.abort();
+            sink.abort();
             return Err("the form ended before the file did".into());
         }
     }
-    if writer.written == 0 {
-        writer.abort();
-        return Err("no image in the request".into());
+    match sink {
+        Sink::Judging(head) if head.is_empty() => {
+            Err("no image in the request".into())
+        }
+        Sink::Judging(head) => Err(judge_head(&head)
+            .err()
+            .unwrap_or_else(|| "not a firmware image".into())),
+        Sink::Writing(writer) => {
+            let written = writer.written;
+            let slot = writer.finish()?;
+            Ok((slot, written))
+        }
     }
-    let written = writer.written;
-    let slot = writer.finish()?;
-    Ok((slot, written))
+}
+
+/// Where an upload's bytes go: held while the head is judged, then to
+/// the slot.
+enum Sink {
+    Judging(Vec<u8>),
+    Writing(Writer),
+}
+
+impl Sink {
+    fn take(&mut self, bytes: &[u8]) -> Result<(), String> {
+        match self {
+            Sink::Writing(w) => w.write(bytes),
+            Sink::Judging(head) => {
+                head.extend_from_slice(bytes);
+                if head.len() < HEAD_LEN {
+                    return Ok(());
+                }
+                judge_head(head)?;
+                let mut writer = Writer::begin()?;
+                writer.write(head)?;
+                *self = Sink::Writing(writer);
+                Ok(())
+            }
+        }
+    }
+
+    /// Give up: a slot once opened is left blank; nothing else to undo.
+    fn abort(self) {
+        if let Sink::Writing(w) = self {
+            w.abort();
+        }
+    }
 }
 
 /// Copy the running image into the factory slot. Bytes copied.
@@ -973,4 +1060,184 @@ fn restart_soon() {
             // SAFETY: a clean restart; does not return.
             unsafe { sys::esp_restart() };
         });
+}
+
+/// The card thread's stack: it reads a file and writes flash, so it
+/// stays in internal memory, as the server's does.
+const CARD_STACK: usize = 8 * 1024;
+
+/// What the card's root held when looked at for an image.
+pub enum CardCheck {
+    /// No image on the card.
+    Nothing,
+    /// One image, whole and not the firmware running: to apply.
+    Apply(CardImage),
+    /// An image that is not applied, and why; renamed where that is
+    /// the rule.
+    Skip(String),
+}
+
+/// An image file on the card.
+pub struct CardImage {
+    /// The file's name.
+    pub name: String,
+    path: PathBuf,
+}
+
+/// Look in `root` for an image to apply at boot.
+pub fn on_card(root: &str) -> CardCheck {
+    let dir = match std::fs::read_dir(root) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("update: the card's root: {e}");
+            return CardCheck::Nothing;
+        }
+    };
+    let mut found: Vec<String> = dir
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| is_card_image(n))
+        .collect();
+    match found.len() {
+        0 => return CardCheck::Nothing,
+        1 => {}
+        n => {
+            found.sort();
+            return CardCheck::Skip(format!(
+                "{n} .ota.bin files on the card ({}); leave the one to apply",
+                found.join(", ")
+            ));
+        }
+    }
+    let name = found.remove(0);
+    let path = Path::new(root).join(&name);
+    let (size, mut file) = match std::fs::metadata(&path)
+        .and_then(|m| std::fs::File::open(&path).map(|f| (m.len(), f)))
+    {
+        Ok(x) => x,
+        Err(e) => return refuse(&path, &name, format!("{e}")),
+    };
+    let mut read_at = |at: usize, buf: &mut [u8]| -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(at as u64))?;
+        file.read_exact(buf)
+    };
+    let declared = match image_length(&mut read_at) {
+        Ok(l) => l,
+        Err(e) => return refuse(&path, &name, e.to_string()),
+    };
+    if declared as u64 != size {
+        return refuse(
+            &path,
+            &name,
+            format!(
+                "the file is {size} bytes, the image in it {declared}: not a whole copy"
+            ),
+        );
+    }
+    let identity = match image_identity(&mut read_at) {
+        Ok(id) => id,
+        Err(e) => return refuse(&path, &name, e.to_string()),
+    };
+    if Some(identity) == running_identity() {
+        let to = path.with_file_name(applied_name(&name));
+        if let Err(e) = std::fs::rename(&path, &to) {
+            warn!("update: could not rename {name}: {e}");
+        }
+        return CardCheck::Skip(format!(
+            "{name} is the firmware running; marked applied"
+        ));
+    }
+    CardCheck::Apply(CardImage { name, path })
+}
+
+/// Rename a card image that is not to be applied and say why.
+fn refuse(path: &Path, name: &str, why: String) -> CardCheck {
+    let to = path.with_file_name(refused_name(name));
+    if let Err(e) = std::fs::rename(path, &to) {
+        warn!("update: could not rename {name}: {e}");
+    }
+    CardCheck::Skip(format!("{name} refused: {why}; renamed .ota.refused"))
+}
+
+/// The running image's ELF sha256, from its descriptor.
+fn running_identity() -> Option<[u8; 32]> {
+    // SAFETY: plain getters; the descriptor is a plain-data struct.
+    let running = unsafe { sys::esp_ota_get_running_partition() };
+    let mut desc: sys::esp_app_desc_t = unsafe { std::mem::zeroed() };
+    let ret =
+        unsafe { sys::esp_ota_get_partition_description(running, &mut desc) };
+    (ret == sys::ESP_OK).then_some(desc.app_elf_sha256)
+}
+
+/// Apply `image` from the card on a thread of its own, through the
+/// loop's asks as the page does: the loop goes quiet and the face says
+/// so, the image is written into the free slot, the file is renamed,
+/// and the player restarts into the slot on trial. A write that fails
+/// renames the file `.ota.refused` and the loop plays on.
+pub fn apply_from_card(
+    image: CardImage,
+    asks: Sender<Ask>,
+) -> std::io::Result<()> {
+    let before = ThreadSpawnConfiguration::get();
+    ThreadSpawnConfiguration {
+        name: Some(c"card-update"),
+        stack_size: CARD_STACK,
+        priority: crate::threads::BACKGROUND_PRIORITY,
+        ..Default::default()
+    }
+    .set()
+    .map_err(std::io::Error::other)?;
+    let spawned = std::thread::Builder::new()
+        .name("card-update".into())
+        .stack_size(CARD_STACK)
+        .spawn(move || {
+            let (tx, rx) = channel();
+            let _ = asks.send(Ask::Quiet(tx));
+            let _ = rx.recv_timeout(STOP_WAIT);
+            let began = Instant::now();
+            let outcome = std::fs::File::open(&image.path)
+                .map_err(|e| format!("{}: {e}", image.name))
+                .and_then(|mut f| {
+                    write_from(
+                        |buf| {
+                            f.read(buf).map_err(|e| {
+                                format!("reading {}: {e}", image.name)
+                            })
+                        },
+                        Framing::Raw,
+                    )
+                });
+            match outcome {
+                Ok((slot, bytes)) => {
+                    let to = image.path.with_file_name(applied_name(&image.name));
+                    if let Err(e) = std::fs::rename(&image.path, &to) {
+                        warn!("update: could not rename {}: {e}", image.name);
+                    }
+                    info!(
+                        "update: written {bytes} bytes from the card's {} to {slot} in {} s; restarting into it",
+                        image.name,
+                        began.elapsed().as_secs()
+                    );
+                    let _ = asks.send(Ask::Restarting(slot));
+                    restart_soon();
+                }
+                Err(why) => {
+                    let to = image.path.with_file_name(refused_name(&image.name));
+                    if let Err(e) = std::fs::rename(&image.path, &to) {
+                        warn!("update: could not rename {}: {e}", image.name);
+                    }
+                    warn!("update: the card's {}: {why}", image.name);
+                    let _ = asks.send(Ask::Failed(format!(
+                        "the card's {}: {why}; renamed .ota.refused",
+                        image.name
+                    )));
+                }
+            }
+        });
+    before
+        .unwrap_or_default()
+        .set()
+        .map_err(std::io::Error::other)?;
+    spawned.map(|_| ())
 }

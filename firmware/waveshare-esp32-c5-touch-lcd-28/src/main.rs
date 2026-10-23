@@ -492,7 +492,33 @@ fn main() -> anyhow::Result<()> {
     );
     // The level the listener wants; every track starts at it.
     let mut wanted = start_level;
-    let mut current = if start_when_up {
+    // An image on the card is applied before anything plays: the queue
+    // holds, the face says so, and the player restarts into the new
+    // firmware — or plays on if the image is refused.
+    let mut card_update = match update::on_card(MUSIC) {
+        update::CardCheck::Nothing => false,
+        update::CardCheck::Skip(line) => {
+            info!("update: {line}");
+            config.note(format!("update: {line}"));
+            false
+        }
+        update::CardCheck::Apply(image) => {
+            info!(
+                "update: {} on the card; applied before anything plays",
+                image.name
+            );
+            match update::apply_from_card(image, asks_tx.clone()) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!("update: the card's image is not applied: {e}");
+                    false
+                }
+            }
+        }
+    };
+    let mut current = if card_update {
+        None
+    } else if start_when_up {
         if let Some(t) = queue.items().first() {
             notice = Some(format!("{}: waiting for the network", t.title));
         }
@@ -623,6 +649,10 @@ fn main() -> anyhow::Result<()> {
                 }
                 update::Ask::Failed(why) => {
                     notice = Some(format!("Update failed: {why}"));
+                    if std::mem::take(&mut card_update) {
+                        config.note(format!("update: {why}"));
+                        config.write_status(&status_head);
+                    }
                     if std::mem::take(&mut updating) {
                         current = advance(
                             &mut steward,
