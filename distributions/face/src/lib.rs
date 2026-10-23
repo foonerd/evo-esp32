@@ -63,6 +63,27 @@ pub enum Status {
     Paused,
 }
 
+/// A message over the face: what the player is doing when it is not
+/// playing for the owner — an update being written, its outcome — said
+/// plainly in the middle of the panel, on any screen, until taken down.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Message {
+    /// The heading, large: "Updating".
+    pub heading: String,
+    /// The body, wrapped: what is happening and what to do.
+    pub body: String,
+}
+
+impl Message {
+    /// A message of `heading` and `body`.
+    pub fn new(heading: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            heading: heading.into(),
+            body: body.into(),
+        }
+    }
+}
+
 /// What the face draws: the two projections, flattened.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct View {
@@ -291,6 +312,10 @@ pub struct Face {
     sheet: bool,
     /// The sheet was raised since the frame was last painted.
     sheet_due: bool,
+    /// A message over the face (an update in progress, its outcome): the
+    /// sheet shows it instead of the track, on any screen, until it is
+    /// taken down.
+    message: Option<Message>,
     /// How far round the ring the accent reaches.
     ring_to: f32,
     /// The next stage of a full paint in progress.
@@ -342,6 +367,7 @@ impl Face {
             modes_shown: false,
             sheet: false,
             sheet_due: false,
+            message: None,
             ring_to: 0.0,
             stage: None,
             art: None,
@@ -419,6 +445,10 @@ impl Face {
 
     /// What is under `p` on the screen in front, for a touch.
     pub fn hit(&self, p: Point) -> Option<Hotspot> {
+        if self.message.is_some() {
+            // A message covers every screen; a tap on it is a tap on it.
+            return Some(Hotspot::Sheet);
+        }
         if self.sheet && self.screen == Screen::NowPlaying {
             return Some(match self.layout.hit_nav(p) {
                 Some(nav) => nav,
@@ -540,8 +570,10 @@ impl Face {
             self.modes_shown = scene.modes;
             self.scene = Some(scene);
             self.stage = Some(0);
-            self.sheet = false;
-            self.sheet_due = false;
+            // The track's sheet goes with the track; a message stays up
+            // over the new frame.
+            self.sheet = self.message.is_some();
+            self.sheet_due = self.message.is_some();
         }
         let stages = if on_page { PAGE_STAGES } else { STAGES };
         if let Some(stage) = self.stage {
@@ -609,7 +641,7 @@ impl Face {
     /// paints it, or repaints the face whole without it. A tap anywhere
     /// while it is up is [`Hotspot::Sheet`]; a track change puts it down.
     pub fn show_sheet(&mut self, up: bool) {
-        if up == self.sheet {
+        if up == self.sheet || self.message.is_some() {
             return;
         }
         self.sheet = up;
@@ -625,6 +657,30 @@ impl Face {
         self.sheet
     }
 
+    /// Put a message over the face — a heading and a body, centred, on
+    /// whatever screen is up — or take it down (`None`): the next refresh
+    /// paints it, or repaints the face whole without it. It outlives a
+    /// track change, unlike the details sheet, and a tap does not take
+    /// it down; the distribution does, when the matter is over.
+    pub fn set_message(&mut self, message: Option<Message>) {
+        if message == self.message {
+            return;
+        }
+        let up = message.is_some();
+        self.message = message;
+        self.sheet = up;
+        if up {
+            self.sheet_due = true;
+        } else {
+            self.scene = None;
+        }
+    }
+
+    /// The message over the face, if one is up.
+    pub fn message(&self) -> Option<&Message> {
+        self.message.as_ref()
+    }
+
     /// [`refresh`](Self::refresh) through to a frame that is not partial:
     /// a whole frame in one call, for a host that draws an image.
     pub fn refresh_whole<D>(
@@ -637,7 +693,7 @@ impl Face {
     {
         loop {
             let painted = self.refresh(target, view)?;
-            if painted != Repaint::Partial {
+            if painted != Repaint::Partial && !self.sheet_due {
                 return Ok(painted);
             }
         }
@@ -1127,21 +1183,31 @@ impl Face {
     {
         let l = self.layout;
         let t = self.theme;
-        // The room: the frame less the navigation, with a margin.
-        let room = match l.nav_axis {
-            layout::NavAxis::Bar => Rectangle::new(
-                Point::zero(),
-                Size::new(l.frame.width, l.nav.top_left.y as u32),
-            ),
-            layout::NavAxis::Rail => Rectangle::new(
-                Point::new(l.nav.top_left.x + l.nav.size.width as i32, 0),
-                Size::new(l.frame.width - l.nav.size.width, l.frame.height),
-            ),
+        // The room: the frame less the navigation, with a margin — or, for
+        // a message, the whole frame cleared: nothing to tap is shown
+        // while the player is not the owner's to use.
+        let room = if self.message.is_some() {
+            let frame = Rectangle::new(Point::zero(), l.frame);
+            target.fill_solid(&frame, t.background)?;
+            frame
+        } else {
+            match l.nav_axis {
+                layout::NavAxis::Bar => Rectangle::new(
+                    Point::zero(),
+                    Size::new(l.frame.width, l.nav.top_left.y as u32),
+                ),
+                layout::NavAxis::Rail => Rectangle::new(
+                    Point::new(l.nav.top_left.x + l.nav.size.width as i32, 0),
+                    Size::new(l.frame.width - l.nav.size.width, l.frame.height),
+                ),
+            }
         };
         let width = room.size.width as i32 - 2 * SHEET_MARGIN;
         let inner = width - 2 * SHEET_PAD;
         // The lines, top to bottom: (font, text, colour, lines allowed).
-        let (title, artist, album) = if view.title.is_empty() {
+        let (title, artist, album) = if let Some(m) = &self.message {
+            (m.heading.as_str(), m.body.as_str(), "")
+        } else if view.title.is_empty() {
             ("Nothing playing", "", "")
         } else {
             (
@@ -1150,10 +1216,14 @@ impl Face {
                 view.album.as_str(),
             )
         };
-        let format = view.format_line();
+        let format = if self.message.is_some() {
+            String::new()
+        } else {
+            view.format_line()
+        };
         let parts: [(&text::Atlas, &str, Rgb565, usize); 4] = [
             (&text::HEADING, title, t.foreground, 4),
-            (&text::BODY, artist, t.foreground, 2),
+            (&text::BODY, artist, t.foreground, 6),
             (&text::BODY, album, t.muted_fg, 3),
             (&text::SMALL, &format, t.muted_fg, 1),
         ];
@@ -2108,5 +2178,37 @@ mod tests {
         view.duration_ms = Some(243_000);
         assert_eq!(view.station(), None);
         assert!(view.modes());
+    }
+
+    #[test]
+    fn a_message_covers_the_face_and_outlives_a_track_change() {
+        let mut face = Face::new(0, Style::Disc, theme::EVO_DEFAULT);
+        let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+        let mut view = View::new(&playing(), None, "Card");
+        view.title = "A track".to_string();
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Full));
+        face.set_message(Some(Message::new(
+            "Updating",
+            "Do not switch off. The player restarts by itself.",
+        )));
+        // The whole refresh ends with the message painted, not before.
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Sheet));
+        // Every tap is a tap on the message, on any screen; the track's
+        // sheet cannot be put down under it.
+        assert_eq!(face.hit(face.layout().nav_item(1)), Some(Hotspot::Sheet));
+        face.show_sheet(false);
+        assert!(face.message().is_some());
+        // Playback stops under it (the view changes): the face repaints
+        // whole and the message is painted again on top.
+        view = View::default();
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Sheet));
+        assert!(face.message().is_some());
+        // A page beneath makes no difference.
+        face.set_screen(Screen::Settings);
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Sheet));
+        // Taken down: the face is repainted whole without it.
+        face.set_message(None);
+        assert_eq!(face.refresh_whole(&mut display, &view), Ok(Repaint::Full));
+        assert!(!face.sheet());
     }
 }
