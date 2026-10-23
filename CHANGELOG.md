@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-10-23
+
 - An update takes the panel over. While the firmware is written the
   face is a message on a cleared screen — **Updating**, "Writing the new
   firmware. Do not switch off: the player restarts by itself when it is
