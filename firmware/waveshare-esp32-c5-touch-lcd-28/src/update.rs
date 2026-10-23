@@ -113,6 +113,11 @@ const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 const CHECK_FLOOR: usize = 24 * 1024;
 /// How long a look waits for the floor before asking again.
 const DEFER_FOR: Duration = Duration::from_secs(10 * 60);
+/// How long nothing must have played before a deferred look is tried
+/// at the quiet moment; the gap between two tracks is shorter.
+const QUIET_IDLE: Duration = Duration::from_secs(5);
+/// The least between two tests of the floor while quiet.
+const RETRY_SPACING: Duration = Duration::from_secs(60);
 /// A tap on the row arms the install; a second within this applies it.
 const ARM_WINDOW: Duration = Duration::from_secs(12);
 /// `update = auto` applies a release once nothing has played this long.
@@ -1588,6 +1593,9 @@ pub struct Pull {
     tx: Sender<manifest::Standing>,
     asks: Sender<Ask>,
     next_check: Option<Instant>,
+    /// The last time the floor was tested, so a deferred look is not
+    /// tried at every tick of a quiet moment.
+    tried: Option<Instant>,
     armed: Option<Instant>,
     applied: bool,
     /// The line last reported, so a change is reported once.
@@ -1616,6 +1624,7 @@ impl Pull {
             tx,
             asks,
             next_check: None,
+            tried: None,
             armed: None,
             applied: false,
         }
@@ -1663,12 +1672,19 @@ impl Pull {
             return;
         }
         let internal = internal_free();
+        self.tried = Some(Instant::now());
         if internal < CHECK_FLOOR {
             info!(
                 "update: release check deferred: {internal} B of internal memory free, {CHECK_FLOOR} needed"
             );
             self.standing = manifest::Standing::Deferred;
-            self.next_check = Some(Instant::now() + DEFER_FOR);
+            // A retry already nearer stays; a failed test at a quiet
+            // moment must not push it away.
+            let soon = Instant::now() + DEFER_FOR;
+            self.next_check = Some(match self.next_check {
+                Some(at) if at > Instant::now() => at.min(soon),
+                _ => soon,
+            });
             return;
         }
         self.standing = manifest::Standing::Checking;
@@ -1810,8 +1826,11 @@ impl Pull {
     /// standing's line when it changed, for the log and the status.
     pub fn tick(&mut self, idle_for: Option<Duration>) -> Option<String> {
         let due = self.next_check.is_some_and(|at| Instant::now() >= at);
-        let quiet_now = idle_for.is_some()
-            && matches!(self.standing, manifest::Standing::Deferred);
+        // A quiet moment is a settled one: the gap between two tracks
+        // is idle for a tick and the decoder's memory is not back.
+        let quiet_now = idle_for.is_some_and(|d| d >= QUIET_IDLE)
+            && matches!(self.standing, manifest::Standing::Deferred)
+            && self.tried.is_none_or(|t| t.elapsed() >= RETRY_SPACING);
         if due || quiet_now {
             self.check();
         }

@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A deferred release look waits for a quiet moment that is one. The gap
+  between two tracks counted as quiet: the look was tried there, the
+  memory floor failed again (the decoder's memory is not back in a
+  gap), and the retry was pushed another ten minutes each time, so a
+  player with music on never looked. Now a quiet moment is five seconds
+  of nothing playing, a failed test never moves an earlier retry later,
+  and tests while quiet are a minute apart.
+
 ## [0.2.0] - 2026-10-23
 
 - The card's verdict is on the panel. An image on the card that is the
