@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The card's verdict is on the panel. An image on the card that is the
+  firmware already running, or that is refused before the write (not
+  whole, not an image, two `.ota.bin` files), was a line in
+  `evostatus.txt` only; now the panel says **Done** or **Update failed**
+  with the reason as it lights, until a tap. The rename to
+  `.ota.applied` or `.ota.refused` failed where an earlier file of that
+  name sat (FAT refuses a rename onto one), so the `.ota.bin` stayed and
+  was judged again at every boot; the earlier file is replaced, and a
+  rename that still fails says so. A copy cut short inside the image is
+  refused as "the file ends before the image does: not a whole copy".
+
+- After a USB flash to firmware signed with another key, the update
+  slots hold whole images the new key refuses; the boot log called them
+  unfinished writes. A whole image with a signature block that does not
+  verify is now "signed with another key"; only a slot without one is
+  an unfinished write.
+
+- The slot table names each image's version from its descriptor, which
+  ESP-IDF filled from `git describe` at configure time; esp-idf-sys
+  runs that once and keeps it, so an image built later named a build
+  weeks old while its own boot line said the truth. The descriptor's
+  version is now the crate's, from the configuration, and `image.sh`
+  refuses an image whose descriptor says otherwise.
+
 ## [0.1.7] - 2026-10-23
 
 - An update takes the panel over. While the firmware is written the
