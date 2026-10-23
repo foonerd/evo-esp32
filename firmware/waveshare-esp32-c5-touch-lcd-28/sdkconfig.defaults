@@ -45,6 +45,15 @@ CONFIG_SECURE_BOOT_ECDSA_KEY_LEN_256_BITS=y
 CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
 CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
 
+# The version in the app descriptor: the slot table on the page and in
+# evostatus.txt reads it from each slot's image. From the configuration,
+# not from `git describe` at ESP-IDF's configure, which esp-idf-sys
+# runs once and keeps - an image built later then named a build weeks
+# old while its own boot line said the truth. image.sh refuses an image
+# whose version here differs from the crate's.
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
+CONFIG_APP_PROJECT_VER="0.1.7"
+
 # Board has 8 MB PSRAM, and the player leans on it: the album art, the
 # decoder's buffers, and the Wi-Fi driver's and LwIP's pools go there.
 # A board without PSRAM therefore panics at init (the log says so)

@@ -38,6 +38,14 @@ PY
 elf="$crate/target/$target/release/$name"
 [ -f "$elf" ] || { echo "missing $elf: run cargo build --release in $1 first" >&2; exit 1; }
 
+# The app descriptor names the version from sdkconfig; it must be the
+# crate's, or a slot would be listed as one release and run another.
+desc_ver=$(sed -n 's/^CONFIG_APP_PROJECT_VER="\(.*\)"$/\1/p' "$crate/sdkconfig.defaults")
+if [ -n "$desc_ver" ] && [ "$desc_ver" != "$version" ]; then
+  echo "sdkconfig.defaults names CONFIG_APP_PROJECT_VER=$desc_ver; the crate is $version" >&2
+  exit 1
+fi
+
 # esp-idf-sys leaves one build per configuration under target/; an
 # sdkconfig change makes a second. The newest is the one the ELF was
 # linked against.
