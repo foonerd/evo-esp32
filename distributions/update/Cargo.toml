@@ -1,0 +1,15 @@
+[package]
+name = "evo-esp32-update"
+description = "What a firmware update is before it reaches the flash: the request a browser or a script sends (a raw image, or a form with a file in it), split as it streams; the page the player serves to take one; the words for what the slots hold. Shared by the distributions; the flash itself is the platform's."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+md-5 = "0.10"

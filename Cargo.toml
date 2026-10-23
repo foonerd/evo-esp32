@@ -19,6 +19,7 @@ members = [
     "distributions/face",
     "distributions/host",
     "distributions/volumio",
+    "distributions/update",
 ]
 # Builds only inside a firmware crate's workspace: esp-idf-svc compiles for
 # ESP-IDF targets alone.
