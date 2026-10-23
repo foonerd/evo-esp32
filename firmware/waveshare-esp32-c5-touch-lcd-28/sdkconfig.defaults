@@ -52,7 +52,7 @@ CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
 # old while its own boot line said the truth. image.sh refuses an image
 # whose version here differs from the crate's.
 CONFIG_APP_PROJECT_VER_FROM_CONFIG=y
-CONFIG_APP_PROJECT_VER="0.1.7"
+CONFIG_APP_PROJECT_VER="0.2.0"
 
 # Board has 8 MB PSRAM, and the player leans on it: the album art, the
 # decoder's buffers, and the Wi-Fi driver's and LwIP's pools go there.

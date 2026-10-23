@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
 - The card's verdict is on the panel. An image on the card that is the
   firmware already running, or that is refused before the write (not
   whole, not an image, two `.ota.bin` files), was a line in

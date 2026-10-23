@@ -19,8 +19,8 @@ The build is the companion's: ESP-IDF v5.5.5 through esp-idf-svc 0.53, nightly-2
 cd firmware/waveshare-esp32-c5-touch-lcd-28
 cargo build --release
 cd ../.. && EVO_SIGNING_KEY=path/to/key.pem scripts/image.sh firmware/waveshare-esp32-c5-touch-lcd-28
-esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.7.factory.bin
-scripts/push.sh evo-player.local dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.7.ota.bin
+esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.2.0.factory.bin
+scripts/push.sh evo-player.local dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.2.0.ota.bin
 ```
 
 Images are signed. `image.sh` appends a Secure Boot v2 signature block (ECDSA P-256) with the key `EVO_SIGNING_KEY` names (`espsecure generate-signing-key --version 2 --scheme ecdsa256 key.pem`; keep it outside the tree), and a running firmware accepts an update only when it was signed with the key of its own block (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT`: the trust anchor is the running image, no eFuse is burned, the bootloader does not verify). So a player flashed with your own key's `.factory.bin` takes your own key's `.ota.bin` and nothing else; moving it to a release, or a release to your key, is a USB flash. Releases are signed in CI with the release key; a factory copy made from the page carries the block.
