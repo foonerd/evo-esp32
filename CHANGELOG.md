@@ -6,6 +6,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Updates over the network. A player on the Wi-Fi serves a page at
+  `http://<name>.local/` with the firmware in each of its three slots
+  and a form that takes the release's `.ota.bin`: playback stops, the
+  file is written to the update slot not running, and the player
+  restarts into it — about a minute in all. The new firmware boots on
+  trial (ESP-IDF's rollback) and marks itself valid once the panel is
+  lit, the sink has opened, Wi-Fi is up and the loop turns, else the
+  bootloader returns to the firmware it had on the next reset; a file
+  that is not a firmware image is refused before anything is written,
+  a power cut during the write leaves the slot blank, and an update
+  that breaks off resumes playback. A firmware that has proved itself
+  can be kept as the factory copy — what the player falls back to when
+  both update slots fail — from the page or `scripts/push.sh --factory`.
+  `scripts/push.sh <player> <image>` does the browser's job from the
+  command line. The page is open on the network unless the card sets
+  `web_user` and `web_password`, when it asks for them (HTTP Digest:
+  the password does not cross the network). The page, `/status` and the
+  `firmware` rows of `evostatus.txt` name each slot's version and the
+  first bytes of its ELF hash, which tell two builds of one version
+  apart. The main loop idles while an image is written and the write
+  breathes between sectors, so the watchdog is not tripped.
+
+- The flash is laid out for it: three app slots of 5.3 MB (`factory`,
+  `ota_0`, `ota_1`) below 16 MB, which is as far as the cache maps, and
+  `otadata` for the bootloader's choice; `scripts/image.sh` now writes
+  `<stem>.factory.bin`, the whole flash for USB, and `<stem>.ota.bin`,
+  the app for the page, and the release carries both. A player on 0.1.6
+  or earlier takes the USB flash once, as its table has no update slots;
+  the card keeps its settings.
+
+- Album covers and station logos arrive within seconds again at 96 kHz.
+  The tiers of 0.1.6 left the art worker at the lowest priority, below
+  the idle-time work of the Volumio sessions, and a 96 kHz FLAC gave it
+  so little of the core that a cover took one to two and a half minutes
+  (0.1.5: nine to twenty seconds at the same material). It runs on the
+  background tier with the rest of the deferred work: a cover now reads
+  in under a second to eleven seconds at 96 kHz, by its size and what
+  else the core carries; a station's logo takes the same path.
+
 ## [0.1.6] - 2026-10-22
 
 - The face answers a touch while a station opens or plays, and the

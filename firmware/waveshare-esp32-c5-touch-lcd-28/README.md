@@ -13,14 +13,17 @@ The sink (`src/sink.rs`) is I2S0 with its DMA as the buffer: the decoder offers 
 
 Wiring a HAT, with pin 1 as the silkscreen marks it: J8.7 → HAT pin 12 (BCLK), J8.8 → HAT pin 35 (LRCLK), J6 TXD → HAT pin 40 (DIN), J8.1 or J6 GND → HAT pin 6, J8.2 (USB 5 V) → HAT pin 2. A bare PCM5102A module takes the same three signals plus VIN 5 V and GND, with its SCK pin tied to GND.
 
-The build is the companion's: ESP-IDF v5.5.5 through esp-idf-svc 0.53, nightly-2026-10-17 with `build-std`, `ldproxy`, `partitions.csv` with the board's 32 MB of flash declared and one 8 MB app partition, `scripts/image.sh` for the flashable image. The companion's drivers come by its tag.
+The build is the companion's: ESP-IDF v5.5.5 through esp-idf-svc 0.53, nightly-2026-10-17 with `build-std`, `ldproxy`, `partitions.csv` with the board's 32 MB of flash declared, `scripts/image.sh` for the images. The companion's drivers come by its tag.
 
 ```sh
 cd firmware/waveshare-esp32-c5-touch-lcd-28
 cargo build --release
 cd ../.. && scripts/image.sh firmware/waveshare-esp32-c5-touch-lcd-28
-esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.6.bin
+esptool --chip esp32c5 --port PORT write-flash 0x0 dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.6.factory.bin
+scripts/push.sh evo-player.local dist/evo-esp32-waveshare-esp32-c5-touch-lcd-28-0.1.6.ota.bin
 ```
+
+`image.sh` writes two images. The `.factory.bin` is the whole flash from offset 0 — bootloader, partition table, the app in the `factory` slot — for USB: the first flash of a board, or a start from nothing (it clears the Wi-Fi hint in NVS; the card keeps the settings). The `.ota.bin` is the app alone, for a player that already runs: `push.sh` sends it to the player's page, or a browser does from `http://<name>.local/`. The flash holds three app slots of 5.3 MB (`factory`, `ota_0`, `ota_1`), all below 16 MB because the cache maps no higher; an update is written to whichever of `ota_0`/`ota_1` is not running, the player restarts into it as pending, and the firmware marks itself valid once the panel is lit, the sink has opened, Wi-Fi is up and the loop turns — else the bootloader returns to the slot it came from on the next reset (`update.rs`). A power cut during the write leaves the slot blank. A proven firmware can be kept as the factory copy from the page or `push.sh --factory`. The page is open on the network unless the card sets `web_user` and `web_password`, when it asks for them (HTTP Digest; the password does not cross the network). The page, `/status` and the `firmware` row of `evostatus.txt` name each slot's version and the first bytes of its ELF hash, which tell two builds of one version apart.
 
 ## Configuring by card
 
