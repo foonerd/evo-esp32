@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- An update takes the panel over. While the firmware is written the
+  face is a message on a cleared screen — **Updating**, "Writing the new
+  firmware. Do not switch off: the player restarts by itself when it is
+  done" — then **Restarting**; a failure, a copy kept as factory, or the
+  way back are messages the same way, an outcome staying up until a
+  tap. Before, the state was a line on the face's strip, missed easily,
+  the restart's never painted and the outcome gone as soon as music
+  resumed. An update from the card at boot lights the panel for it,
+  where it ran dark.
+
 - A way back without a computer. A finger held on the panel for five
   seconds from the moment it lights after power-on returns the player
   to the factory copy; the page has **Restart into the factory copy**
@@ -53,7 +63,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The card is the third way to update. One `<name>.ota.bin` in the
   card's root is applied at boot, before anything plays: the face says
-  "Updating: do not switch off", the image is written to the free slot,
+  **Updating**, the image is written to the free slot,
   the file is renamed `<name>.ota.applied`, and the player restarts into
   the new firmware on the same trial as an update from the page. A file
   that is the firmware already running is marked applied without a
