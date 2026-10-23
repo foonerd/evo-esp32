@@ -66,8 +66,8 @@ use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys;
 use evo_esp32_face::touch::{Intent, Tracker};
 use evo_esp32_face::{
-    theme, About, Face, Fact, Hotspot, Library, Repaint, Screen, Style, Theme,
-    View,
+    theme, About, Face, Fact, Hotspot, Library, Message, Repaint, Screen,
+    Style, Theme, View,
 };
 use evo_esp32_platform_esp_idf::mdns::{Advertiser, Search};
 use evo_esp32_platform_esp_idf::HttpOpener;
@@ -642,6 +642,9 @@ fn main() -> anyhow::Result<()> {
     let mut turn_max = Duration::ZERO;
     // The page's ask to stop, answered once the face shows it.
     let mut update_ack: Option<std::sync::mpsc::Sender<()>> = None;
+    // The face must show the update's new state before the loop idles
+    // again (the restart is seconds away).
+    let mut show_now = false;
     // A finger held on the panel from the moment it lights, for five
     // seconds, returns the player to the factory copy: the way back from
     // a firmware that runs but is wrong, without a computer. The board's
@@ -670,14 +673,30 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     notice = Some("Updating: do not switch off".into());
+                    face.set_message(Some(Message::new(
+                        "Updating",
+                        "Writing the new firmware. Do not switch off: the player restarts by itself when it is done.",
+                    )));
                     update_ack = Some(done);
                     last_face = Instant::now() - FACE_TICK;
                 }
                 update::Ask::Restarting(slot) => {
                     notice = Some(format!("Restarting into {slot}"));
+                    face.set_message(Some(Message::new(
+                        "Restarting",
+                        format!("The new firmware is written to {slot}. The player starts it now; the panel goes dark for a moment."),
+                    )));
+                    show_now = true;
+                    last_face = Instant::now() - FACE_TICK;
                 }
                 update::Ask::Failed(why) => {
                     notice = Some(format!("Update failed: {why}"));
+                    face.set_message(Some(Message::new(
+                        "Update failed",
+                        format!(
+                            "{why}. This firmware keeps running. Tap to go on."
+                        ),
+                    )));
                     pull.failed(&why);
                     if std::mem::take(&mut card_update) {
                         config.note(format!("update: {why}"));
@@ -696,6 +715,10 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 update::Ask::Done(what) => {
+                    face.set_message(Some(Message::new(
+                        "Done",
+                        format!("{what}. Tap to go on."),
+                    )));
                     notice = Some(what);
                     if std::mem::take(&mut updating) {
                         current = advance(
@@ -713,7 +736,7 @@ fn main() -> anyhow::Result<()> {
                 update::Ask::Pull => pull.apply(),
             }
         }
-        if updating && update_ack.is_none() {
+        if updating && update_ack.is_none() && !show_now {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
@@ -731,6 +754,10 @@ fn main() -> anyhow::Result<()> {
                             notice = Some(
                                 "Returning to the factory firmware".into(),
                             );
+                            face.set_message(Some(Message::new(
+                                "Returning",
+                                "Restarting into the factory firmware. Let go of the panel; it goes dark for a moment.",
+                            )));
                             last_face = Instant::now() - FACE_TICK;
                         }
                         Err(why) => {
@@ -1065,7 +1092,15 @@ fn main() -> anyhow::Result<()> {
                                 face.show_sheet(true);
                             }
                             Intent::Tap(Hotspot::Sheet) => {
-                                face.show_sheet(false);
+                                if face.message().is_some() {
+                                    // An outcome is read; what is in
+                                    // progress stays up.
+                                    if !updating && !returning {
+                                        face.set_message(None);
+                                    }
+                                } else {
+                                    face.show_sheet(false);
+                                }
                             }
                             Intent::Tap(Hotspot::Back) => {
                                 browse.ascend(&mut steward, &mut face, t);
@@ -1441,12 +1476,27 @@ fn main() -> anyhow::Result<()> {
             }
             let before_paint = last_face.elapsed();
             let painted = face.refresh(&mut board.panel, &state);
-            if let Some(done) = update_ack.take() {
-                // The whole face with the notice, then the page may write.
-                if let Err(e) = face.refresh_whole(&mut board.panel, &state) {
-                    warn!("panel: {e:?}");
+            if update_ack.is_some() || show_now {
+                show_now = false;
+                // The whole face with the message, then the page may write
+                // (or the chip restart). At boot (an image on the card)
+                // this is the first frame: the backlight comes on here, or
+                // the write runs dark.
+                match face.refresh_whole(&mut board.panel, &state) {
+                    Ok(_) if !lit => {
+                        board.backlight(BACKLIGHT_PERCENT)?;
+                        lit = true;
+                        info!("panel lit for the update");
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!("panel: {e:?}"),
                 }
-                let _ = done.send(());
+                if let Some(m) = face.message() {
+                    info!("update: the panel says \"{}\"", m.heading);
+                }
+                if let Some(done) = update_ack.take() {
+                    let _ = done.send(());
+                }
             }
             let took = last_face.elapsed();
             if took >= LONG_TURN {
