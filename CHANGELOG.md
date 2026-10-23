@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The player finds its own updates. Once a day on the network it reads
+  the release manifest (`<stem>.manifest.json`, published beside the
+  images; `update_url` on the card names another place) and shows
+  where it stands in Settings (the **Update ›** row: "up to date",
+  "0.3.0 available", "check failed: …") and on the page, which also has
+  **Check now**. Two taps on the row, or **Install** on the page, fetch
+  the release over HTTPS into the free slot through the same signed
+  path as any update and restart the player into it on trial.
+  `update = auto` on the card installs it by itself once nothing has
+  played for a minute; `update = off` never looks. The manifest is
+  advice, not trust: the image it names must be signed with the
+  player's key like any other.
+
 - Updates are signed. Every image carries a Secure Boot v2 signature
   block (ECDSA P-256), appended by `scripts/image.sh` with the key
   `EVO_SIGNING_KEY` names, and the running firmware accepts a new image

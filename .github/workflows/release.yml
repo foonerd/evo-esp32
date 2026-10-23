@@ -100,6 +100,16 @@ jobs:
           mkdir -p release
           cp "dist/$STEM-$ver.factory.bin" "dist/$STEM-$ver.ota.bin" release/
           ( cd sdcard && zip -qr "../release/evo-esp32-sdcard-$ver.zip" . )
+          # The manifest a player reads to learn of this release: its name
+          # carries no version, so .../releases/latest/download/<name> is
+          # always the newest one.
+          ota="release/$STEM-$ver.ota.bin"
+          printf '{"board":"%s","version":"%s","file":"%s","size":%s,"sha256":"%s","url":"%s"}\n' \
+            "${STEM#evo-esp32-}" "$ver" "$(basename "$ota")" "$(stat -c %s "$ota")" \
+            "$(sha256sum "$ota" | cut -d' ' -f1)" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$ver/$(basename "$ota")" \
+            > "release/$STEM.manifest.json"
+          cat "release/$STEM.manifest.json"
           ( cd release && sha256sum ./* > SHA256SUMS )
           ls -l release
       - uses: actions/upload-artifact@v7
@@ -122,7 +132,7 @@ jobs:
           cat > notes.md <<EOF
           evo-esp32 ${VERSION} for the Waveshare ESP32-C5-Touch-LCD-2.8: a standalone music player, the evo fabric on a microcontroller.
 
-          **Files.** Three matter: \`${STEM}-${VERSION}.factory.bin\`, the firmware for a board flashed over USB (the first time, or to start over); \`${STEM}-${VERSION}.ota.bin\`, the same firmware for a player that already runs evo-esp32, sent from its web page; and \`evo-esp32-sdcard-${VERSION}.zip\`, the card folder (the settings file and a list of radio stations). \`SHA256SUMS\` is for checking the download; the "Source code" archives are the code, not something to flash.
+          **Files.** Three matter: \`${STEM}-${VERSION}.factory.bin\`, the firmware for a board flashed over USB (the first time, or to start over); \`${STEM}-${VERSION}.ota.bin\`, the same firmware for a player that already runs evo-esp32, sent from its web page or put on its card; and \`evo-esp32-sdcard-${VERSION}.zip\`, the card folder (the settings file and a list of radio stations). \`${STEM}.manifest.json\` is what a player reads to learn of this release by itself. \`SHA256SUMS\` is for checking the download; the "Source code" archives are the code, not something to flash.
 
           ## Install
 
@@ -138,7 +148,7 @@ jobs:
 
           Every setting, the Settings page, where the controls are in each style, and internet radio (your own \`.m3u\`/\`.pls\` files, station logos): [Configuration](https://github.com/${GITHUB_REPOSITORY}/wiki/Configuration). What the board can and cannot play: [Hardware](https://github.com/${GITHUB_REPOSITORY}/wiki/Hardware).
 
-          **Updating** a player that already runs evo-esp32 0.1.7 or later: open \`http://<player name>.local/\` in a browser on the same network (the name is in Settings; the address works too), choose the \`.ota.bin\` file and press Update. Playback stops, the file is written, and the player restarts into the new firmware — about a minute in all; keep it powered meanwhile. The new firmware runs on trial first and confirms itself after a healthy minute; if it does not start, the player returns to the firmware it had by itself. A player on 0.1.6 or earlier takes the USB flash above once. The USB flash clears the device's stored network hint; the card keeps your settings, so leave it in.
+          **Updating** a player that already runs evo-esp32 0.2.0 or later: it looks for a newer release once a day and says so in Settings (the **Update ›** row) and on its page at \`http://<player name>.local/\`; two taps on the row, or **Install** on the page, fetch it and restart the player into it — a minute or two; keep it powered meanwhile. The page also takes the \`.ota.bin\` from your computer, and a copy of it in the card's root is applied at the next power-on. Every image is signed; the player accepts only images signed with the release key. The new firmware runs on trial first and confirms itself after a healthy minute; if it does not start, the player returns to the firmware it had by itself. A player on 0.1.6 or earlier takes the USB flash above once. The USB flash clears the device's stored network hint; the card keeps your settings, so leave it in.
 
           ## Known in this release
 
