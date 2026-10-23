@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A way back without a computer. A finger held on the panel for five
+  seconds from the moment it lights after power-on returns the player
+  to the factory copy; the page has **Restart into the factory copy**
+  for the same. The update slots keep their firmware (an image the
+  bootloader has no record of is kept when it verifies whole, blanked
+  only when it does not), so the next update goes on as before. The
+  board's BOOT button cannot serve: it is the chip's download strap.
+
 - The player finds its own updates. Once a day on the network it reads
   the release manifest (`<stem>.manifest.json`, published beside the
   images; `update_url` on the card names another place) and shows
@@ -17,7 +25,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `update = auto` on the card installs it by itself once nothing has
   played for a minute; `update = off` never looks. The manifest is
   advice, not trust: the image it names must be signed with the
-  player's key like any other.
+  player's key like any other. The look waits for a quiet moment when
+  internal memory is short (a 96 kHz FLAC playing), and says so.
 
 - Updates are signed. Every image carries a Secure Boot v2 signature
   block (ECDSA P-256), appended by `scripts/image.sh` with the key
