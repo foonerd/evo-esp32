@@ -79,7 +79,17 @@ jobs:
       - name: Check
         run: scripts/check.sh
       - name: Image
-        run: scripts/image.sh "$FIRMWARE"
+        # The app is signed with the release key (an ECDSA P-256 PEM in the
+        # repository secret EVO_SIGNING_KEY_PEM); a player accepts an update
+        # only from the key its running firmware was signed with.
+        env:
+          KEY_PEM: ${{ secrets.EVO_SIGNING_KEY_PEM }}
+        run: |
+          [ -n "$KEY_PEM" ] || { echo "EVO_SIGNING_KEY_PEM is not set: a release must be signed" >&2; exit 1; }
+          umask 077
+          printf '%s\n' "$KEY_PEM" > "$RUNNER_TEMP/release-key.pem"
+          EVO_SIGNING_KEY="$RUNNER_TEMP/release-key.pem" scripts/image.sh "$FIRMWARE"
+          rm -f "$RUNNER_TEMP/release-key.pem"
       - name: Gather
         # What a user needs and nothing else: the whole-flash image for
         # USB, the app image for an update over the network, the card

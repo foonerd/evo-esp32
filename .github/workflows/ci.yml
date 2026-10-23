@@ -52,7 +52,16 @@ jobs:
       - name: Check
         run: scripts/check.sh
       - name: Image
-        run: scripts/image.sh firmware/waveshare-esp32-c5-touch-lcd-28
+        # Signed with a key made for this run and thrown away: the
+        # artefact is a valid image (it flashes and boots), but no player
+        # running a release accepts it over the air, and it accepts no
+        # other key's image after a USB flash. Releases sign with the
+        # release key (release.yml).
+        run: |
+          umask 077
+          python3 -m espsecure generate-signing-key --version 2 --scheme ecdsa256 "$RUNNER_TEMP/ci-key.pem"
+          EVO_SIGNING_KEY="$RUNNER_TEMP/ci-key.pem" scripts/image.sh firmware/waveshare-esp32-c5-touch-lcd-28
+          rm -f "$RUNNER_TEMP/ci-key.pem"
       - uses: actions/upload-artifact@v7
         with:
           name: firmware
