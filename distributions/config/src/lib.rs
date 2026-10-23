@@ -52,6 +52,8 @@ pub const KEYS: &[&str] = &[
     "repeat",
     "start",
     "snapserver",
+    "web_user",
+    "web_password",
 ];
 
 /// The schemes a `share` may name.
@@ -99,6 +101,11 @@ pub struct Settings {
     /// port 1704 when not given. Not set, the player looks for one on
     /// the network.
     pub snapserver: Option<String>,
+    /// The name the player's web page asks for, when `web_password` is
+    /// set too; with either missing the page is open to the network.
+    pub web_user: Option<String>,
+    /// Its password.
+    pub web_password: Option<String>,
     /// The network shares the library lists, in the file's numbering:
     /// `share` (1) and `share2` to `share9`, each with its credentials
     /// from `share_user`, `share_password`, `share_domain` (`share2_user`
@@ -433,6 +440,24 @@ fn take(settings: &mut Settings, key: &str, value: &str) -> bool {
             }
             settings.snapserver = text;
         }
+        "web_user" => {
+            // A name the HTTP header can carry whole: no colon, no
+            // quote, nothing beyond ASCII.
+            if value.len() > 32
+                || value
+                    .chars()
+                    .any(|c| !c.is_ascii_graphic() || c == ':' || c == '"')
+            {
+                return false;
+            }
+            settings.web_user = text;
+        }
+        "web_password" => {
+            if value.len() > 63 || value.contains('"') {
+                return false;
+            }
+            settings.web_password = text;
+        }
         _ => return false,
     }
     true
@@ -580,6 +605,15 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
     }
     if let Some(v) = &s.snapserver {
         applied.push(("snapserver", v.clone()));
+    }
+    if let Some(v) = &s.web_user {
+        applied.push(("web_user", v.clone()));
+    }
+    if let Some(v) = &s.web_password {
+        applied.push((
+            "web_password",
+            format!("({} characters, not shown)", v.chars().count()),
+        ));
     }
     if applied.is_empty() && s.shares.is_empty() {
         lines.push("read: no settings in the file".to_string());

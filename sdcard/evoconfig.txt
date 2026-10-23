@@ -75,6 +75,13 @@ share =
 share_user =
 share_password =
 
+# The player's web page (http://<name>.local/ — the firmware update
+# page) asks for this name and password when both are set; with either
+# empty it is open to everyone on the network. The browser asks once;
+# the password itself never crosses the network.
+web_user =
+web_password =
+
 # The DAC board on the header, when the player cannot tell by itself
 # (a board with no I2C part, such as a PCM5102A) or to override what it
 # found; the names are on the wiki's Audio out page. And where the
