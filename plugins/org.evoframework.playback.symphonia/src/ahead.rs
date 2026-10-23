@@ -132,6 +132,11 @@ pub fn heap_chunk(len: usize) -> Box<dyn Chunk> {
     Box::new(vec![0u8; len])
 }
 
+/// The length a reader asks its [`ChunkMemory`] for with the default
+/// chunk: the chunk plus the four bytes it aligns within. A device that
+/// sets memory aside for the reader at boot sets this much aside.
+pub const CHUNK_MEMORY_LEN: usize = CHUNK + 4;
+
 /// How the reader asks its source: by chunks of what size, from what
 /// memory, how much it keeps ahead before it slows, the pause between
 /// chunks then, and how much the ring holds.

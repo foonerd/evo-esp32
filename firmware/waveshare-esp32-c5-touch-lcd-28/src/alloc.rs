@@ -32,7 +32,9 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicUsize, Ordering::Relaxed,
+};
 
 use esp_idf_svc::sys;
 
@@ -300,7 +302,12 @@ pub unsafe extern "C" fn media_lib_free(ptr: *mut c_void) {
 /// PSRAM the driver copies it a block at a time through its bounce
 /// buffer, a third of the core, and a 96 kHz FLAC loses its lead (R52:
 /// the same album, 9 % of the core for the reader after one boot of
-/// 0.1.5 and 35 % after the next).
+/// 0.1.5 and 35 % after the next). Asked for by capability at each
+/// track's start it still failed once internal memory had fragmented
+/// behind the network, the page's server and a few hours of tracks
+/// (955 dry runs in five minutes at 96 kHz, 2026-10-23), so one chunk's
+/// worth is now set aside at boot, when it is certainly there, and lent
+/// to each track's ring in turn: [`reserve_card_chunk`].
 struct DmaChunk {
     p: *mut u8,
     len: usize,
@@ -324,10 +331,95 @@ impl Drop for DmaChunk {
     }
 }
 
-/// Where the card ring's chunks come from; see [`DmaChunk`].
+/// The reserve: internal DMA memory taken once at boot and never freed.
+static RESERVE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static RESERVE_LEN: AtomicUsize = AtomicUsize::new(0);
+/// Whether a ring holds the reserve now.
+static RESERVE_LENT: AtomicBool = AtomicBool::new(false);
+/// Rings reading through the driver's bounce buffer right now: their
+/// chunk is not in memory the card's DMA reaches. The heartbeat says so.
+static BOUNCING: AtomicUsize = AtomicUsize::new(0);
+
+/// Set `len` bytes of internal DMA memory aside for the card's ring.
+/// Called once, early, before the network and the page's server take
+/// their share of internal memory; without it every track's chunk is
+/// a fresh allocation that may fail into the bounce path.
+pub fn reserve_card_chunk(len: usize) {
+    let caps =
+        sys::MALLOC_CAP_DMA | sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    // SAFETY: an allocation call with a plain size and capability set.
+    let p = unsafe { sys::heap_caps_aligned_alloc(4, len, caps) };
+    if p.is_null() {
+        log::warn!("ring: no {len} B of internal DMA memory to set aside for the card's chunk");
+        return;
+    }
+    RESERVE_LEN.store(len, Relaxed);
+    RESERVE.store(p.cast(), Relaxed);
+    log::info!(
+        "ring: {len} B of internal DMA memory set aside for the card's chunk"
+    );
+}
+
+/// How many rings read through the bounce path right now.
+pub fn bouncing() -> usize {
+    BOUNCING.load(Relaxed)
+}
+
+/// The reserve, lent to one ring at a time; given back on drop.
+struct Lent {
+    p: *mut u8,
+    len: usize,
+}
+
+// SAFETY: as `DmaChunk`; the lender's flag is what makes it exclusive.
+unsafe impl Send for Lent {}
+
+impl org_evoframework_playback_symphonia::ahead::Chunk for Lent {
+    fn bytes(&mut self) -> &mut [u8] {
+        // SAFETY: `p` is `len` bytes of live, aligned allocation that no
+        // other ring holds while the flag is set.
+        unsafe { core::slice::from_raw_parts_mut(self.p, self.len) }
+    }
+}
+
+impl Drop for Lent {
+    fn drop(&mut self) {
+        RESERVE_LENT.store(false, Relaxed);
+    }
+}
+
+/// A chunk on the heap, counted while it lives.
+struct Bouncing(Box<dyn org_evoframework_playback_symphonia::ahead::Chunk>);
+
+impl org_evoframework_playback_symphonia::ahead::Chunk for Bouncing {
+    fn bytes(&mut self) -> &mut [u8] {
+        self.0.bytes()
+    }
+}
+
+impl Drop for Bouncing {
+    fn drop(&mut self) {
+        BOUNCING.fetch_sub(1, Relaxed);
+    }
+}
+
+/// Where the card ring's chunks come from: the reserve when it is free
+/// and the size is its, else a fresh allocation in internal DMA memory,
+/// else the heap and the bounce path; see [`DmaChunk`].
 pub fn card_chunk(
     len: usize,
 ) -> Box<dyn org_evoframework_playback_symphonia::ahead::Chunk> {
+    if len == RESERVE_LEN.load(Relaxed)
+        && RESERVE_LENT
+            .compare_exchange(false, true, Relaxed, Relaxed)
+            .is_ok()
+    {
+        let p = RESERVE.load(Relaxed);
+        if !p.is_null() {
+            return Box::new(Lent { p, len });
+        }
+        RESERVE_LENT.store(false, Relaxed);
+    }
     let caps =
         sys::MALLOC_CAP_DMA | sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
     // SAFETY: an allocation call with a plain size and capability set.
@@ -336,7 +428,10 @@ pub fn card_chunk(
         log::warn!(
             "ring: no {len} B of DMA memory for the card's chunk; the heap, which may be the slow path"
         );
-        return org_evoframework_playback_symphonia::ahead::heap_chunk(len);
+        BOUNCING.fetch_add(1, Relaxed);
+        return Box::new(Bouncing(
+            org_evoframework_playback_symphonia::ahead::heap_chunk(len),
+        ));
     }
     log::info!("ring: {len} B chunk for the card in internal DMA memory");
     Box::new(DmaChunk { p: p.cast(), len })

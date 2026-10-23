@@ -212,6 +212,12 @@ fn main() -> anyhow::Result<()> {
     };
     let card_mb = _card.capacity >> 20;
     memory("after the card");
+    // The card ring's chunk, set aside now: later every track's start
+    // would compete for internal DMA memory with the network and the
+    // page's server, and lose into the bounce path (R52).
+    alloc::reserve_card_chunk(
+        org_evoframework_playback_symphonia::ahead::CHUNK_MEMORY_LEN,
+    );
 
     // The card's evoconfig.txt: rotation is applied at the panel's
     // bring-up, theme and style when the face is made, the level at the
@@ -1522,12 +1528,23 @@ fn main() -> anyhow::Result<()> {
             if let Some(line) = sink::report_dry() {
                 warn!("sink: {line}");
             }
-            // SAFETY: a plain getter.
-            let largest = unsafe {
-                sys::heap_caps_get_largest_free_block(sys::MALLOC_CAP_INTERNAL)
+            let bouncing = alloc::bouncing();
+            if bouncing > 0 {
+                warn!("ring: {bouncing} reader(s) on the bounce path: the card's chunk is not in DMA memory");
+            }
+            // SAFETY: plain getters.
+            let (largest, largest_dma) = unsafe {
+                (
+                    sys::heap_caps_get_largest_free_block(
+                        sys::MALLOC_CAP_INTERNAL,
+                    ),
+                    sys::heap_caps_get_largest_free_block(
+                        sys::MALLOC_CAP_DMA | sys::MALLOC_CAP_INTERNAL,
+                    ),
+                )
             };
             info!(
-                "heap: internal largest block {largest} B; {}",
+                "heap: internal largest block {largest} B, DMA-capable {largest_dma} B; {}",
                 alloc::Account::now().line()
             );
             let snap = rooms.snap.session();
