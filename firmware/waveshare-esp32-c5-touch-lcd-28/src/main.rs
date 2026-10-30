@@ -727,6 +727,9 @@ fn main() -> anyhow::Result<()> {
     let loop_started = Instant::now();
     let mut held_since: Option<Instant> = None;
     let mut returning = false;
+    // A rotation set during the trial minute restarts once the gate has
+    // confirmed the firmware, not before.
+    let mut restart_when_confirmed = false;
     loop {
         turn_max = turn_max.max(turn_started.elapsed());
         turn_started = Instant::now();
@@ -1031,7 +1034,8 @@ fn main() -> anyhow::Result<()> {
                                             let next = match face.layout().style
                                             {
                                                 Style::Disc => Style::Card,
-                                                Style::Card => Style::Disc,
+                                                Style::Card => Style::Faders,
+                                                Style::Faders => Style::Disc,
                                             };
                                             face.set_style(next);
                                             config.save("style", next.name());
@@ -1066,6 +1070,9 @@ fn main() -> anyhow::Result<()> {
                                         Some(SettingsRow::Rotation) => {
                                             // The panel is oriented at bring-up:
                                             // write the setting and start again.
+                                            // Not during a new firmware's trial:
+                                            // a restart then rolls it back, so
+                                            // the restart waits for the gate.
                                             let next = (face.layout().rotation
                                                 + 90)
                                                 % 360;
@@ -1073,8 +1080,17 @@ fn main() -> anyhow::Result<()> {
                                                 "rotation",
                                                 &next.to_string(),
                                             );
-                                            info!("rotation {next} written; restarting");
-                                            esp_idf_svc::hal::reset::restart();
+                                            if gate.pending() {
+                                                info!("rotation {next} written; restarting once the firmware is confirmed");
+                                                restart_when_confirmed = true;
+                                                face.set_message(Some(Message::new(
+                                                    "Rotation",
+                                                    format!("Set to {next}°. The player restarts into it as soon as the new firmware has confirmed itself, in under a minute."),
+                                                )));
+                                            } else {
+                                                info!("rotation {next} written; restarting");
+                                                esp_idf_svc::hal::reset::restart();
+                                            }
                                         }
                                         None => {}
                                     }
@@ -1205,6 +1221,9 @@ fn main() -> anyhow::Result<()> {
                     net.as_ref()
                         .map(|n| matches!(n.state, net::State::Up { .. })),
                 );
+            } else if restart_when_confirmed {
+                info!("rotation: the firmware is confirmed; restarting");
+                esp_idf_svc::hal::reset::restart();
             }
             if current.is_some() {
                 idle_since = Instant::now();

@@ -1698,6 +1698,7 @@ impl Pull {
             FETCH_STACK,
             move || {
                 let (before, low_before) = (internal_free(), internal_low());
+                let began = Instant::now();
                 let outcome = read_manifest(&url).and_then(|m| {
                     if m.is_newer_for(&board, env!("CARGO_PKG_VERSION")) {
                         Ok(manifest::Standing::Available(m))
@@ -1708,7 +1709,8 @@ impl Pull {
                     }
                 });
                 info!(
-                    "update: release check: internal memory {before} B before, {} B after; low-water {low_before} B before, {} B after",
+                    "update: release check in {} ms: internal memory {before} B before, {} B after; low-water {low_before} B before, {} B after",
+                    began.elapsed().as_millis(),
                     internal_free(),
                     internal_low()
                 );

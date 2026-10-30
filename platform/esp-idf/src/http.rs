@@ -62,6 +62,17 @@ impl StreamOpener for HttpOpener {
 /// server must honour with a 206: a 200 to a range is the whole file
 /// from the start, not the place asked for.
 fn request(uri: &str, offset: u64) -> Result<Box<dyn ByteStream>, String> {
+    let phase = |what: &str| {
+        // SAFETY: plain getters.
+        let (free, low) = unsafe {
+            (
+                sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL),
+                sys::heap_caps_get_minimum_free_size(sys::MALLOC_CAP_INTERNAL),
+            )
+        };
+        log::debug!("http: {what}: internal {free} B free, low-water {low} B");
+    };
+    phase("before the client");
     let mut connection = EspHttpConnection::new(&Configuration {
         buffer_size: Some(BUFFER),
         buffer_size_tx: Some(BUFFER_TX),
@@ -71,6 +82,7 @@ fn request(uri: &str, offset: u64) -> Result<Box<dyn ByteStream>, String> {
         ..Default::default()
     })
     .map_err(|e| format!("http client: {e}"))?;
+    phase("client made");
     let range = format!("bytes={offset}-");
     let mut headers: Vec<(&str, &str)> =
         vec![("Icy-MetaData", "1"), ("User-Agent", USER_AGENT)];
@@ -80,9 +92,11 @@ fn request(uri: &str, offset: u64) -> Result<Box<dyn ByteStream>, String> {
     connection
         .initiate_request(Method::Get, uri, &headers)
         .map_err(|e| format!("{uri}: {e}"))?;
+    phase("request sent (connected, TLS up, redirects followed)");
     connection
         .initiate_response()
         .map_err(|e| format!("{uri}: {e}"))?;
+    phase("response headers in");
     let status = connection.status();
     if offset > 0 && status != 206 {
         return Err(format!("{uri}: HTTP {status} to a range from {offset}"));
