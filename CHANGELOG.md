@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-30
+
 - A third style, **faders**: the disc's art without its ring; in
   portrait the progress is a fader down the left and the volume a fader
   down the right, each filling from its foot, the times above and below
