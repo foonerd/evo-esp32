@@ -104,7 +104,7 @@ impl Config {
                 Some(s) => s,
                 None => {
                     self.report.push(format!(
-                        "style = {name}: no such style (disc or card); {} stands",
+                        "style = {name}: no such style (disc, card or faders); {} stands",
                         fallback.name()
                     ));
                     fallback

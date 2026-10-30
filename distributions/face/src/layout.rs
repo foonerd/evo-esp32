@@ -24,6 +24,10 @@ pub enum Style {
     Disc,
     /// Art as a rounded square with the text over its foot.
     Card,
+    /// Art in a circle; the progress and the volume as faders down the
+    /// sides in portrait, where a thumb reaches neither the transport nor
+    /// the other. In landscape the disc's art with the card's strip.
+    Faders,
 }
 
 impl Style {
@@ -32,6 +36,7 @@ impl Style {
         match name {
             "disc" => Some(Style::Disc),
             "card" => Some(Style::Card),
+            "faders" => Some(Style::Faders),
             _ => None,
         }
     }
@@ -41,6 +46,7 @@ impl Style {
         match self {
             Style::Disc => "disc",
             Style::Card => "card",
+            Style::Faders => "faders",
         }
     }
 }
@@ -271,6 +277,30 @@ impl Layout {
                 r(w - 16 - 36, 212, 36, 13),
                 Some(r(60, 217, w - 120, 4)),
             ),
+            // The disc without its ring; the progress a fader down the
+            // left, the volume a fader down the right, both filling from
+            // the foot, each with its figures above and below it. The
+            // text keeps to the middle between them. The transport is the
+            // disc's, with nothing a thumb can brush on the way to it.
+            Style::Faders => Layout {
+                elapsed: r(2, 24, 40, 13),
+                duration: r(2, 236, 40, 13),
+                seek: Some(r(20, 46, 4, 182)),
+                volume: Slider {
+                    bar: r(w - 24, 46, 4, 182),
+                    icon: Some(Point::new(w - 22, 30)),
+                    label: Some(r(w - 42, 236, 40, 13)),
+                },
+                ..common(
+                    r(50, 28, 140, 140),
+                    r(44, 180, w - 88, 18),
+                    r(44, 199, w - 88, 15),
+                    r(44, 214, w - 88, 13),
+                    r(0, 0, 0, 0),
+                    r(0, 0, 0, 0),
+                    None,
+                )
+            },
         }
     }
 
@@ -295,7 +325,7 @@ impl Layout {
                     label: Some(r(right - 36, 187, 36, 13)),
                 },
             ),
-            Style::Card => (
+            Style::Card | Style::Faders => (
                 Some(r(90, 210, right - 36 - 8 - 90, 4)),
                 Slider {
                     bar: r(86, 182, right - 36 - 8 - 86, 4),
@@ -306,7 +336,9 @@ impl Layout {
         };
         let (elapsed, duration) = match style {
             Style::Disc => (r(tx, 88, 40, 12), r(right - 40, 88, 40, 12)),
-            Style::Card => (r(46, 205, 36, 13), r(right - 36, 205, 36, 13)),
+            Style::Card | Style::Faders => {
+                (r(46, 205, 36, 13), r(right - 36, 205, 36, 13))
+            }
         };
         Layout {
             frame: Size::new(w as u32, h as u32),
@@ -377,7 +409,7 @@ impl Layout {
                 let inner = self.art.size.width as i32 / 2 + RING_GAP;
                 Some((inner, inner + RING))
             }
-            Style::Card => None,
+            Style::Card | Style::Faders => None,
         }
     }
 
@@ -491,18 +523,31 @@ impl Layout {
         if within(t.repeat, t.mode_r) {
             return Some(Hotspot::Repeat);
         }
-        // A slider is hit 12 px above and below its bar; where two
-        // sliders' reaches meet, the nearer bar takes the touch.
+        // A slider is hit 12 px to either side of its bar; where two
+        // sliders' reaches meet, the nearer bar takes the touch. A bar
+        // taller than wide is a fader: its fraction runs up from the foot.
         let along = |bar: Rectangle| {
-            let touch = Rectangle::new(
-                bar.top_left - Point::new(4, 12),
-                bar.size + Size::new(8, 24),
-            );
-            touch.contains(p).then(|| {
-                let f = ((p.x - bar.top_left.x) as f32 / bar.size.width as f32)
-                    .clamp(0.0, 1.0);
-                ((p.y - bar.center().y).abs(), f)
-            })
+            let (reach, f, d) = if is_fader(bar) {
+                (
+                    Rectangle::new(
+                        bar.top_left - Point::new(12, 4),
+                        bar.size + Size::new(24, 8),
+                    ),
+                    1.0 - (p.y - bar.top_left.y) as f32
+                        / bar.size.height as f32,
+                    (p.x - bar.center().x).abs(),
+                )
+            } else {
+                (
+                    Rectangle::new(
+                        bar.top_left - Point::new(4, 12),
+                        bar.size + Size::new(8, 24),
+                    ),
+                    (p.x - bar.top_left.x) as f32 / bar.size.width as f32,
+                    (p.y - bar.center().y).abs(),
+                )
+            };
+            reach.contains(p).then(|| (d, f.clamp(0.0, 1.0)))
         };
         let volume =
             along(self.volume.bar).map(|(d, f)| (d, Hotspot::Volume(f)));
@@ -537,6 +582,12 @@ impl Layout {
         }
         None
     }
+}
+
+/// Whether a slider's bar stands rather than lies: it fills from the
+/// foot and is read the same way.
+pub fn is_fader(bar: Rectangle) -> bool {
+    bar.size.height > bar.size.width
 }
 
 /// Clockwise turns from twelve o'clock of the direction `dx, dy` (screen

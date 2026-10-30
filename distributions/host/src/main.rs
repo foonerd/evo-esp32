@@ -118,7 +118,7 @@ evo-esp32-host: the evo-esp32 fabric playing a directory on a desktop
   --panel PATH      write the panel's last frame as a PNG
   --sheet           with the details sheet raised over it
   --rotation DEG    the panel's rotation, 0, 90, 180 or 270 (default 0)
-  --style NAME      the face's style, disc or card (default disc)
+  --style NAME      the face's style, disc, card or faders (default disc)
   --theme NAME      the face's theme: evo-default, night-sky, sunrise, air, liquid
   --gallery DIR     write a frame for every rotation, style and theme there and exit
   --wav PATH        record what the sink let out as a WAV
@@ -212,7 +212,7 @@ fn parse_args() -> Result<Cli, String> {
             "--tone" => cli.tone = Some(PathBuf::from(value)),
             "--style" => {
                 cli.style = Style::named(&value).ok_or_else(|| {
-                    format!("--style must be disc or card, got {value:?}")
+                    format!("--style must be disc, card or faders, got {value:?}")
                 })?;
             }
             "--theme" => {
@@ -446,7 +446,7 @@ fn gallery(dir: &std::path::Path) -> Result<(), String> {
     };
     let view = panel::View::new(&pb, Some(&out), "Card");
     for rotation in [0u16, 90, 180, 270] {
-        for style in [Style::Disc, Style::Card] {
+        for style in [Style::Disc, Style::Card, Style::Faders] {
             for t in theme::ALL {
                 let mut p = panel::Panel::new(rotation, style, *t);
                 let side = p.face_mut().layout().art.size.width;

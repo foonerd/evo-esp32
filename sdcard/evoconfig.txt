@@ -15,7 +15,9 @@
 theme = evo-default
 
 # The face's style: disc (art in a circle, the progress on a ring round
-# it) or card (art as a rounded square, the text over its foot).
+# it), card (art as a rounded square, the text over its foot) or faders
+# (the disc's art; in portrait the progress and the volume stand as
+# faders down the sides, clear of the transport).
 style = disc
 
 # Screen rotation in degrees clockwise: 0, 90, 180 or 270. Applied at

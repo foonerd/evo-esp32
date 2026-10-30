@@ -6,7 +6,8 @@
 //! Nothing here is a plugin. The face is a consumer: it reads the
 //! `playback` and `delivery` projections as a [`View`] and draws Now
 //! Playing on any RGB565 draw target: the board's panel, or a buffer the
-//! host writes as a PNG. Two styles ([`Style::Disc`], [`Style::Card`]),
+//! host writes as a PNG. Three styles ([`Style::Disc`], [`Style::Card`],
+//! [`Style::Faders`]),
 //! the family's themes ([`theme`]), four rotations ([`Layout`]).
 //!
 //! A full frame is tens of milliseconds over SPI, so [`Face::refresh`]
@@ -1019,10 +1020,10 @@ impl Face {
         let l = self.layout;
         let t = self.theme;
         match (l.style, &self.art) {
-            (Style::Disc, Some(art)) => {
+            (Style::Disc | Style::Faders, Some(art)) => {
                 draw::art_disc(target, l.art, art, t.background)
             }
-            (Style::Disc, None) => match view.station() {
+            (Style::Disc | Style::Faders, None) => match view.station() {
                 Some(name) => draw::station_disc(target, l.art, name, &t),
                 None => draw::placeholder_disc(target, l.art, &t),
             },
@@ -1145,7 +1146,7 @@ impl Face {
         let band = self.card_band();
         let under = band.map_or(t.background, |(_, colour)| colour);
         let align = match l.style {
-            Style::Disc if centred => Align::Centre,
+            Style::Disc | Style::Faders if centred => Align::Centre,
             _ => Align::Left,
         };
         // On the band the lines step down a size, to sit on the art.
@@ -1473,11 +1474,18 @@ impl Face {
     {
         let l = self.layout;
         let t = self.theme;
+        // Beside a fader the figures centre in its column.
+        let fader = l.seek.is_some_and(layout::is_fader);
+        let (left, right) = if fader {
+            (Align::Centre, Align::Centre)
+        } else {
+            (Align::Left, Align::Right)
+        };
         text::SMALL.line(
             target,
             &clock(view.position_ms),
             l.elapsed,
-            Align::Left,
+            left,
             t.muted_fg,
             t.background,
         )?;
@@ -1486,7 +1494,7 @@ impl Face {
             target,
             &dur,
             l.duration,
-            Align::Right,
+            right,
             t.muted_fg,
             t.background,
         )
@@ -1547,11 +1555,16 @@ impl Face {
             } else {
                 format!("{}%", view.volume)
             };
+            let align = if layout::is_fader(s.bar) {
+                Align::Centre
+            } else {
+                Align::Right
+            };
             text::SMALL.line(
                 target,
                 &label,
                 area,
-                Align::Right,
+                align,
                 t.muted_fg,
                 t.background,
             )?;
@@ -1579,7 +1592,27 @@ impl Face {
         );
         target.fill_solid(&travel, t.background)?;
         draw::rounded(target, bar, 2, t.border, t.background)?;
-        let filled = (bar.size.width as f32 * frac.clamp(0.0, 1.0)) as u32;
+        let frac = frac.clamp(0.0, 1.0);
+        if layout::is_fader(bar) {
+            // Filled from the foot; the knob rides the fill's top.
+            let filled = (bar.size.height as f32 * frac) as u32;
+            let top = bar.top_left.y + (bar.size.height - filled) as i32;
+            if filled > 0 {
+                draw::rounded(
+                    target,
+                    Rectangle::new(
+                        Point::new(bar.top_left.x, top),
+                        Size::new(bar.size.width, filled),
+                    ),
+                    2,
+                    fill,
+                    t.background,
+                )?;
+            }
+            let k = Point::new(bar.center().x, top);
+            return draw::disc(target, k, KNOB, knob, t.background);
+        }
+        let filled = (bar.size.width as f32 * frac) as u32;
         if filled > 0 {
             draw::rounded(
                 target,
@@ -1675,7 +1708,7 @@ mod tests {
     #[test]
     fn every_rotation_and_style_fits_its_frame() {
         for rotation in [0u16, 90, 180, 270] {
-            for style in [Style::Disc, Style::Card] {
+            for style in [Style::Disc, Style::Card, Style::Faders] {
                 let l = Layout::new(rotation, style);
                 let frame = l.bounds();
                 let t = l.transport;
@@ -1765,6 +1798,18 @@ mod tests {
                             ]);
                         }
                     }
+                    Style::Faders => {
+                        regions.extend([
+                            ("art", l.art),
+                            ("elapsed", l.elapsed),
+                            ("duration", l.duration),
+                            ("title", l.title),
+                            ("artist", l.artist),
+                            ("album", l.album),
+                            ("shuffle", button(t.shuffle, t.mode_r)),
+                            ("repeat", button(t.repeat, t.mode_r)),
+                        ]);
+                    }
                 }
                 for (name, r) in &regions {
                     assert_eq!(
@@ -1801,12 +1846,30 @@ mod tests {
                         }
                         assert_eq!(l.hit(c), Some(Hotspot::Art));
                     }
-                    Style::Card => match l.hit(l.seek.unwrap().center()) {
-                        Some(Hotspot::Seek(f)) => {
-                            assert!((f - 0.5).abs() < 0.03)
+                    Style::Card | Style::Faders => {
+                        match l.hit(l.seek.unwrap().center()) {
+                            Some(Hotspot::Seek(f)) => {
+                                assert!((f - 0.5).abs() < 0.03)
+                            }
+                            other => panic!("strip centre hit {other:?}"),
                         }
-                        other => panic!("strip centre hit {other:?}"),
-                    },
+                        // A fader reads from its foot.
+                        if style == Style::Faders && rotation % 180 == 0 {
+                            let bar = l.seek.unwrap();
+                            let foot = Point::new(
+                                bar.center().x,
+                                bar.top_left.y + bar.size.height as i32 - 1,
+                            );
+                            match l.hit(foot) {
+                                Some(Hotspot::Seek(f)) => assert!(f < 0.02),
+                                other => panic!("fader foot hit {other:?}"),
+                            }
+                            match l.hit(l.volume.bar.top_left) {
+                                Some(Hotspot::Volume(f)) => assert!(f > 0.98),
+                                other => panic!("fader head hit {other:?}"),
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1814,7 +1877,7 @@ mod tests {
 
     #[test]
     fn the_face_repaints_only_what_moved() {
-        for style in [Style::Disc, Style::Card] {
+        for style in [Style::Disc, Style::Card, Style::Faders] {
             let mut face = Face::new(0, style, theme::EVO_DEFAULT);
             let mut display =
                 SimulatorDisplay::<Rgb565>::new(face.layout().frame);
@@ -1880,7 +1943,7 @@ mod tests {
 
     #[test]
     fn art_arrives_as_its_own_repaint_and_shows_in_both_styles() {
-        for style in [Style::Disc, Style::Card] {
+        for style in [Style::Disc, Style::Card, Style::Faders] {
             let mut face = Face::new(0, style, theme::EVO_DEFAULT);
             let mut display =
                 SimulatorDisplay::<Rgb565>::new(face.layout().frame);
