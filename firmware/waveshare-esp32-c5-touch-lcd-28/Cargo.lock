@@ -273,7 +273,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 [[package]]
 name = "ch32v003-expander"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=c73cb2bd21a520502155f5126082e2e52fdb9227#c73cb2bd21a520502155f5126082e2e52fdb9227"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -333,7 +333,7 @@ dependencies = [
 [[package]]
 name = "companion-board-waveshare-esp32-c5-touch-lcd-28"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=c73cb2bd21a520502155f5126082e2e52fdb9227#c73cb2bd21a520502155f5126082e2e52fdb9227"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
 dependencies = [
  "ch32v003-expander",
  "companion-hal",
@@ -347,12 +347,12 @@ dependencies = [
 [[package]]
 name = "companion-hal"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=c73cb2bd21a520502155f5126082e2e52fdb9227#c73cb2bd21a520502155f5126082e2e52fdb9227"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
 
 [[package]]
 name = "companion-platform-esp-idf"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=c73cb2bd21a520502155f5126082e2e52fdb9227#c73cb2bd21a520502155f5126082e2e52fdb9227"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
 dependencies = [
  "companion-hal",
  "esp-idf-svc",
@@ -454,7 +454,7 @@ dependencies = [
 [[package]]
 name = "cst3530"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=c73cb2bd21a520502155f5126082e2e52fdb9227#c73cb2bd21a520502155f5126082e2e52fdb9227"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
 dependencies = [
  "companion-hal",
  "embedded-hal 1.0.0",
@@ -771,7 +771,7 @@ dependencies = [
 [[package]]
 name = "es8311"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=c73cb2bd21a520502155f5126082e2e52fdb9227#c73cb2bd21a520502155f5126082e2e52fdb9227"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -779,7 +779,7 @@ dependencies = [
 [[package]]
 name = "es9018k2m"
 version = "0.1.0"
-source = "git+https://github.com/foonerd/volumio-esp-companion?rev=c73cb2bd21a520502155f5126082e2e52fdb9227#c73cb2bd21a520502155f5126082e2e52fdb9227"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
 dependencies = [
  "embedded-hal 1.0.0",
 ]
@@ -951,6 +951,7 @@ dependencies = [
  "org-evoframework-source-files",
  "org-evoframework-source-nfs",
  "org-evoframework-source-smb",
+ "pcm512x",
  "serde_json",
 ]
 
@@ -1593,6 +1594,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "pcm512x"
+version = "0.1.0"
+source = "git+https://github.com/foonerd/volumio-esp-companion?rev=ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef#ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef"
+dependencies = [
+ "embedded-hal 1.0.0",
 ]
 
 [[package]]

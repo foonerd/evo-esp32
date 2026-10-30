@@ -51,6 +51,7 @@ mod update;
 #[global_allocator]
 static ALLOC: alloc::Placed = alloc::Placed;
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,7 @@ use companion_platform_esp_idf::{Band, Card};
 use embedded_hal_bus::i2c::RefCellDevice;
 use es8311::Es8311;
 use es9018k2m::Es9018k2m;
+use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::Pin;
 use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
@@ -105,6 +107,7 @@ use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::SourceFiles;
 use org_evoframework_source_nfs::{NfsOpener, Share as NfsShare, SourceNfs};
 use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
+use pcm512x::{Pcm512x, WordLength};
 use sink::{I2sSink, RateFollower};
 
 mod generated {
@@ -168,7 +171,10 @@ struct Codec(Es8311<RefCellDevice<'static, I2cDriver<'static>>>);
 
 impl RateFollower for Codec {
     fn rate_changed(&mut self, rate: u32, bits: u8) {
-        if let Err(e) = self.0.set_format(rate, bits) {
+        if let Err(e) =
+            self.0
+                .set_format_in_slots(rate, bits, sink::SLOT_BITS as u8)
+        {
             warn!("es8311: no setting for {rate} Hz {bits}-bit: {e:?}; the speaker may be off-pitch");
         }
     }
@@ -257,7 +263,7 @@ fn main() -> anyhow::Result<()> {
         .open()
         .map_err(|e| anyhow::anyhow!("es8311 open: {e:?}"))?;
     codec
-        .set_format(RATE, 16)
+        .set_format_in_slots(RATE, 16, sink::SLOT_BITS as u8)
         .map_err(|e| anyhow::anyhow!("es8311 format: {e:?}"))?;
     codec
         .start()
@@ -271,7 +277,7 @@ fn main() -> anyhow::Result<()> {
     codec
         .set_volume(half_db)
         .map_err(|e| anyhow::anyhow!("es8311 volume: {e:?}"))?;
-    info!("es8311: open, {RATE} Hz 16-bit, started, at its 100% ({half_db} half-dB); the level is the sink's");
+    info!("es8311: open, {RATE} Hz 16-bit in {}-bit slots, started, at its 100% ({half_db} half-dB); the level is the sink's", sink::SLOT_BITS);
 
     memory("after the panel and the codec");
     let sink = I2sSink::new(
@@ -282,7 +288,7 @@ fn main() -> anyhow::Result<()> {
         RATE,
         Codec(codec),
     )?;
-    info!("i2s0: master, Philips 16-bit stereo, BCLK GPIO24, WS GPIO25, DOUT GPIO26");
+    info!("i2s0: master, Philips 16-bit stereo in 32-bit slots (64 fs), BCLK GPIO24, WS GPIO25, DOUT GPIO26");
     memory("after the DMA ring");
 
     // The TCP/IP stack before anything binds a socket: the multiroom
@@ -350,6 +356,18 @@ fn main() -> anyhow::Result<()> {
     mirror(pins.gpio11.pin(), sys::I2SO_SD_OUT_IDX);
     info!("i2s0: mirrored for a HAT: BCLK GPIO2 (J8.7), WS GPIO3 (J8.8), DATA GPIO11 (J6 TXD)");
 
+    // What answers on the bus besides the panel's own three parts, so a
+    // board on the header is seen before anything is said to it: one
+    // byte read from each address, the way i2cdetect looks.
+    let survey = survey_bus(board.bus);
+    if survey.is_empty() {
+        info!("i2c: nothing on the header's bus");
+        config.note("i2c: nothing on the header's bus");
+    } else {
+        info!("i2c: on the header's bus: {survey}");
+        config.note(format!("i2c: {survey}"));
+    }
+
     let mut sabre = Es9018k2m::new(RefCellDevice::new(board.bus));
     match sabre.detect() {
         Ok(Some(id)) => {
@@ -368,6 +386,47 @@ fn main() -> anyhow::Result<()> {
             info!("es9018k2m: something answers at 0x48 but is not one")
         }
         Err(_) => info!("es9018k2m: none on the bus"),
+    }
+
+    // A PCM512x HAT (IQaudIO DAC+, Waveshare's PCM5122 board at 0x4C;
+    // HiFiBerry's DAC+ at 0x4D) has no clock of its own and plays nothing
+    // until told to run its PLL from BCK. It has no identity register:
+    // two reset values say whether one answers.
+    let mut pcm512x_found = false;
+    for address in [pcm512x::ADDRESS, pcm512x::ADDRESS_ADR1] {
+        let mut dac = Pcm512x::at(RefCellDevice::new(board.bus), address);
+        match dac.detect() {
+            Ok(Some(id)) => {
+                pcm512x_found = true;
+                info!(
+                    "pcm512x: found at {address:#04x} (register 12 {:#04x}, 42 {:#04x})",
+                    id.master_mode, id.routing
+                );
+                match dac.init(WordLength::Sixteen) {
+                    Ok(()) => {
+                        let clocks = dac.clocks().ok();
+                        let sck = match dac.sck_present() {
+                            Ok(true) => "an SCK arrives: the board runs an oscillator of its own, which this bring-up does not use",
+                            Ok(false) => "no SCK, as expected",
+                            Err(_) => "SCK unknown",
+                        };
+                        info!("pcm512x: initialised: PLL on BCK, 16-bit I2S, at its 0 dB; the level is the sink's; {sck}; clocks {clocks:?}");
+                        config.note(format!(
+                            "hat: PCM512x at {address:#04x}, PLL on BCK, 16-bit I2S; {sck}"
+                        ));
+                    }
+                    Err(e) => warn!("pcm512x: init failed: {e:?}"),
+                }
+                break;
+            }
+            Ok(None) => {
+                info!("pcm512x: something answers at {address:#04x} but is not one")
+            }
+            Err(_) => {}
+        }
+    }
+    if !pcm512x_found {
+        info!("pcm512x: none on the bus");
     }
 
     let volume = sink.volume();
@@ -2689,6 +2748,35 @@ fn idle() -> ! {
         std::thread::sleep(Duration::from_secs(60));
         info!("idle");
     }
+}
+
+/// The panel's own parts on the bus, not probed: the codec, the IO
+/// expander, the touch controller, and the clock, IMU and humidity
+/// sensor at the addresses the bus showed on the bench (2026-10-30).
+const PANEL_I2C: [u8; 6] = [es8311::ADDRESS, 0x24, 0x51, 0x58, 0x6B, 0x70];
+
+/// Every 7-bit address outside the panel's own that acknowledges a
+/// one-byte read, with what usually sits there, as one line.
+fn survey_bus(bus: &RefCell<I2cDriver<'static>>) -> String {
+    let timeout = TickType::from(Duration::from_millis(20)).0;
+    let mut found = Vec::new();
+    for address in 0x08u8..=0x77 {
+        if PANEL_I2C.contains(&address) {
+            continue;
+        }
+        let mut byte = [0u8];
+        if bus.borrow_mut().read(address, &mut byte, timeout).is_ok() {
+            let usual = match address {
+                0x48 => " (ES9018K2M class)",
+                0x4C..=0x4F => " (PCM512x class; a PCM1792A at 0x4c)",
+                0x50..=0x57 => " (an EEPROM: a HAT's ID, or the board's)",
+                0x62 => " (a Si5351 clock generator)",
+                _ => "",
+            };
+            found.push(format!("{address:#04x}{usual}"));
+        }
+    }
+    found.join(", ")
 }
 
 /// Drive `gpio` from the I2S output `signal` as well as the pin the

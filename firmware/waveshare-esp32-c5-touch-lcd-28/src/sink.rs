@@ -107,6 +107,11 @@ fn lead_ms(rate: u32, buffers: u32) -> u32 {
 /// Unity on the Q15 gain scale.
 const UNITY: u16 = 32767;
 
+/// The width of each I2S slot on the wire: 32 bits, so the bit clock is
+/// 64 times the sample rate. The samples are 16-bit; the codec and a HAT
+/// are told both.
+pub const SLOT_BITS: u32 = 32;
+
 /// The volume the sink applies to every frame, shared with whoever owns
 /// the `output` subject: the one level both the speaker and a HAT hear,
 /// since they share the stream. The DACs themselves sit at their 100%.
@@ -495,7 +500,7 @@ impl Channel {
         rate: u32,
     ) -> Result<(Self, u32), sys::EspError> {
         let lead = lead_ms(rate, BUFFERS);
-        info!("i2s: {rate} Hz, {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead");
+        info!("i2s: {rate} Hz, 16-bit samples in {SLOT_BITS}-bit slots (bit clock {} fs), {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead", 2 * SLOT_BITS);
         let chan = sys::i2s_chan_config_t {
             id: sys::i2s_port_t_I2S_NUM_0,
             role: sys::i2s_role_t_I2S_ROLE_MASTER,
@@ -519,17 +524,21 @@ impl Channel {
             ))?;
             let std = sys::i2s_std_config_t {
                 clk_cfg: Self::clock(rate),
+                // 16-bit samples in 32-bit slots: the bit clock is 64 fs,
+                // the frame every Pi-HAT DAC takes (a Sabre in hardware
+                // mode reads 32 fs as a wrong word and plays it loud);
+                // the samples sit at the top of the slot, Philips-shifted.
                 slot_cfg: sys::i2s_std_slot_config_t {
                     data_bit_width:
                         sys::i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT,
                     slot_bit_width:
-                        sys::i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_AUTO,
+                        sys::i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_32BIT,
                     slot_mode: sys::i2s_slot_mode_t_I2S_SLOT_MODE_STEREO,
                     slot_mask: 0b11,
-                    ws_width: 16,
+                    ws_width: SLOT_BITS,
                     ws_pol: false,
                     bit_shift: true,
-                    left_align: false,
+                    left_align: true,
                     big_endian: false,
                     bit_order_lsb: false,
                 },
