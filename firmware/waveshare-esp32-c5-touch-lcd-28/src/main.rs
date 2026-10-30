@@ -38,7 +38,8 @@
 //!    from the playback and delivery projections every 40 ms, repainting
 //!    only what moved; a full frame comes in stages with a decoder tick
 //!    between each, so a track change does not starve the DMA ring; the
-//!    backlight comes on after the first frame.
+//!    backlight comes on with a first frame painted before the card is
+//!    read.
 
 mod alloc;
 mod art;
@@ -52,6 +53,7 @@ mod update;
 static ALLOC: alloc::Placed = alloc::Placed;
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -104,7 +106,7 @@ use org_evoframework_snapcast_receiver::{
     Link as SnapLink, Settings as SnapSettings, SnapcastReceiver,
 };
 use org_evoframework_source_dlna::SourceDlna;
-use org_evoframework_source_files::SourceFiles;
+use org_evoframework_source_files::{FactsCache, SourceFiles};
 use org_evoframework_source_nfs::{NfsOpener, Share as NfsShare, SourceNfs};
 use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
 use pcm512x::{Pcm512x, WordLength};
@@ -131,6 +133,14 @@ const VOLUME_PERCENT: u8 = 40;
 const HW_GAIN_HALF_DB: i16 = -7;
 /// Where the card appears, and where the files source looks.
 const MUSIC: &str = companion_platform_esp_idf::card::MOUNT_POINT;
+/// The facts reader's stack: an open and a 64-byte read of one file.
+const FACTS_STACK: usize = 8 * 1024;
+/// How long the facts reader waits for the first track to play before
+/// it starts regardless.
+const FACTS_WAIT: Duration = Duration::from_secs(30);
+/// The pause between the files the facts reader opens, so the
+/// decoder's reader and an open get the card between them.
+const FACTS_PACE: Duration = Duration::from_millis(50);
 /// How often the loop logs the heap and the stack.
 const HEARTBEAT: Duration = Duration::from_secs(10);
 /// A finger held this long on the panel, from the moment it lights,
@@ -447,13 +457,18 @@ fn main() -> anyhow::Result<()> {
     );
     let (shares, exports) = shares(&config.settings);
     let mut shared_sink = sink::Shared::new(sink);
+    // The card's files' rates and lengths, read by a thread of their
+    // own once the listing has named them: an open costs a walk of the
+    // file's clusters here, and 125 of them before the first frame
+    // was 6 s of black panel.
+    let card_facts = FactsCache::new();
     let mut steward = bring_up(
         shared_sink.clone(),
         &link,
         room_settings,
         &snap_link,
         snap_settings,
-        (shares, exports),
+        (shares, exports, card_facts.clone()),
         now(),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -495,12 +510,49 @@ fn main() -> anyhow::Result<()> {
             .join(", ")
     );
 
+    // The panel: the player's face, lit with a first frame before the
+    // card is read (a card of a hundred files takes seconds to list,
+    // and the panel stood dark for them). In the loop a full frame
+    // comes in stages, one per pass, so the decoder ticks between them
+    // and the DMA ring is fed; `painting` keeps the passes coming
+    // without waiting for the face's cadence.
+    let theme = config.theme(theme::EVO_DEFAULT);
+    let style = config.style(Style::Disc);
+    let mut face = Face::new(rotation, style, theme);
+    memory("after the face");
+    let mut lit = false;
+    {
+        let began = Instant::now();
+        let mut first = View::new(
+            &playback::State::default(),
+            output_state(&steward).as_ref(),
+            "Card",
+        );
+        first.notice = "Reading the card\u{2026}".to_string();
+        match face.refresh_whole(&mut board.panel, &first) {
+            Ok(_) => {
+                board.backlight(BACKLIGHT_PERCENT)?;
+                lit = true;
+                info!(
+                    "panel lit: the first frame in {} ms, before the card is read",
+                    began.elapsed().as_millis()
+                );
+            }
+            Err(e) => warn!("panel: {e:?}"),
+        }
+    }
+
     let mut tracks =
         list_tracks(&mut steward, "", now()).map_err(|e| anyhow::anyhow!(e))?;
     memory("after the listing");
     if tracks.is_empty() {
         warn!("no audio file on the card; the face says so");
     }
+    // The files' facts are read once the first track plays, or the
+    // card has had its chance: a reader run alongside the first open
+    // held the filesystem's lock against it, and the open took 7 s.
+    let mut facts_reading = false;
+    let facts_due = Instant::now() + FACTS_WAIT;
     // The card's files are the queue unless `start` names something
     // else; stations have no end, so the card's run leaves them out and
     // a tap in the library plays one.
@@ -616,6 +668,7 @@ fn main() -> anyhow::Result<()> {
         advance(
             &mut steward,
             &mut queue,
+            &card_facts,
             Step::Next,
             now(),
             wanted,
@@ -639,24 +692,16 @@ fn main() -> anyhow::Result<()> {
     // the folder's tracks in the source's order, which a tap plays from.
     let mut browse = Browse::default();
 
-    // The panel: the player's face, lit after its first frame. A full
-    // frame comes in stages, one per pass of the loop, so the decoder
-    // ticks between them and the DMA ring is fed; `painting` keeps the
-    // passes coming without waiting for the face's cadence.
-    let theme = config.theme(theme::EVO_DEFAULT);
-    let style = config.style(Style::Disc);
-    let mut face = Face::new(rotation, style, theme);
     if let Some((heading, line)) = card_note.take() {
         face.set_message(Some(Message::new(
             heading,
             format!("{line}. Tap to go on."),
         )));
     }
-    memory("after the face");
     if config.settings.dac.is_some() || config.settings.output.is_some() {
         config.note("dac, output: read; this firmware plays the speaker and a HAT both and has no register of boards yet");
     }
-    memory("before the first frame");
+    memory("before the loop");
     let status_head = [
         format!(
             "evo-esp32 {} {} on Waveshare ESP32-C5-Touch-LCD-2.8",
@@ -689,7 +734,6 @@ fn main() -> anyhow::Result<()> {
     }) {
         warn!("watchdog: the loop could not subscribe: {e}");
     }
-    let mut lit = false;
     let mut last_face = Instant::now() - FACE_TICK;
     let mut last_servers = Instant::now();
     let mut last_touch = Instant::now() - FACE_AWAKE;
@@ -783,6 +827,7 @@ fn main() -> anyhow::Result<()> {
                         current = advance(
                             &mut steward,
                             &mut queue,
+                            &card_facts,
                             Step::Current,
                             now(),
                             wanted,
@@ -801,6 +846,7 @@ fn main() -> anyhow::Result<()> {
                         current = advance(
                             &mut steward,
                             &mut queue,
+                            &card_facts,
                             Step::Current,
                             now(),
                             wanted,
@@ -892,6 +938,7 @@ fn main() -> anyhow::Result<()> {
                                         current = advance(
                                             &mut steward,
                                             &mut queue,
+                                            &card_facts,
                                             Step::Current,
                                             t,
                                             wanted,
@@ -917,6 +964,7 @@ fn main() -> anyhow::Result<()> {
                                     current = advance(
                                         &mut steward,
                                         &mut queue,
+                                        &card_facts,
                                         Step::Skip,
                                         t,
                                         wanted,
@@ -941,6 +989,7 @@ fn main() -> anyhow::Result<()> {
                                     current = advance(
                                         &mut steward,
                                         &mut queue,
+                                        &card_facts,
                                         Step::Previous,
                                         t,
                                         wanted,
@@ -979,6 +1028,7 @@ fn main() -> anyhow::Result<()> {
                                     Screen::Library if !browse.loaded => {
                                         browse.open(
                                             &mut steward,
+                                            &card_facts,
                                             &mut face,
                                             None,
                                             t,
@@ -1127,6 +1177,7 @@ fn main() -> anyhow::Result<()> {
                                 if entry.folder {
                                     browse.descend(
                                         &mut steward,
+                                        &card_facts,
                                         &mut face,
                                         &entry.name,
                                         t,
@@ -1152,6 +1203,7 @@ fn main() -> anyhow::Result<()> {
                                         current = advance(
                                             &mut steward,
                                             &mut queue,
+                                            &card_facts,
                                             Step::Skip,
                                             t,
                                             wanted,
@@ -1193,7 +1245,12 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Intent::Tap(Hotspot::Back) => {
-                                browse.ascend(&mut steward, &mut face, t);
+                                browse.ascend(
+                                    &mut steward,
+                                    &card_facts,
+                                    &mut face,
+                                    t,
+                                );
                             }
                             Intent::Scroll(dy) => face.scroll(dy),
                             Intent::Tap(_)
@@ -1291,6 +1348,7 @@ fn main() -> anyhow::Result<()> {
                                 current = advance(
                                     &mut steward,
                                     &mut queue,
+                                    &card_facts,
                                     Step::Current,
                                     t,
                                     wanted,
@@ -1385,6 +1443,7 @@ fn main() -> anyhow::Result<()> {
                     current = advance(
                         &mut steward,
                         &mut queue,
+                        &card_facts,
                         Step::Next,
                         now(),
                         wanted,
@@ -1507,7 +1566,7 @@ fn main() -> anyhow::Result<()> {
             {
                 last_servers = Instant::now();
                 let here = browse.here.clone();
-                browse.open(&mut steward, &mut face, here, t);
+                browse.open(&mut steward, &card_facts, &mut face, here, t);
             }
             let output = output_state(&steward);
             if let Some(out) = &output {
@@ -1530,6 +1589,13 @@ fn main() -> anyhow::Result<()> {
                     memory("with the station open");
                 }
                 _ => opening = false,
+            }
+            if !facts_reading
+                && (pb.status == playback::Status::Playing
+                    || Instant::now() >= facts_due)
+            {
+                facts_reading = true;
+                read_facts(card_facts.clone());
             }
             // The chip's ceiling is the distribution's to enforce: the
             // decoder would play it, badly.
@@ -1692,6 +1758,7 @@ fn main() -> anyhow::Result<()> {
                         current = advance(
                             &mut steward,
                             &mut queue,
+                            &card_facts,
                             Step::Current,
                             now(),
                             wanted,
@@ -1738,6 +1805,7 @@ fn main() -> anyhow::Result<()> {
                     current = advance(
                         &mut steward,
                         &mut queue,
+                        &card_facts,
                         step,
                         now(),
                         wanted,
@@ -1965,14 +2033,16 @@ fn shares(
 
 /// Build the fabric: steward, plugins, checked against the catalogue.
 /// The sink is shared between the decoder and the two network
-/// receivers; the loop grants one of them custody at a time.
+/// receivers; the loop grants one of them custody at a time. The
+/// sources' givens: the shares and exports the card names, the cache
+/// the card's listings take their files' facts from.
 fn bring_up(
     sink: sink::Shared<Codec>,
     link: &Link,
     room: RoomSettings,
     snap_link: &SnapLink,
     snap: SnapSettings,
-    (shares, exports): (Vec<Share>, Vec<NfsShare>),
+    (shares, exports, facts): (Vec<Share>, Vec<NfsShare>, Arc<FactsCache>),
     now: Ticks,
 ) -> Result<Steward, String> {
     let catalogue = catalogue();
@@ -1983,7 +2053,7 @@ fn bring_up(
     let mut steward = Steward::new(catalogue, Config::default())
         .map_err(|e| e.to_string())?;
     steward
-        .admit_respondent(Box::new(SourceFiles::new(MUSIC)), now)
+        .admit_respondent(Box::new(SourceFiles::with_facts(MUSIC, facts)), now)
         .map_err(|e| e.to_string())?;
     steward
         .admit_respondent(Box::new(SourceDlna::new()), now)
@@ -2282,6 +2352,7 @@ enum Step {
 fn advance(
     steward: &mut Steward,
     queue: &mut Queue<Track>,
+    facts: &FactsCache,
     step: Step,
     now: Ticks,
     level: u8,
@@ -2306,7 +2377,7 @@ fn advance(
             None => return None,
         };
         step = Step::Skip;
-        if !within_ceiling(&track) {
+        if !within_ceiling(&track, facts) {
             info!(
                 "{:?} is {} Hz, above this board's ceiling of {RATE_CEILING} Hz; passed over unopened",
                 track.title,
@@ -2433,10 +2504,77 @@ fn plain(why: &str) -> &'static str {
     }
 }
 
-/// Whether the source's listing says the track's rate is one this board
-/// plays; a track whose rate the listing does not know is tried.
-fn within_ceiling(track: &Track) -> bool {
-    track.sample_rate.is_none_or(|rate| rate <= RATE_CEILING)
+/// Whether the track's rate is one this board plays: the source's
+/// facts first (the listing may have come before they were read), then
+/// the listing's; a track whose rate neither knows is tried.
+fn within_ceiling(track: &Track, facts: &FactsCache) -> bool {
+    track
+        .uri
+        .strip_prefix("file://")
+        .and_then(|p| facts.known(Path::new(p)))
+        .and_then(|(rate, _)| rate)
+        .or(track.sample_rate)
+        .is_none_or(|rate| rate <= RATE_CEILING)
+}
+
+/// The thread that reads the card's files' headers for the facts
+/// cache, one wanted file at a time, below the loop and paced so the
+/// decoder's reader and an open get the card between its files; it
+/// says when it has caught up with what the listings asked for.
+fn read_facts(facts: Arc<FactsCache>) {
+    let spawned = evo_esp32_sdk::thread::spawn(
+        evo_esp32_sdk::thread::Role::Background,
+        "facts",
+        FACTS_STACK,
+        move || {
+            let mut began: Option<Instant> = None;
+            let mut read = 0usize;
+            loop {
+                let path = facts.next_wanted();
+                let began_at = *began.get_or_insert_with(Instant::now);
+                let got = peek_facts(&path).unwrap_or_default();
+                let left = facts.learn(path, got);
+                read += 1;
+                if left == 0 {
+                    info!(
+                        "source/files: the facts of {read} files read in {} ms",
+                        began_at.elapsed().as_millis()
+                    );
+                    began = None;
+                    read = 0;
+                } else {
+                    std::thread::sleep(FACTS_PACE);
+                }
+            }
+        },
+    );
+    if let Err(e) = spawned {
+        warn!("source/files: no facts thread: {e}; tracks above the ceiling are passed over at the open");
+    }
+}
+
+/// What a file's header states, the file opened for writing as well
+/// as reading: ESP-IDF's FAT layer maps a file's clusters at every
+/// read-only open (`vfs_fat_open`, for the fast seeks the decoder
+/// wants), a walk of the FAT that cost ~50 ms a file on a well-used
+/// card; a 64-byte peek seeks nowhere, and a read-write open is the
+/// layer's one way to say so. Nothing is written. A file that will not
+/// open so (its read-only attribute, a protected card) is opened
+/// plainly and pays for the map.
+fn peek_facts(path: &Path) -> Option<org_evoframework_source_files::Facts> {
+    use std::io::Read;
+    let name = path.file_name()?.to_str()?;
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(_) => std::fs::File::open(path).ok()?,
+    };
+    let mut head = [0u8; 64];
+    let n = file.read(&mut head).ok()?;
+    org_evoframework_source_files::facts_from_header(name, &head[..n])
 }
 
 /// The face's background as the raw RGB565 a picture is composed on.
@@ -2853,6 +2991,7 @@ impl Browse {
     fn open(
         &mut self,
         steward: &mut Steward,
+        facts: &FactsCache,
         face: &mut Face,
         place: Option<Place>,
         now: Ticks,
@@ -2932,7 +3071,7 @@ impl Browse {
                                     name: t.title.clone(),
                                     folder: false,
                                     uri: Some(t.uri.clone()),
-                                    playable: within_ceiling(&t),
+                                    playable: within_ceiling(&t, facts),
                                 });
                                 self.tracks.push(t);
                             }
@@ -2958,6 +3097,7 @@ impl Browse {
     fn descend(
         &mut self,
         steward: &mut Steward,
+        facts: &FactsCache,
         face: &mut Face,
         name: &str,
         now: Ticks,
@@ -2971,13 +3111,19 @@ impl Browse {
             return;
         };
         self.trail.push(self.here.clone());
-        self.open(steward, face, Some(place), now);
+        self.open(steward, facts, face, Some(place), now);
     }
 
     /// Back to the place the one in view was opened from.
-    fn ascend(&mut self, steward: &mut Steward, face: &mut Face, now: Ticks) {
+    fn ascend(
+        &mut self,
+        steward: &mut Steward,
+        facts: &FactsCache,
+        face: &mut Face,
+        now: Ticks,
+    ) {
         if let Some(parent) = self.trail.pop() {
-            self.open(steward, face, parent, now);
+            self.open(steward, facts, face, parent, now);
         }
     }
 

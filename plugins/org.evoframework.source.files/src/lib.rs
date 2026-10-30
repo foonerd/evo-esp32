@@ -7,20 +7,32 @@
 //! reads one directory under its root and answers with folders first,
 //! then the files whose extension names an audio format, each as a
 //! [`Track`] titled by its file name; every track listed is announced
-//! as a `track` subject so a consumer can find it again by URI. Nothing
-//! is read inside an audio file: tags are `metadata/tags`' concern,
-//! length is the decoder's. A playlist file (`.m3u`, `.m3u8`, `.pls`)
-//! is a folder of its own: listed among the folders, and opened, its
-//! stations (`http://`, `https://`) in the playlist's order, titled as
-//! it titles them. That is how internet radio reaches the player, a
-//! text file on the card.
+//! as a `track` subject so a consumer can find it again by URI. Of an
+//! audio file's contents only its header is read ([`header_facts`]:
+//! the rate and the length a FLAC or a WAV states in its first bytes,
+//! so a listing can say what a player with a rate ceiling cannot
+//! play); tags are `metadata/tags`' concern. A playlist file (`.m3u`,
+//! `.m3u8`, `.pls`) is a folder of its own: listed among the folders,
+//! and opened, its stations (`http://`, `https://`) in the playlist's
+//! order, titled as it titles them. That is how internet radio reaches
+//! the player, a text file on the card.
+//!
+//! Where an open is dear — a card whose filesystem maps a file's
+//! clusters at every open — a source made [`SourceFiles::with_facts`]
+//! reads no file at a listing: it takes the facts from a
+//! [`FactsCache`], names the files it has not got, and a reader thread
+//! of the distribution's works through those with
+//! [`FactsCache::read_next`]. The listing is a directory read and
+//! nothing else; the facts follow, and the next listing has them.
 //!
 //! A host plugin: it uses `std::fs`. On a device the same shelf is
 //! stocked by a source over the card's filesystem with this plugin's
 //! shape and none of its code.
 #![forbid(unsafe_code)]
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use evo_esp32_sdk::context::Context;
 use evo_esp32_sdk::contract::audio::source::{Entry, ListArgs, Listing, LIST};
@@ -53,19 +65,126 @@ static STOCKS: [Stocking; 1] = [Stocking {
     shape: shelf::SHAPE,
 }];
 
+/// What a file's header states: `(sample rate, length in ms)`, either
+/// unknown where the header does not say.
+pub type Facts = (Option<u32>, Option<u64>);
+
+/// The facts of files, read once and kept, so a listing need not open
+/// them: a listing asks ([`FactsCache::lookup`]), and a file it has no
+/// facts for yet is wanted; a reader thread waits for wanted files and
+/// reads their headers ([`FactsCache::read_next`], or
+/// [`FactsCache::next_wanted`] then [`FactsCache::learn`] where the
+/// distribution reads a header its own way). A file whose header says
+/// nothing is kept as known with nothing, so it is read once.
+#[derive(Debug, Default)]
+pub struct FactsCache {
+    state: Mutex<CacheState>,
+    wanted: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct CacheState {
+    known: HashMap<PathBuf, Facts>,
+    /// Files asked about and not yet read, in the order asked.
+    wanted: VecDeque<PathBuf>,
+}
+
+impl FactsCache {
+    /// An empty cache, shared between a source and its reader.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn state(&self) -> MutexGuard<'_, CacheState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The facts of `path` if read; else nothing, and the file is
+    /// wanted.
+    pub fn lookup(&self, path: &Path) -> Option<Facts> {
+        let mut state = self.state();
+        if let Some(facts) = state.known.get(path) {
+            return Some(*facts);
+        }
+        if !state.wanted.iter().any(|p| p == path) {
+            state.wanted.push_back(path.to_path_buf());
+            self.wanted.notify_one();
+        }
+        None
+    }
+
+    /// The facts of `path` if read; asking does not make it wanted.
+    pub fn known(&self, path: &Path) -> Option<Facts> {
+        self.state().known.get(path).copied()
+    }
+
+    /// How many files are wanted and not yet read.
+    pub fn pending(&self) -> usize {
+        self.state().wanted.len()
+    }
+
+    /// Wait for a wanted file and hand it over, to be read and
+    /// [learnt](Self::learn).
+    pub fn next_wanted(&self) -> PathBuf {
+        let mut state = self.state();
+        loop {
+            if let Some(path) = state.wanted.pop_front() {
+                return path;
+            }
+            state = self.wanted.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Keep what a file's header said. How many files are still wanted.
+    pub fn learn(&self, path: PathBuf, facts: Facts) -> usize {
+        let mut state = self.state();
+        state.known.insert(path, facts);
+        state.wanted.len()
+    }
+
+    /// Wait for a wanted file, read its header and keep what it says:
+    /// one turn of a reader thread. The file read, and how many are
+    /// still wanted after it.
+    pub fn read_next(&self) -> (PathBuf, usize) {
+        let path = self.next_wanted();
+        let facts = header_facts(&path).unwrap_or_default();
+        let left = self.learn(path.clone(), facts);
+        (path, left)
+    }
+}
+
 /// The files source.
 #[derive(Debug)]
 pub struct SourceFiles {
     root: PathBuf,
     announced: Vec<SubjectId>,
+    /// Where the facts come from; none: each file's header, at the
+    /// listing.
+    facts: Option<Arc<FactsCache>>,
 }
 
 impl SourceFiles {
-    /// A source rooted at `root`. The root is not read until `list`.
+    /// A source rooted at `root`. The root is not read until `list`;
+    /// a listing reads each audio file's header for its facts.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             announced: Vec::new(),
+            facts: None,
+        }
+    }
+
+    /// A source rooted at `root` whose listings take the files' facts
+    /// from `facts` and open no file: the files not yet in it are
+    /// wanted there, for a reader of the distribution's to fill.
+    pub fn with_facts(
+        root: impl Into<PathBuf>,
+        facts: Arc<FactsCache>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            announced: Vec::new(),
+            facts: Some(facts),
         }
     }
 
@@ -125,8 +244,11 @@ impl SourceFiles {
             if kind.is_dir() {
                 folders.push((name.clone(), rel));
             } else if is_audio(&name) {
-                let (sample_rate, duration_ms) =
-                    header_facts(&entry.path()).unwrap_or_default();
+                let (sample_rate, duration_ms) = match &self.facts {
+                    Some(cache) => cache.lookup(&entry.path()),
+                    None => header_facts(&entry.path()),
+                }
+                .unwrap_or_default();
                 tracks.push(Track {
                     uri: format!("file://{}", entry.path().display()),
                     title: title_of(&name),
@@ -653,6 +775,75 @@ mod tests {
             list(&mut s, "missing").outcome,
             Err(Fault::Failed { .. })
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A FLAC's first 42 bytes: STREAMINFO saying `rate`, 2 channels,
+    /// 16 bits, `seconds` of samples.
+    fn flac_head(rate: u32, seconds: u64) -> Vec<u8> {
+        let samples = seconds * u64::from(rate);
+        let bits: u8 = 16 - 1;
+        let mut flac = b"fLaC\x00\x00\x00\x22".to_vec();
+        flac.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0]);
+        flac.push((rate >> 12) as u8);
+        flac.push((rate >> 4) as u8);
+        flac.push((((rate & 0xf) as u8) << 4) | (1 << 1) | (bits >> 4));
+        flac.push(((bits & 0xf) << 4) | ((samples >> 32) as u8 & 0xf));
+        flac.extend_from_slice(&(samples as u32).to_be_bytes());
+        flac.extend_from_slice(&[0u8; 16]);
+        flac
+    }
+
+    #[test]
+    fn with_a_cache_a_listing_opens_nothing_and_the_facts_follow() {
+        let root = tree();
+        std::fs::write(root.join("b.flac"), flac_head(192_000, 100)).unwrap();
+        let facts = FactsCache::new();
+        let mut s = Steward::new(catalogue(), Config::default()).unwrap();
+        s.admit_respondent(
+            Box::new(SourceFiles::with_facts(&root, facts.clone())),
+            Ticks(0),
+        )
+        .unwrap();
+        let tracks = |r: Response| -> Vec<Track> {
+            let listing: Listing = from_value(&r.outcome.unwrap()).unwrap();
+            listing
+                .entries
+                .into_iter()
+                .filter_map(|e| match e {
+                    Entry::Track(t) => Some(t),
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = tracks(list(&mut s, ""));
+        assert_eq!(first.len(), 2);
+        assert!(
+            first.iter().all(|t| t.sample_rate.is_none()),
+            "nothing read at the listing"
+        );
+        assert_eq!(facts.pending(), 2, "both files wanted, once each");
+        assert_eq!(tracks(list(&mut s, "")).len(), 2);
+        assert_eq!(facts.pending(), 2, "a second listing wants them no more");
+
+        // The reader's turns, in the order the listing asked.
+        let (read, left) = facts.read_next();
+        assert_eq!(read.file_name().unwrap(), "a.MP3");
+        assert_eq!(left, 1);
+        let (read, left) = facts.read_next();
+        assert_eq!(read.file_name().unwrap(), "b.flac");
+        assert_eq!(left, 0);
+        assert_eq!(facts.known(&root.join("a.MP3")), Some((None, None)));
+        assert_eq!(
+            facts.known(&root.join("b.flac")),
+            Some((Some(192_000), Some(100_000)))
+        );
+
+        let again = tracks(list(&mut s, ""));
+        let b = again.iter().find(|t| t.title == "b").unwrap();
+        assert_eq!(b.sample_rate, Some(192_000));
+        assert_eq!(b.duration_ms, Some(100_000));
+        assert_eq!(facts.pending(), 0, "known files are not wanted again");
         std::fs::remove_dir_all(root).unwrap();
     }
 
