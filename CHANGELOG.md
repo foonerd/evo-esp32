@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A third style, **faders**: the disc's art without its ring; in
+  portrait the progress is a fader down the left and the volume a fader
+  down the right, each filling from its foot, the times above and below
+  the one, the speaker and the level above and below the other; the
+  text keeps to the middle and the transport has nothing within a
+  thumb's reach. From the first owner's note that the disc's volume
+  strip sits too near the pause button — at the default 40 % the knob is
+  9 px above it. In landscape, where there is no side to spare, it is
+  the disc's art with the card's strip. `style = faders` on the card;
+  **Style ›** in Settings steps through the three.
+
+- A rotation set during a new firmware's trial minute no longer throws
+  the firmware away. The restart it needs counted as the trial failing
+  and the bootloader returned to the firmware before; now the setting is
+  written, the panel says so, and the restart waits for the gate's
+  confirmation.
+
+
 ## [0.2.1] - 2026-10-30
 
 - A PCM5122 HAT plays. A Pi HAT built on TI's PCM5121/PCM5122 (IQaudIO
