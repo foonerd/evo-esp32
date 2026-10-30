@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-30
+
 - A PCM5122 HAT plays. A Pi HAT built on TI's PCM5121/PCM5122 (IQaudIO
   DAC+, HiFiBerry DAC+, Waveshare's PCM5122 Audio Board) has no clock
   of its own and plays nothing until it is told, over I2C, to run its

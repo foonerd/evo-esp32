@@ -26,7 +26,7 @@ members = [
 exclude = ["platform/esp-idf"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.85"
 license = "BUSL-1.1"
