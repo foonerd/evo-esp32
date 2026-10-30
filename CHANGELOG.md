@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A PCM5122 HAT plays. A Pi HAT built on TI's PCM5121/PCM5122 (IQaudIO
+  DAC+, HiFiBerry DAC+, Waveshare's PCM5122 Audio Board) has no clock
+  of its own and plays nothing until it is told, over I2C, to run its
+  PLL from the bit clock — the Linux `pcm512x` driver's sequence for a
+  HAT without a master clock, now a driver in the companion repository.
+  At boot the player lists every address on the header's bus that
+  answers (the panel's own parts aside), in the log and in
+  `evostatus.txt`, then brings up what it recognises: an ES9018K2M at
+  0x48, a PCM512x at 0x4C or 0x4D by two of its reset values. The
+  level stays the sink's; the DAC sits at 0 dB like the others.
+
+- The bit clock is 64 times the sample rate: 16-bit samples in 32-bit
+  slots, left-aligned and Philips-shifted, the frame every Pi HAT DAC
+  takes. It was 32 fs (16-bit slots), which a PCM5122 accepts but an
+  ESS Sabre in hardware mode read as wrong words — loud, distorted, and
+  deaf to the volume. The on-board codec is told the slot width and
+  multiplies the bit clock by 4 to its master clock instead of 8.
+
 - A deferred release look waits for a quiet moment that is one. The gap
   between two tracks counted as quiet: the look was tried there, the
   memory floor failed again (the decoder's memory is not back in a
