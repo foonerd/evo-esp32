@@ -212,7 +212,9 @@ fn parse_args() -> Result<Cli, String> {
             "--tone" => cli.tone = Some(PathBuf::from(value)),
             "--style" => {
                 cli.style = Style::named(&value).ok_or_else(|| {
-                    format!("--style must be disc, card or faders, got {value:?}")
+                    format!(
+                        "--style must be disc, card or faders, got {value:?}"
+                    )
                 })?;
             }
             "--theme" => {
