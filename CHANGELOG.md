@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-30
+
+- The panel lights in 5 s from power or a restart, not 14: the face
+  is painted before the card is read, saying "Reading the card…" on
+  its strip until the first track takes over. Every rotation change
+  restarts the player, so every one of them had the panel dark for ten
+  seconds.
+
+- The card is listed in half a second, not eight. Since 0.1.0 the
+  listing opened every audio file for the rate and length its header
+  states (so a track above the board's ceiling is greyed in the library
+  and passed over unopened); since 0.1.5 ESP-IDF's FAT layer has built
+  a map of a file's clusters at every read-only open (the fast seeks
+  that keep a seek in 96 kHz FLAC from stalling the card), a walk of
+  the FAT that cost ~50 ms a file — 125 files, 6 s, before the first
+  frame. The listing no longer opens anything: the facts come from a
+  cache, filled by a thread of its own once the first track plays,
+  which opens each file the one way the layer builds no map for (for
+  writing as well as reading; nothing is written) and reads 64 bytes.
+  Under a 96 kHz FLAC the fill takes about two minutes for 125 files
+  (the core is the decoder's); meanwhile a track above the ceiling is
+  passed over at the open, as it always was when the listing did not
+  know its rate. Audio starts at 6 s, where it did in 0.1.4.
+
 ## [0.2.2] - 2026-10-30
 
 - A third style, **faders**: the disc's art without its ring; in
