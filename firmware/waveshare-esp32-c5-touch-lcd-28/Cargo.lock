@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-catalogue"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -859,11 +859,11 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-config"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "evo-esp32-face"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "ab_glyph",
  "embedded-graphics",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-platform-esp-idf"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "esp-idf-svc",
  "evo-esp32-sdk",
@@ -886,11 +886,11 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-queue"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "evo-esp32-sdk"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-steward"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
  "serde_json",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-update"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "md-5",
  "serde_json",
@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-volumio"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "companion-board-waveshare-esp32-c5-touch-lcd-28",
@@ -1508,14 +1508,14 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "org-evoframework-delivery-null"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
 ]
 
 [[package]]
 name = "org-evoframework-multiroom-receiver"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64",
  "evo-esp32-sdk",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-playback-symphonia"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-snapcast-receiver"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-dlna"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -1554,14 +1554,14 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-files"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
 ]
 
 [[package]]
 name = "org-evoframework-source-nfs"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "evo-esp32-sdk",
  "getrandom",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-smb"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aes",
  "aes-gcm",
