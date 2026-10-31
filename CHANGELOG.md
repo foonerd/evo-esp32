@@ -4,7 +4,7 @@ All notable changes to evo-esp32 are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.5] - 2026-10-31
 
 - The WM8960 Audio HAT (Waveshare's; the ReSpeaker 2-Mics class) plays.
   A new `wm8960` driver brings the codec's DAC path up over I2C —
