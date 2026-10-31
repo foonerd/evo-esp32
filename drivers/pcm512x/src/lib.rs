@@ -18,12 +18,24 @@
 //! 8.3.6.3, Table 33) allows BCK at 32 or 64 times the sample rate for
 //! the PLL, 32 kHz to 384 kHz.
 //!
+//! Some boards carry oscillators of their own, to master the bus on a
+//! Raspberry Pi: the HiFiBerry DAC+ Pro and DAC2 Pro, the Allo Boss and
+//! the boards built to the Boss's overlay (InnoMaker's DAC Mini). They
+//! switch them through the chip's own GPIO3 (the 48 kHz family) and
+//! GPIO6 (the 44.1 kHz family), as the Linux `allo-boss-dac` and
+//! `hifiberry-dacplus` machine drivers do. One may be running at power
+//! on, and the chip's clock auto-set takes an SCK it sees over the PLL
+//! on BCK — right for the family that oscillator serves, wrong for the
+//! other. [`Oscillators::Off`] drives both low in standby, before the
+//! DAC runs, so the chip has only BCK to go by.
+//!
 //! What a device does with it: [`Pcm512x::detect`] to make sure the
 //! chip is there before a register is written, [`Pcm512x::init`] once
 //! after power with the word length the I2S carries,
 //! [`Pcm512x::set_attenuation`] and [`Pcm512x::set_mute`] at any time,
-//! [`Pcm512x::clocks`] for what the chip makes of its clocks. Nothing
-//! here starts a clock: the I2S side is the device's.
+//! [`Pcm512x::clocks`] for what the chip makes of its clocks,
+//! [`Pcm512x::sck_present`] to see an oscillator. Nothing here starts a
+//! clock: the I2S side is the device's.
 //!
 //! The driver is `no_std`, has no `unsafe`, and speaks only
 //! `embedded_hal::i2c::I2c`.
@@ -55,6 +67,7 @@ enum Reg {
     Power = 2,
     Mute = 3,
     PllEn = 4,
+    GpioEn = 8,
     BckLrckCfg = 9,
     MasterMode = 12,
     PllRef = 13,
@@ -64,6 +77,9 @@ enum Reg {
     DacRouting = 42,
     DigitalVolumeLeft = 61,
     DigitalVolumeRight = 62,
+    GpioOutput3 = 82,
+    GpioOutput6 = 85,
+    GpioControl1 = 86,
     RateDet1 = 91,
     RateDet4 = 94,
     ClockStatus = 95,
@@ -87,6 +103,23 @@ const DAC_ROUTING_DEFAULT: u8 = 0x11;
 /// Register 94: set while no SCK arrives (the HiFiBerry machine driver
 /// reads this bit to tell a DAC+ Pro's oscillators).
 const SCK_MISSING: u8 = 0x40;
+/// Registers 8 and 86: the bits for GPIO3 and GPIO6, the oscillator
+/// enables on the boards that have them.
+const GPIO3_AND_GPIO6: u8 = 0x24;
+/// Registers 82 and 85: the pin is an output driven from register 86.
+const GPIO_FROM_REGISTER: u8 = 0x02;
+
+/// What to do about oscillators a board may carry on the chip's GPIO3
+/// and GPIO6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Oscillators {
+    /// Leave the pins as the reset left them, inputs: a board without
+    /// oscillators, or a first look at one.
+    Leave,
+    /// Drive both low, in standby, before the DAC runs: the board's
+    /// oscillators stop and the chip runs its PLL from BCK.
+    Off,
+}
 
 /// How many bits of each I2S slot carry audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,18 +214,32 @@ impl<I2C: I2c> Pcm512x<I2C> {
     }
 
     /// The Linux driver's bring-up for a HAT with no master clock, in
-    /// its order: page 0; reset registers and modules; standby; a
-    /// missing SCK is not an error; the PLL on BCK; BCK and LRCK as
-    /// inputs; I2S with `word` bits; no data offset; both channels at
-    /// 0 dB, unmuted; out of standby. Register 12's clock-provider bits
-    /// are already clear after the reset. The clock dividers are not
-    /// written: the chip sets them from BCK and LRCK as they run, so a
-    /// change of sample rate needs nothing said. Once after power.
-    pub fn init(&mut self, word: WordLength) -> Result<(), I2C::Error> {
+    /// its order: page 0; reset registers and modules; standby; the
+    /// board's oscillators off if asked; a missing SCK is not an error;
+    /// the PLL on BCK; BCK and LRCK as inputs; I2S with `word` bits; no
+    /// data offset; both channels at 0 dB, unmuted; out of standby.
+    /// Register 12's clock-provider bits are already clear after the
+    /// reset. The clock dividers are not written: the chip sets them
+    /// from BCK and LRCK as they run, so a change of sample rate needs
+    /// nothing said. Once after power; again with [`Oscillators::Off`]
+    /// when [`Pcm512x::sck_present`] says the board has one running.
+    pub fn init(
+        &mut self,
+        word: WordLength,
+        oscillators: Oscillators,
+    ) -> Result<(), I2C::Error> {
         self.write(Reg::Page, 0)?;
         self.write(Reg::Reset, RESET_ALL)?;
         self.write(Reg::Reset, 0)?;
         self.write(Reg::Power, POWER_STANDBY)?;
+        if oscillators == Oscillators::Off {
+            // Register 86 is 0 after the reset: both pins go low as
+            // they become outputs.
+            self.write(Reg::GpioOutput3, GPIO_FROM_REGISTER)?;
+            self.write(Reg::GpioOutput6, GPIO_FROM_REGISTER)?;
+            self.write(Reg::GpioControl1, 0)?;
+            self.write(Reg::GpioEn, GPIO3_AND_GPIO6)?;
+        }
         self.write(Reg::ErrorDetect, IGNORE_SCK_HALT)?;
         self.write(Reg::PllRef, PLL_REF_BCK)?;
         self.write(Reg::BckLrckCfg, 0)?;
@@ -288,7 +335,36 @@ mod tests {
             w(3, 0x00),
             w(2, 0x00),
         ]);
-        Pcm512x::new(&mut i2c).init(WordLength::Sixteen).unwrap();
+        Pcm512x::new(&mut i2c)
+            .init(WordLength::Sixteen, Oscillators::Leave)
+            .unwrap();
+        i2c.done();
+    }
+
+    #[test]
+    fn oscillators_off_drives_gpio3_and_gpio6_low_in_standby() {
+        let mut i2c = Mock::new(&[
+            w(0, 0x00),
+            w(1, 0x11),
+            w(1, 0x00),
+            w(2, 0x10),
+            w(82, 0x02),
+            w(85, 0x02),
+            w(86, 0x00),
+            w(8, 0x24),
+            w(37, 0x08),
+            w(13, 0x10),
+            w(9, 0x00),
+            w(40, 0x00),
+            w(41, 0x00),
+            w(61, 0x30),
+            w(62, 0x30),
+            w(3, 0x00),
+            w(2, 0x00),
+        ]);
+        Pcm512x::new(&mut i2c)
+            .init(WordLength::Sixteen, Oscillators::Off)
+            .unwrap();
         i2c.done();
     }
 

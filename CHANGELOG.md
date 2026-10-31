@@ -4,6 +4,19 @@ All notable changes to evo-esp32 are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- PCM5122 boards with oscillators of their own play every rate. The
+  HiFiBerry DAC+ Pro, the Allo Boss and the boards built to the Boss's
+  overlay (InnoMaker's DAC Mini) carry two crystals, one per sample-rate
+  family, switched through the DAC chip's own GPIO3 and GPIO6; one may
+  be running at power-on, and the chip then followed that clock instead
+  of the player's bit clock: right for one family (96 kHz played), noise
+  for the other (every 44.1 kHz track). The bring-up now looks for a
+  running oscillator and, finding one, starts the chip again with both
+  switched off, so it runs its PLL from the bit clock as the other
+  PCM5122 boards do. Boards without oscillators are untouched.
+
 ## [0.2.5] - 2026-10-31
 
 - The WM8960 Audio HAT (Waveshare's; the ReSpeaker 2-Mics class) plays.

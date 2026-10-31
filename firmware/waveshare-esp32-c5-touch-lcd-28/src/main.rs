@@ -111,7 +111,7 @@ use org_evoframework_source_dlna::SourceDlna;
 use org_evoframework_source_files::{FactsCache, SourceFiles};
 use org_evoframework_source_nfs::{NfsOpener, Share as NfsShare, SourceNfs};
 use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
-use pcm512x::{Pcm512x, WordLength};
+use pcm512x::{Oscillators, Pcm512x, WordLength};
 use sink::{I2sSink, RateFollower};
 use wm8960::Wm8960;
 
@@ -497,7 +497,11 @@ fn main() -> anyhow::Result<()> {
     // A PCM512x HAT (IQaudIO DAC+, Waveshare's PCM5122 board at 0x4C;
     // HiFiBerry's DAC+ at 0x4D) has no clock of its own and plays nothing
     // until told to run its PLL from BCK. It has no identity register:
-    // two reset values say whether one answers.
+    // two reset values say whether one answers. A board with oscillators
+    // (DAC+ Pro, Allo Boss, InnoMaker's DAC Mini) may have one running
+    // at power on; the chip would follow that SCK over BCK, right for
+    // one rate family and garbage for the other, so the bring-up is
+    // done again with the oscillators switched off.
     let mut pcm512x_found = false;
     for address in [pcm512x::ADDRESS, pcm512x::ADDRESS_ADR1] {
         let mut dac = Pcm512x::at(MutexDevice::new(bus), address);
@@ -508,14 +512,27 @@ fn main() -> anyhow::Result<()> {
                     "pcm512x: found at {address:#04x} (register 12 {:#04x}, 42 {:#04x})",
                     id.master_mode, id.routing
                 );
-                match dac.init(WordLength::Sixteen) {
-                    Ok(()) => {
+                let brought_up = dac
+                    .init(WordLength::Sixteen, Oscillators::Leave)
+                    .and_then(|()| {
+                        FreeRtos::delay_ms(2);
+                        dac.sck_present()
+                    })
+                    .and_then(|sck| {
+                        if !sck {
+                            return Ok("no SCK, as expected");
+                        }
+                        dac.init(WordLength::Sixteen, Oscillators::Off)?;
+                        FreeRtos::delay_ms(2);
+                        Ok(if dac.sck_present()? {
+                            "an SCK arrives and stays with the chip's GPIO3 and GPIO6 low: the board's oscillator is not switched the Boss way"
+                        } else {
+                            "the board's oscillator was running; switched off through the chip's GPIO3 and GPIO6"
+                        })
+                    });
+                match brought_up {
+                    Ok(sck) => {
                         let clocks = dac.clocks().ok();
-                        let sck = match dac.sck_present() {
-                            Ok(true) => "an SCK arrives: the board runs an oscillator of its own, which this bring-up does not use",
-                            Ok(false) => "no SCK, as expected",
-                            Err(_) => "SCK unknown",
-                        };
                         info!("pcm512x: initialised: PLL on BCK, 16-bit I2S, at its 0 dB; the level is the sink's; {sck}; clocks {clocks:?}");
                         config.note(format!(
                             "hat: PCM512x at {address:#04x}, PLL on BCK, 16-bit I2S; {sck}"
