@@ -33,6 +33,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   backwards on the Disc's ring erases the arc passed instead of
   repainting the whole ring.
 
+- Touch is read by a thread of its own, woken by the controller's
+  interrupt, and the loop takes every report in order with the time it
+  was read. Until now the loop read one report when its turn came —
+  every 85–120 ms under a 96 kHz track, and not at all during a paint
+  stage of up to 400 ms, so a quick tap could be lost and a slide was
+  sampled coarsely. A tap now lands whatever the face is doing, and a
+  slider can be set to the exact second or percent. The I2C bus is
+  shared behind a mutex for it.
+
 - The player stands on its own hardware layer. The board crate
   (`boards/waveshare-esp32-c5-touch-lcd-28`), the chip drivers
   (`drivers/`: CST3530 touch, CH32V003 expander, ES8311 codec, ES9018K2M

@@ -904,6 +904,7 @@ name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
 version = "0.2.3"
 dependencies = [
  "anyhow",
+ "cst3530",
  "embedded-hal-bus",
  "embuild",
  "es8311",

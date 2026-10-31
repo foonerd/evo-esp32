@@ -44,6 +44,7 @@
 mod alloc;
 mod art;
 mod config;
+mod input;
 mod net;
 mod sink;
 mod threads;
@@ -52,12 +53,11 @@ mod update;
 #[global_allocator]
 static ALLOC: alloc::Placed = alloc::Placed;
 
-use std::cell::RefCell;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use embedded_hal_bus::i2c::RefCellDevice;
+use embedded_hal_bus::i2c::MutexDevice;
 use es8311::Es8311;
 use es9018k2m::Es9018k2m;
 use esp_idf_svc::hal::delay::TickType;
@@ -177,7 +177,7 @@ const SEARCH_FOR: Duration = Duration::from_secs(3);
 const SEARCH_AGAIN: Duration = Duration::from_secs(30);
 
 /// The codec follows the sink's rate.
-struct Codec(Es8311<RefCellDevice<'static, I2cDriver<'static>>>);
+struct Codec(Es8311<board::Device>);
 
 impl RateFollower for Codec {
     fn rate_changed(&mut self, rate: u32, bits: u8) {
@@ -248,8 +248,16 @@ fn main() -> anyhow::Result<()> {
     let rotation = config.settings.rotation.unwrap_or(ROTATION);
 
     // The board in the vendor BSP's order: expander (amplifier enabled on
-    // EXIO3), panel, touch. The backlight waits for the first frame.
-    let mut board = board::bring_up(
+    // EXIO3), panel, touch. The backlight waits for the first frame. The
+    // touch controller and its interrupt line go to the reader thread
+    // once the loop's clock exists; the rest stays with the loop.
+    let board::Board {
+        mut panel,
+        touch,
+        touch_int,
+        mut expander,
+        bus,
+    } = board::bring_up(
         board::Pins {
             i2c0,
             sda: pins.gpio0,
@@ -262,7 +270,7 @@ fn main() -> anyhow::Result<()> {
         rotation,
     )?;
 
-    let mut codec = Es8311::new(RefCellDevice::new(board.bus));
+    let mut codec = Es8311::new(MutexDevice::new(bus));
     match codec.chip_id() {
         Ok(id) => {
             info!("es8311: chip id {:02x} {:02x} {:02x}", id[0], id[1], id[2])
@@ -369,7 +377,7 @@ fn main() -> anyhow::Result<()> {
     // What answers on the bus besides the panel's own three parts, so a
     // board on the header is seen before anything is said to it: one
     // byte read from each address, the way i2cdetect looks.
-    let survey = survey_bus(board.bus);
+    let survey = survey_bus(bus);
     if survey.is_empty() {
         info!("i2c: nothing on the header's bus");
         config.note("i2c: nothing on the header's bus");
@@ -378,7 +386,7 @@ fn main() -> anyhow::Result<()> {
         config.note(format!("i2c: {survey}"));
     }
 
-    let mut sabre = Es9018k2m::new(RefCellDevice::new(board.bus));
+    let mut sabre = Es9018k2m::new(MutexDevice::new(bus));
     match sabre.detect() {
         Ok(Some(id)) => {
             info!(
@@ -404,7 +412,7 @@ fn main() -> anyhow::Result<()> {
     // two reset values say whether one answers.
     let mut pcm512x_found = false;
     for address in [pcm512x::ADDRESS, pcm512x::ADDRESS_ADR1] {
-        let mut dac = Pcm512x::at(RefCellDevice::new(board.bus), address);
+        let mut dac = Pcm512x::at(MutexDevice::new(bus), address);
         match dac.detect() {
             Ok(Some(id)) => {
                 pcm512x_found = true;
@@ -444,6 +452,8 @@ fn main() -> anyhow::Result<()> {
     let start_level = config.settings.volume.unwrap_or(VOLUME_PERCENT);
     volume.set(start_level, false);
     let started = Instant::now();
+    let input = input::Input::start(touch, touch_int, started)?;
+    let mut touches: Vec<input::Touch> = Vec::with_capacity(16);
 
     let now = || Ticks(started.elapsed().as_millis() as u64);
     let link = Link::new();
@@ -529,9 +539,9 @@ fn main() -> anyhow::Result<()> {
             "Card",
         );
         first.notice = "Reading the card\u{2026}".to_string();
-        match face.refresh_whole(&mut board.panel, &first) {
+        match face.refresh_whole(&mut panel, &first) {
             Ok(_) => {
-                board.backlight(BACKLIGHT_PERCENT)?;
+                expander.set_pwm_percent(BACKLIGHT_PERCENT)?;
                 lit = true;
                 info!(
                     "panel lit: the first frame in {} ms, before the card is read",
@@ -896,181 +906,169 @@ fn main() -> anyhow::Result<()> {
                 held_since = None;
             }
         }
-        // A report waits while INT is low; a finger that was down is read
-        // until the controller says it lifted.
-        if board.touch_int.is_low() || tracker.down() {
-            match board.touch.report() {
-                Ok(r) => {
-                    last_touch = Instant::now();
-                    touch_waiting.get_or_insert(last_touch);
-                    let p = face.layout().map_touch(r.x, r.y);
-                    if let Some(intent) = tracker.sample(
-                        |p| face.hit(p),
-                        |h, p| face.along(h, p),
-                        r.touching(),
-                        p,
-                        t.0,
-                    ) {
-                        match intent {
-                            Intent::Tap(Hotspot::Play | Hotspot::BarPlay) => {
-                                let status = playback_state(&steward)
-                                    .map(|pb| pb.status)
-                                    .unwrap_or_default();
-                                match (current.or(rooms.handle()), status) {
-                                    (Some(h), playback::Status::Playing) => {
-                                        correct(
-                                            &mut steward,
-                                            h,
-                                            Correction::Pause,
-                                            t,
-                                        )
-                                    }
-                                    (Some(h), playback::Status::Paused) => {
-                                        correct(
-                                            &mut steward,
-                                            h,
-                                            Correction::Resume,
-                                            t,
-                                        )
-                                    }
-                                    // Still being reached: nothing to
-                                    // hold yet; next and previous move on.
-                                    (Some(_), playback::Status::Opening) => {}
-                                    _ => {
-                                        // Nothing in custody: the item in
-                                        // hand again (a held station), or
-                                        // the next; after the end, the
-                                        // start.
-                                        start_when_up = false;
-                                        current = advance(
-                                            &mut steward,
-                                            &mut queue,
-                                            &card_facts,
-                                            Step::Current,
-                                            t,
-                                            wanted,
-                                            &mut notice,
-                                        );
-                                        track_started = Instant::now();
-                                    }
-                                }
+        // Every report the reader took since the last turn, oldest first,
+        // each at the time it was read: a tap that came and went during a
+        // paint stage is still a tap.
+        input.drain(&mut touches);
+        for s in touches.drain(..) {
+            last_touch = started + Duration::from_millis(s.at_ms);
+            touch_waiting.get_or_insert(last_touch);
+            let p = face.layout().map_touch(s.x, s.y);
+            if let Some(intent) = tracker.sample(
+                |p| face.hit(p),
+                |h, p| face.along(h, p),
+                s.touching,
+                p,
+                s.at_ms,
+            ) {
+                match intent {
+                    Intent::Tap(Hotspot::Play | Hotspot::BarPlay) => {
+                        let status = playback_state(&steward)
+                            .map(|pb| pb.status)
+                            .unwrap_or_default();
+                        match (current.or(rooms.handle()), status) {
+                            (Some(h), playback::Status::Playing) => {
+                                correct(&mut steward, h, Correction::Pause, t)
                             }
-                            Intent::Tap(Hotspot::Next) => {
-                                if rooms.take_back(&mut steward, t) {
-                                    resume_after_room = false;
-                                }
-                                if current.is_some() {
-                                    then = Some(Step::Skip);
-                                    skip(
-                                        &mut steward,
-                                        &mut current,
-                                        &mut shared_sink,
-                                        t,
-                                    );
-                                } else {
-                                    current = advance(
-                                        &mut steward,
-                                        &mut queue,
-                                        &card_facts,
-                                        Step::Skip,
-                                        t,
-                                        wanted,
-                                        &mut notice,
-                                    );
-                                    track_started = Instant::now();
-                                }
+                            (Some(h), playback::Status::Paused) => {
+                                correct(&mut steward, h, Correction::Resume, t)
                             }
-                            Intent::Tap(Hotspot::Previous) => {
-                                if rooms.take_back(&mut steward, t) {
-                                    resume_after_room = false;
-                                }
-                                if current.is_some() {
-                                    then = Some(Step::Previous);
-                                    skip(
-                                        &mut steward,
-                                        &mut current,
-                                        &mut shared_sink,
-                                        t,
-                                    );
-                                } else {
-                                    current = advance(
-                                        &mut steward,
-                                        &mut queue,
-                                        &card_facts,
-                                        Step::Previous,
-                                        t,
-                                        wanted,
-                                        &mut notice,
-                                    );
-                                    track_started = Instant::now();
-                                }
+                            // Still being reached: nothing to
+                            // hold yet; next and previous move on.
+                            (Some(_), playback::Status::Opening) => {}
+                            _ => {
+                                // Nothing in custody: the item in
+                                // hand again (a held station), or
+                                // the next; after the end, the
+                                // start.
+                                start_when_up = false;
+                                current = advance(
+                                    &mut steward,
+                                    &mut queue,
+                                    &card_facts,
+                                    Step::Current,
+                                    t,
+                                    wanted,
+                                    &mut notice,
+                                );
+                                track_started = Instant::now();
                             }
-                            Intent::Slide(Hotspot::Volume(f)) => {
-                                let want = (f * 100.0).round() as u8;
-                                if want != wanted {
-                                    wanted = want;
-                                    set_volume(&mut steward, wanted, t);
-                                    // The output has the level as the
-                                    // request returns: the sink takes it
-                                    // here, not at the next paint.
-                                    apply_level(&steward, &volume, &mut level);
-                                }
+                        }
+                    }
+                    Intent::Tap(Hotspot::Next) => {
+                        if rooms.take_back(&mut steward, t) {
+                            resume_after_room = false;
+                        }
+                        if current.is_some() {
+                            then = Some(Step::Skip);
+                            skip(
+                                &mut steward,
+                                &mut current,
+                                &mut shared_sink,
+                                t,
+                            );
+                        } else {
+                            current = advance(
+                                &mut steward,
+                                &mut queue,
+                                &card_facts,
+                                Step::Skip,
+                                t,
+                                wanted,
+                                &mut notice,
+                            );
+                            track_started = Instant::now();
+                        }
+                    }
+                    Intent::Tap(Hotspot::Previous) => {
+                        if rooms.take_back(&mut steward, t) {
+                            resume_after_room = false;
+                        }
+                        if current.is_some() {
+                            then = Some(Step::Previous);
+                            skip(
+                                &mut steward,
+                                &mut current,
+                                &mut shared_sink,
+                                t,
+                            );
+                        } else {
+                            current = advance(
+                                &mut steward,
+                                &mut queue,
+                                &card_facts,
+                                Step::Previous,
+                                t,
+                                wanted,
+                                &mut notice,
+                            );
+                            track_started = Instant::now();
+                        }
+                    }
+                    Intent::Slide(Hotspot::Volume(f)) => {
+                        let want = (f * 100.0).round() as u8;
+                        if want != wanted {
+                            wanted = want;
+                            set_volume(&mut steward, wanted, t);
+                            // The output has the level as the
+                            // request returns: the sink takes it
+                            // here, not at the next paint.
+                            apply_level(&steward, &volume, &mut level);
+                        }
+                    }
+                    Intent::Slide(Hotspot::Seek(f)) => {
+                        if current.is_some() {
+                            scrub = Some(f);
+                        }
+                    }
+                    Intent::Commit(Hotspot::Seek(f)) => {
+                        scrub = None;
+                        let duration = playback_state(&steward)
+                            .and_then(|pb| pb.track)
+                            .and_then(|tr| tr.duration_ms);
+                        match (current, duration) {
+                            (Some(h), Some(d)) => correct(
+                                &mut steward,
+                                h,
+                                Correction::Seek {
+                                    position_ms: (f as f64 * d as f64) as u64,
+                                },
+                                t,
+                            ),
+                            _ => info!("seek: nothing to seek in"),
+                        }
+                    }
+                    Intent::Tap(Hotspot::Nav(i)) => {
+                        let screen = Screen::from_nav(i);
+                        match screen {
+                            Screen::Library if !browse.loaded => {
+                                browse.open(
+                                    &mut steward,
+                                    &card_facts,
+                                    &mut face,
+                                    None,
+                                    t,
+                                );
                             }
-                            Intent::Slide(Hotspot::Seek(f)) => {
-                                if current.is_some() {
-                                    scrub = Some(f);
-                                }
-                            }
-                            Intent::Commit(Hotspot::Seek(f)) => {
-                                scrub = None;
-                                let duration = playback_state(&steward)
-                                    .and_then(|pb| pb.track)
-                                    .and_then(|tr| tr.duration_ms);
-                                match (current, duration) {
-                                    (Some(h), Some(d)) => correct(
-                                        &mut steward,
-                                        h,
-                                        Correction::Seek {
-                                            position_ms: (f as f64 * d as f64)
-                                                as u64,
-                                        },
-                                        t,
-                                    ),
-                                    _ => info!("seek: nothing to seek in"),
-                                }
-                            }
-                            Intent::Tap(Hotspot::Nav(i)) => {
-                                let screen = Screen::from_nav(i);
-                                match screen {
-                                    Screen::Library if !browse.loaded => {
-                                        browse.open(
-                                            &mut steward,
-                                            &card_facts,
-                                            &mut face,
-                                            None,
-                                            t,
-                                        );
-                                    }
-                                    Screen::Settings => face.set_about(facts(
-                                        &face,
-                                        card_mb,
-                                        card_tracks,
-                                        &network_line(&net),
-                                        &queue,
-                                        &device_id,
-                                        &pull.standing().line(),
-                                    )),
-                                    _ => {}
-                                }
-                                face.set_screen(screen);
-                            }
-                            Intent::Tap(Hotspot::Row(i)) => {
-                                if face.screen() == Screen::Settings {
-                                    let fact =
-                                        face.about().first + usize::from(i);
-                                    match settings_row(fact) {
-                                        Some(SettingsRow::Update) => {
-                                            notice = Some(match pull.tap() {
+                            Screen::Settings => face.set_about(facts(
+                                &face,
+                                card_mb,
+                                card_tracks,
+                                &network_line(&net),
+                                &queue,
+                                &device_id,
+                                &pull.standing().line(),
+                            )),
+                            _ => {}
+                        }
+                        face.set_screen(screen);
+                    }
+                    Intent::Tap(Hotspot::Row(i)) => {
+                        if face.screen() == Screen::Settings {
+                            let fact = face.about().first + usize::from(i);
+                            match settings_row(fact) {
+                                Some(SettingsRow::Update) => {
+                                    notice = Some(match pull.tap() {
                                                 update::Tap::Checking => {
                                                     "Looking for a release\u{2026}".to_string()
                                                 }
@@ -1084,199 +1082,178 @@ fn main() -> anyhow::Result<()> {
                                                     "Updates are off (update = off on the card)".to_string()
                                                 }
                                             });
-                                        }
-                                        Some(SettingsRow::Theme) => {
-                                            let next = next_theme(face.theme());
-                                            face.set_theme(next);
-                                            config.save("theme", next.name);
-                                            // A logo sits on the background.
-                                            if art.refit(
-                                                face.layout().art.size.width,
-                                                background(&face),
-                                            ) {
-                                                face.set_art(None);
-                                            }
-                                        }
-                                        Some(SettingsRow::Style) => {
-                                            let next = match face.layout().style
-                                            {
-                                                Style::Disc => Style::Card,
-                                                Style::Card => Style::Faders,
-                                                Style::Faders => Style::Disc,
-                                            };
-                                            face.set_style(next);
-                                            config.save("style", next.name());
-                                            // The art square may be another size now.
-                                            if art.refit(
-                                                face.layout().art.size.width,
-                                                background(&face),
-                                            ) {
-                                                face.set_art(None);
-                                            }
-                                        }
-                                        Some(SettingsRow::Shuffle) => {
-                                            let on = !queue.shuffle();
-                                            queue.set_shuffle(on);
-                                            config.save(
-                                                "shuffle",
-                                                if on { "on" } else { "off" },
-                                            );
-                                        }
-                                        Some(SettingsRow::Repeat) => {
-                                            let next = match queue.repeat() {
-                                                Repeat::Off => Repeat::All,
-                                                Repeat::All => Repeat::One,
-                                                Repeat::One => Repeat::Off,
-                                            };
-                                            queue.set_repeat(next);
-                                            config.save(
-                                                "repeat",
-                                                repeat_name(next),
-                                            );
-                                        }
-                                        Some(SettingsRow::Rotation) => {
-                                            // The panel is oriented at bring-up:
-                                            // write the setting and start again.
-                                            // Not during a new firmware's trial:
-                                            // a restart then rolls it back, so
-                                            // the restart waits for the gate.
-                                            let next = (face.layout().rotation
-                                                + 90)
-                                                % 360;
-                                            config.save(
-                                                "rotation",
-                                                &next.to_string(),
-                                            );
-                                            if gate.pending() {
-                                                info!("rotation {next} written; restarting once the firmware is confirmed");
-                                                restart_when_confirmed = true;
-                                                face.set_message(Some(Message::new(
+                                }
+                                Some(SettingsRow::Theme) => {
+                                    let next = next_theme(face.theme());
+                                    face.set_theme(next);
+                                    config.save("theme", next.name);
+                                    // A logo sits on the background.
+                                    if art.refit(
+                                        face.layout().art.size.width,
+                                        background(&face),
+                                    ) {
+                                        face.set_art(None);
+                                    }
+                                }
+                                Some(SettingsRow::Style) => {
+                                    let next = match face.layout().style {
+                                        Style::Disc => Style::Card,
+                                        Style::Card => Style::Faders,
+                                        Style::Faders => Style::Disc,
+                                    };
+                                    face.set_style(next);
+                                    config.save("style", next.name());
+                                    // The art square may be another size now.
+                                    if art.refit(
+                                        face.layout().art.size.width,
+                                        background(&face),
+                                    ) {
+                                        face.set_art(None);
+                                    }
+                                }
+                                Some(SettingsRow::Shuffle) => {
+                                    let on = !queue.shuffle();
+                                    queue.set_shuffle(on);
+                                    config.save(
+                                        "shuffle",
+                                        if on { "on" } else { "off" },
+                                    );
+                                }
+                                Some(SettingsRow::Repeat) => {
+                                    let next = match queue.repeat() {
+                                        Repeat::Off => Repeat::All,
+                                        Repeat::All => Repeat::One,
+                                        Repeat::One => Repeat::Off,
+                                    };
+                                    queue.set_repeat(next);
+                                    config.save("repeat", repeat_name(next));
+                                }
+                                Some(SettingsRow::Rotation) => {
+                                    // The panel is oriented at bring-up:
+                                    // write the setting and start again.
+                                    // Not during a new firmware's trial:
+                                    // a restart then rolls it back, so
+                                    // the restart waits for the gate.
+                                    let next =
+                                        (face.layout().rotation + 90) % 360;
+                                    config.save("rotation", &next.to_string());
+                                    if gate.pending() {
+                                        info!("rotation {next} written; restarting once the firmware is confirmed");
+                                        restart_when_confirmed = true;
+                                        face.set_message(Some(Message::new(
                                                     "Rotation",
                                                     format!("Set to {next}°. The player restarts into it as soon as the new firmware has confirmed itself, in under a minute."),
                                                 )));
-                                            } else {
-                                                info!("rotation {next} written; restarting");
-                                                esp_idf_svc::hal::reset::restart();
-                                            }
-                                        }
-                                        None => {}
-                                    }
-                                    face.set_about(facts(
-                                        &face,
-                                        card_mb,
-                                        card_tracks,
-                                        &network_line(&net),
-                                        &queue,
-                                        &device_id,
-                                        &pull.standing().line(),
-                                    ));
-                                    continue;
-                                }
-                                if face.screen() != Screen::Library {
-                                    continue;
-                                }
-                                let shown = face.layout().page.rows();
-                                let Some(entry) = face
-                                    .library()
-                                    .visible(shown)
-                                    .get(usize::from(i))
-                                    .cloned()
-                                else {
-                                    continue;
-                                };
-                                if !entry.playable {
-                                    info!(
-                                        "library: {:?} is above the ceiling",
-                                        entry.name
-                                    );
-                                    continue;
-                                }
-                                if entry.folder {
-                                    browse.descend(
-                                        &mut steward,
-                                        &card_facts,
-                                        &mut face,
-                                        &entry.name,
-                                        t,
-                                    );
-                                } else if let Some(at) =
-                                    browse.tracks.iter().position(|tr| {
-                                        Some(&tr.uri) == entry.uri.as_ref()
-                                    })
-                                {
-                                    // The folder becomes the queue, from
-                                    // the tapped track on.
-                                    queue.set(browse.tracks.clone(), Some(at));
-                                    start_when_up = false;
-                                    if current.is_some() {
-                                        then = Some(Step::Skip);
-                                        skip(
-                                            &mut steward,
-                                            &mut current,
-                                            &mut shared_sink,
-                                            t,
-                                        );
                                     } else {
-                                        current = advance(
-                                            &mut steward,
-                                            &mut queue,
-                                            &card_facts,
-                                            Step::Skip,
-                                            t,
-                                            wanted,
-                                            &mut notice,
-                                        );
-                                        track_started = Instant::now();
+                                        info!("rotation {next} written; restarting");
+                                        esp_idf_svc::hal::reset::restart();
                                     }
                                 }
+                                None => {}
                             }
-                            Intent::Tap(Hotspot::Shuffle) => {
-                                let on = !queue.shuffle();
-                                queue.set_shuffle(on);
-                                config.save(
-                                    "shuffle",
-                                    if on { "on" } else { "off" },
-                                );
-                            }
-                            Intent::Tap(Hotspot::Repeat) => {
-                                let next = match queue.repeat() {
-                                    Repeat::Off => Repeat::All,
-                                    Repeat::All => Repeat::One,
-                                    Repeat::One => Repeat::Off,
-                                };
-                                queue.set_repeat(next);
-                                config.save("repeat", repeat_name(next));
-                            }
-                            Intent::Tap(Hotspot::Text) => {
-                                face.show_sheet(true);
-                            }
-                            Intent::Tap(Hotspot::Sheet) => {
-                                if face.message().is_some() {
-                                    // An outcome is read; what is in
-                                    // progress stays up.
-                                    if !updating && !returning {
-                                        face.set_message(None);
-                                    }
-                                } else {
-                                    face.show_sheet(false);
-                                }
-                            }
-                            Intent::Tap(Hotspot::Back) => {
-                                browse.ascend(
+                            face.set_about(facts(
+                                &face,
+                                card_mb,
+                                card_tracks,
+                                &network_line(&net),
+                                &queue,
+                                &device_id,
+                                &pull.standing().line(),
+                            ));
+                            continue;
+                        }
+                        if face.screen() != Screen::Library {
+                            continue;
+                        }
+                        let shown = face.layout().page.rows();
+                        let Some(entry) = face
+                            .library()
+                            .visible(shown)
+                            .get(usize::from(i))
+                            .cloned()
+                        else {
+                            continue;
+                        };
+                        if !entry.playable {
+                            info!(
+                                "library: {:?} is above the ceiling",
+                                entry.name
+                            );
+                            continue;
+                        }
+                        if entry.folder {
+                            browse.descend(
+                                &mut steward,
+                                &card_facts,
+                                &mut face,
+                                &entry.name,
+                                t,
+                            );
+                        } else if let Some(at) = browse
+                            .tracks
+                            .iter()
+                            .position(|tr| Some(&tr.uri) == entry.uri.as_ref())
+                        {
+                            // The folder becomes the queue, from
+                            // the tapped track on.
+                            queue.set(browse.tracks.clone(), Some(at));
+                            start_when_up = false;
+                            if current.is_some() {
+                                then = Some(Step::Skip);
+                                skip(
                                     &mut steward,
-                                    &card_facts,
-                                    &mut face,
+                                    &mut current,
+                                    &mut shared_sink,
                                     t,
                                 );
+                            } else {
+                                current = advance(
+                                    &mut steward,
+                                    &mut queue,
+                                    &card_facts,
+                                    Step::Skip,
+                                    t,
+                                    wanted,
+                                    &mut notice,
+                                );
+                                track_started = Instant::now();
                             }
-                            Intent::Scroll(dy) => face.scroll(dy),
-                            Intent::Tap(_)
-                            | Intent::Slide(_)
-                            | Intent::Commit(_) => {}
                         }
                     }
+                    Intent::Tap(Hotspot::Shuffle) => {
+                        let on = !queue.shuffle();
+                        queue.set_shuffle(on);
+                        config.save("shuffle", if on { "on" } else { "off" });
+                    }
+                    Intent::Tap(Hotspot::Repeat) => {
+                        let next = match queue.repeat() {
+                            Repeat::Off => Repeat::All,
+                            Repeat::All => Repeat::One,
+                            Repeat::One => Repeat::Off,
+                        };
+                        queue.set_repeat(next);
+                        config.save("repeat", repeat_name(next));
+                    }
+                    Intent::Tap(Hotspot::Text) => {
+                        face.show_sheet(true);
+                    }
+                    Intent::Tap(Hotspot::Sheet) => {
+                        if face.message().is_some() {
+                            // An outcome is read; what is in
+                            // progress stays up.
+                            if !updating && !returning {
+                                face.set_message(None);
+                            }
+                        } else {
+                            face.show_sheet(false);
+                        }
+                    }
+                    Intent::Tap(Hotspot::Back) => {
+                        browse.ascend(&mut steward, &card_facts, &mut face, t);
+                    }
+                    Intent::Scroll(dy) => face.scroll(dy),
+                    Intent::Tap(_) | Intent::Slide(_) | Intent::Commit(_) => {}
                 }
-                Err(e) => log::debug!("touch: {e:?}"),
             }
         }
         // The network and the hand-over of the sink keep their cadence
@@ -1656,16 +1633,16 @@ fn main() -> anyhow::Result<()> {
                 presence.set_art(found.bytes.and_then(VolumioArt::sniff));
             }
             let before_paint = last_face.elapsed();
-            let painted = face.refresh(&mut board.panel, &state);
+            let painted = face.refresh(&mut panel, &state);
             if update_ack.is_some() || show_now {
                 show_now = false;
                 // The whole face with the message, then the page may write
                 // (or the chip restart). At boot (an image on the card)
                 // this is the first frame: the backlight comes on here, or
                 // the write runs dark.
-                match face.refresh_whole(&mut board.panel, &state) {
+                match face.refresh_whole(&mut panel, &state) {
                     Ok(_) if !lit => {
-                        board.backlight(BACKLIGHT_PERCENT)?;
+                        expander.set_pwm_percent(BACKLIGHT_PERCENT)?;
                         lit = true;
                         info!("panel lit for the update");
                     }
@@ -1724,12 +1701,12 @@ fn main() -> anyhow::Result<()> {
                             // A message set before the first frame (the
                             // card's verdict) is on the panel as it lights.
                             if let Err(e) =
-                                face.refresh_whole(&mut board.panel, &state)
+                                face.refresh_whole(&mut panel, &state)
                             {
                                 warn!("panel: {e:?}");
                             }
                         }
-                        board.backlight(BACKLIGHT_PERCENT)?;
+                        expander.set_pwm_percent(BACKLIGHT_PERCENT)?;
                         lit = true;
                         info!(
                             "panel lit: first frame in {} ms, the longest stage {} ms, stages {stage_ms:?} ms",
@@ -1876,6 +1853,10 @@ fn main() -> anyhow::Result<()> {
             turn_max = Duration::ZERO;
             touch_wait_max = Duration::ZERO;
             touch_waits = 0;
+            let coalesced = input.coalesced();
+            if coalesced > 0 {
+                warn!("touch: {coalesced} reports replaced an earlier one: the loop was away longer than the queue holds");
+            }
             report_playback(&steward, track_started.elapsed());
             info!("core: {}", shares.line());
             if let Some(line) = sink::report_dry() {
@@ -2978,15 +2959,16 @@ const PANEL_I2C: [u8; 6] = [es8311::ADDRESS, 0x24, 0x51, 0x58, 0x6B, 0x70];
 
 /// Every 7-bit address outside the panel's own that acknowledges a
 /// one-byte read, with what usually sits there, as one line.
-fn survey_bus(bus: &RefCell<I2cDriver<'static>>) -> String {
+fn survey_bus(bus: &Mutex<I2cDriver<'static>>) -> String {
     let timeout = TickType::from(Duration::from_millis(20)).0;
     let mut found = Vec::new();
+    let mut bus = bus.lock().unwrap_or_else(|e| e.into_inner());
     for address in 0x08u8..=0x77 {
         if PANEL_I2C.contains(&address) {
             continue;
         }
         let mut byte = [0u8];
-        if bus.borrow_mut().read(address, &mut byte, timeout).is_ok() {
+        if bus.read(address, &mut byte, timeout).is_ok() {
             let usual = match address {
                 0x48 => " (ES9018K2M class)",
                 0x4C..=0x4F => " (PCM512x class; a PCM1792A at 0x4c)",

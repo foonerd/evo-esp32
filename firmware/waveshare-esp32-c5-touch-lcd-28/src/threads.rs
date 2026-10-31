@@ -39,6 +39,10 @@ use evo_esp32_sdk::thread::{Placement, Role};
 pub const MAIN_PRIORITY: u8 = 5;
 /// Threads that feed the decoder or the sink: one above the loop.
 pub const FEED_PRIORITY: u8 = 6;
+/// The touch reader: above the feeders. It wakes on the controller's
+/// edge for a nine-byte read and sleeps again; a finger is not kept
+/// waiting on a ring being filled.
+pub const INPUT_PRIORITY: u8 = 7;
 /// Threads that open, list, search, talk to peers and fetch art: one
 /// below.
 pub const BACKGROUND_PRIORITY: u8 = 4;

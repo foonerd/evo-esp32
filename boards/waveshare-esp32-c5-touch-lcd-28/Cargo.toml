@@ -27,7 +27,7 @@ type_complexity = "allow"
 [dependencies]
 ch32v003-expander = { path = "../../drivers/ch32v003-expander" }
 cst3530 = { path = "../../drivers/cst3530" }
-embedded-hal-bus = "0.3"
+embedded-hal-bus = { version = "0.3", features = ["std"] }
 esp-idf-svc = { version = "0.53", default-features = false, features = ["std", "alloc"] }
 log = "0.4"
 mipidsi = "0.10"

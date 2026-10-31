@@ -21,12 +21,12 @@
 //! nothing shows before the first frame. The SPI bus is made
 //! before any of it ([`spi_bus`]) so the card can be read first.
 
-use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use ch32v003_expander::{Expander, Pin as Exio};
 use cst3530::Cst3530;
-use embedded_hal_bus::i2c::RefCellDevice;
+use embedded_hal_bus::i2c::MutexDevice;
 use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::gpio::{
     Gpio0, Gpio1, Gpio10, Gpio5, Gpio6, Gpio7, Gpio8, Gpio9, Input, Output,
@@ -58,8 +58,13 @@ const AMP_EN: Exio = Exio::P3;
 
 /// The I2C bus, shared by the expander and the touch controller for the
 /// life of the firmware, and handed out so a firmware can put the codec
-/// or a DAC on it too (`RefCellDevice::new(board.bus)`).
-pub type Bus = &'static RefCell<I2cDriver<'static>>;
+/// or a DAC on it too (`MutexDevice::new(board.bus)`). Behind a mutex,
+/// not a `RefCell`, so the touch controller can be read from a thread of
+/// its own while the main task drives the expander.
+pub type Bus = &'static Mutex<I2cDriver<'static>>;
+
+/// A device on [`Bus`].
+pub type Device = MutexDevice<'static, I2cDriver<'static>>;
 
 /// The SPI bus, shared by the panel and the card for the life of the
 /// firmware.
@@ -81,11 +86,12 @@ pub struct Board {
     /// The panel, oriented as the settings ask.
     pub panel: Panel,
     /// The touch controller on the shared bus.
-    pub touch: Cst3530<RefCellDevice<'static, I2cDriver<'static>>>,
-    /// The touch interrupt line, low while a report is waiting.
+    pub touch: Cst3530<Device>,
+    /// The touch interrupt line: the controller pulls it low for each
+    /// report it has ready.
     pub touch_int: PinDriver<'static, Input>,
     /// The expander, for the backlight and the amplifier.
-    pub expander: Expander<RefCellDevice<'static, I2cDriver<'static>>>,
+    pub expander: Expander<Device>,
     /// The I2C bus the expander and touch controller are on, for more.
     pub bus: Bus,
 }
@@ -132,14 +138,14 @@ pub fn bring_up(
 ) -> Result<Board, BringUpError> {
     // The bus, leaked: it lives as long as the firmware, and both the
     // expander and the touch controller borrow it.
-    let bus: Bus = Box::leak(Box::new(RefCell::new(I2cDriver::new(
+    let bus: Bus = Box::leak(Box::new(Mutex::new(I2cDriver::new(
         pins.i2c0,
         pins.sda,
         pins.scl,
         &I2cConfig::new().baudrate(400.kHz().into()),
     )?)));
 
-    let mut expander = Expander::new(RefCellDevice::new(bus));
+    let mut expander = Expander::new(MutexDevice::new(bus));
     expander.init(TOUCH_RST.mask() | PANEL_RST.mask() | AMP_EN.mask())?;
     expander
         .write_outputs(TOUCH_RST.mask() | PANEL_RST.mask() | AMP_EN.mask())?;
@@ -176,7 +182,7 @@ pub fn bring_up(
     expander.set(TOUCH_RST, false)?;
     FreeRtos::delay_ms(10);
     expander.set(TOUCH_RST, true)?;
-    let mut touch = Cst3530::new(RefCellDevice::new(bus));
+    let mut touch = Cst3530::new(MutexDevice::new(bus));
     // The controller boots after reset and is not to be spoken to, nor
     // the bus used, until it answers; a codec written to in that window
     // got a bus timeout on the bench.
