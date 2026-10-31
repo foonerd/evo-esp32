@@ -1003,6 +1003,10 @@ fn main() -> anyhow::Result<()> {
                                 if want != wanted {
                                     wanted = want;
                                     set_volume(&mut steward, wanted, t);
+                                    // The output has the level as the
+                                    // request returns: the sink takes it
+                                    // here, not at the next paint.
+                                    apply_level(&steward, &volume, &mut level);
                                 }
                             }
                             Intent::Commit(Hotspot::Seek(f)) => {
@@ -1556,9 +1560,33 @@ fn main() -> anyhow::Result<()> {
         } else {
             FACE_REST
         };
-        if (!audio_short || owed)
-            && (painting || last_face.elapsed() >= face_tick)
-        {
+        let face_due = painting || last_face.elapsed() >= face_tick;
+        // A finger on a slider is answered whatever the lead: the slider
+        // alone is a few windows on the panel, milliseconds, and the
+        // decoder's reservoir carries that. A frame still waits its turn.
+        // The face is asked, with the view it would paint, whether the
+        // paint would be that light; the view is built once and painted.
+        let finger = audio_short
+            && !owed
+            && !painting
+            && last_touch.elapsed() < FACE_AWAKE;
+        let mut paint = None;
+        if face_due && (!audio_short || owed || finger) {
+            let output = output_state(&steward);
+            let pb = playback_state(&steward).unwrap_or_default();
+            let source = rooms.source().map_or("Card", Source::label);
+            let mut state = View::new(&pb, output.as_ref(), source);
+            state.caution = net.as_ref().map_or("", |n| n.state.caution());
+            state.shuffle = queue.shuffle();
+            state.repeat = queue.repeat();
+            if current.is_none() {
+                state.notice = notice.clone().unwrap_or_default();
+            }
+            if !audio_short || owed || face.light_repaint(&state) {
+                paint = Some((pb, state));
+            }
+        }
+        if let Some((pb, state)) = paint {
             last_face = Instant::now();
             if face.screen() == Screen::Library
                 && browse.waiting_for_servers()
@@ -1568,20 +1596,6 @@ fn main() -> anyhow::Result<()> {
                 let here = browse.here.clone();
                 browse.open(&mut steward, &card_facts, &mut face, here, t);
             }
-            let output = output_state(&steward);
-            if let Some(out) = &output {
-                let now_level = (out.volume, out.muted);
-                if level != Some(now_level) {
-                    volume.set(out.volume, out.muted);
-                    info!(
-                        "volume: {}%{}",
-                        out.volume,
-                        if out.muted { ", muted" } else { "" }
-                    );
-                    level = Some(now_level);
-                }
-            }
-            let pb = playback_state(&steward).unwrap_or_default();
             match pb.status {
                 playback::Status::Opening => opening = true,
                 playback::Status::Playing if opening => {
@@ -1612,16 +1626,8 @@ fn main() -> anyhow::Result<()> {
                     current = None;
                 }
             }
-            let source = rooms.source().map_or("Card", Source::label);
-            let mut state = View::new(&pb, output.as_ref(), source);
-            state.caution = net.as_ref().map_or("", |n| n.state.caution());
             let before_presence = last_face.elapsed();
             presence.set_playing(playing(&pb));
-            state.shuffle = queue.shuffle();
-            state.repeat = queue.repeat();
-            if current.is_none() {
-                state.notice = notice.clone().unwrap_or_default();
-            }
             let before_art = last_face.elapsed();
             if let Some(track) = pb.track.as_ref() {
                 if art.track(track) {
@@ -1660,7 +1666,7 @@ fn main() -> anyhow::Result<()> {
             let took = last_face.elapsed();
             if took >= LONG_TURN {
                 info!(
-                    "face: {} ms: {} ms to the state, {} ms presence, {} ms art, {} ms paint ({:?})",
+                    "face: {} ms: {} ms to presence, {} ms presence, {} ms art, {} ms paint ({:?})",
                     took.as_millis(),
                     before_presence.as_millis(),
                     (before_art - before_presence).as_millis(),
@@ -1726,6 +1732,15 @@ fn main() -> anyhow::Result<()> {
         let faced = Instant::now();
         for h in steward.happenings_since(seen).happenings {
             seen = h.seq;
+            // The output moved (a room, a remote, the slide above): the
+            // sink follows it now, whatever the face is doing.
+            if matches!(
+                h.kind,
+                HappeningKind::Updated | HappeningKind::Announced
+            ) && h.subject.as_ref().is_some_and(is_output)
+            {
+                apply_level(&steward, &volume, &mut level);
+            }
             let kind = serde_json::to_string(&h.kind).unwrap_or_default();
             // Position updates come every tick; the heartbeat reports them.
             if kind != r#"{"kind":"updated"}"# {
@@ -2233,6 +2248,39 @@ fn output_state(steward: &Steward) -> Option<delivery::State> {
         .subjects
         .first()
         .and_then(|s| from_value(&s.state).ok())
+}
+
+/// Whether `id` is the output's subject: the steward mints ids as
+/// `kind/n`, and the output's kind is the delivery contract's.
+fn is_output(id: &SubjectId) -> bool {
+    id.as_str()
+        .strip_prefix(delivery::KIND)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Set the sink's gain to the output's level when it has moved since the
+/// sink last took it; `level` is what the sink has. The output's state
+/// is current as soon as a request to it returns, and a change from
+/// anywhere else arrives as an update to its subject, so the sink is
+/// never waiting on a paint.
+fn apply_level(
+    steward: &Steward,
+    volume: &sink::Volume,
+    level: &mut Option<(u8, bool)>,
+) {
+    let Some(out) = output_state(steward) else {
+        return;
+    };
+    let now = (out.volume, out.muted);
+    if *level != Some(now) {
+        volume.set(out.volume, out.muted);
+        info!(
+            "volume: {}%{}",
+            out.volume,
+            if out.muted { ", muted" } else { "" }
+        );
+        *level = Some(now);
+    }
 }
 
 /// A Fisher-Yates shuffle on the chip's hardware random numbers.

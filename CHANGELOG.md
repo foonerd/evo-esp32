@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The volume follows the finger again while the decoder runs flat out
+  (96 kHz). Since 0.2.2 the sink took its level only when the face
+  painted, and the face does not paint while the decoder is short of
+  lead, so a slide was heard up to a second late and the knob moved
+  in jumps; the Faders face, where every slider repaint was the whole
+  fader, was the worst. The sink now takes the level as the slide
+  sets it, and when the output changes from anywhere else; a slider
+  repaints only the band its knob crossed; and a slider's repaint
+  passes the lead gate while a finger is on the face, since it is a
+  few windows on the panel. Measured on the bench at 96 kHz: the
+  level moves every 74–122 ms (median 90) against 500–1400 ms before.
+
 - The player stands on its own hardware layer. The board crate
   (`boards/waveshare-esp32-c5-touch-lcd-28`), the chip drivers
   (`drivers/`: CST3530 touch, CH32V003 expander, ES8311 codec, ES9018K2M

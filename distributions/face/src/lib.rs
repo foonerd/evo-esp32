@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 
 pub use art::Art;
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::{DrawTarget, Point, Size};
+use embedded_graphics::prelude::{DrawTarget, DrawTargetExt, Point, Size};
 use embedded_graphics::primitives::Rectangle;
 use evo_esp32_queue::Repeat;
 use evo_esp32_sdk::contract::audio::{delivery, playback};
@@ -306,6 +306,9 @@ pub struct Face {
     scene: Option<Scene>,
     second: Option<u64>,
     level: Option<(u8, bool)>,
+    /// What each bar shows on the panel, as a fraction; `None` until a
+    /// full frame has painted it, so the next paint is the whole bar.
+    bars: Bars,
     /// The mode icons are on the face (not for a station), so a tap on
     /// them counts.
     modes_shown: bool,
@@ -365,6 +368,7 @@ impl Face {
             scene: None,
             second: None,
             level: None,
+            bars: Bars::default(),
             modes_shown: false,
             sheet: false,
             sheet_due: false,
@@ -511,19 +515,10 @@ impl Face {
         self.scene = None;
     }
 
-    /// Bring `target` up to date with `view`, painting as little as the
-    /// change allows. A full frame (the first, or a scene change) comes
-    /// in ten calls, each returning [`Repaint::Partial`] until the last
-    /// returns [`Repaint::Full`]; call again as soon as convenient.
-    pub fn refresh<D>(
-        &mut self,
-        target: &mut D,
-        view: &View,
-    ) -> Result<Repaint, D::Error>
-    where
-        D: DrawTarget<Color = Rgb565>,
-    {
-        let scene = Scene {
+    /// The scene `view` would paint: everything but the position and the
+    /// level.
+    fn scene_of(&self, view: &View) -> Scene {
+        Scene {
             screen: self.screen,
             page: self.page,
             status: view.status,
@@ -537,7 +532,42 @@ impl Face {
             duration_ms: view.duration_ms,
             style: self.layout.style,
             theme: self.theme.name,
-        };
+        }
+    }
+
+    /// True when the next [`refresh`](Self::refresh) with `view` would
+    /// paint a slider alone (the progress or the level: a few windows,
+    /// milliseconds) and not a stage of a frame. A caller that rations
+    /// painting against the decoder's lead can let these through
+    /// whatever the lead; a finger on a slider is answered.
+    pub fn light_repaint(&self, view: &View) -> bool {
+        if self.screen != Screen::NowPlaying
+            || self.stage.is_some()
+            || self.art_due
+            || self.rows_due
+            || self.sheet_due
+            || self.sheet
+            || self.scene.as_ref() != Some(&self.scene_of(view))
+        {
+            return false;
+        }
+        Some(view.position_ms / 1000) != self.second
+            || Some((view.volume, view.muted)) != self.level
+    }
+
+    /// Bring `target` up to date with `view`, painting as little as the
+    /// change allows. A full frame (the first, or a scene change) comes
+    /// in ten calls, each returning [`Repaint::Partial`] until the last
+    /// returns [`Repaint::Full`]; call again as soon as convenient.
+    pub fn refresh<D>(
+        &mut self,
+        target: &mut D,
+        view: &View,
+    ) -> Result<Repaint, D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let scene = self.scene_of(view);
         let second = Some(view.position_ms / 1000);
         let level = Some((view.volume, view.muted));
         let on_page = self.screen != Screen::NowPlaying;
@@ -571,6 +601,8 @@ impl Face {
             self.modes_shown = scene.modes;
             self.scene = Some(scene);
             self.stage = Some(0);
+            // The frame paints from the ground up: nothing shown holds.
+            self.bars = Bars::default();
             // The track's sheet goes with the track; a message stays up
             // over the new frame.
             self.sheet = self.message.is_some();
@@ -1501,25 +1533,36 @@ impl Face {
     }
 
     /// The seek strip with its knob, where the layout has one.
-    fn paint_seek<D>(&self, target: &mut D, view: &View) -> Result<(), D::Error>
+    fn paint_seek<D>(
+        &mut self,
+        target: &mut D,
+        view: &View,
+    ) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        match self.layout.seek {
-            Some(bar) => self.paint_bar(
-                target,
-                bar,
-                view.progress().unwrap_or(0.0),
-                self.theme.accent,
-                self.theme.foreground,
-            ),
-            None => Ok(()),
-        }
+        let Some(bar) = self.layout.seek else {
+            return Ok(());
+        };
+        let frac = view.progress().unwrap_or(0.0);
+        let t = self.theme;
+        self.paint_bar(
+            target,
+            bar,
+            self.bars.seek,
+            frac,
+            t.accent,
+            t.foreground,
+        )?;
+        self.bars.seek = Some(frac);
+        Ok(())
     }
 
-    /// The volume slider: icon, bar, label.
+    /// The volume slider: icon, bar, label. Only what changed is painted:
+    /// the bar's band between the old and new knob, the label, and the
+    /// icon when the mute moved.
     fn paint_volume<D>(
-        &self,
+        &mut self,
         target: &mut D,
         view: &View,
     ) -> Result<(), D::Error>
@@ -1536,8 +1579,13 @@ impl Face {
         } else {
             (t.accent, t.foreground)
         };
-        self.paint_bar(target, s.bar, frac, fill, knob)?;
-        if let Some(c) = s.icon {
+        // A change of mute recolours the whole fill: paint the bar whole.
+        let was_muted = self.bars.muted;
+        let from = self.bars.volume.filter(|_| was_muted == Some(view.muted));
+        self.paint_bar(target, s.bar, from, frac, fill, knob)?;
+        self.bars.volume = Some(frac);
+        self.bars.muted = Some(view.muted);
+        if let (Some(c), true) = (s.icon, was_muted != Some(view.muted)) {
             let clear = Rectangle::with_center(c, Size::new(18, 18));
             target.fill_solid(&clear, t.background)?;
             draw::icon_speaker(
@@ -1572,12 +1620,17 @@ impl Face {
         Ok(())
     }
 
-    /// A bar with its filled part and a knob, cleared first so a shorter
-    /// fill replaces a longer one cleanly.
+    /// A bar with its filled part and a knob. With `from`, the fraction
+    /// the panel shows, only the band between the old and the new knob is
+    /// repainted (the knob's reach either side); without it the bar is
+    /// cleared and painted whole. The band is painted through a clipped
+    /// target, so the same drawing serves both and only the band's rows
+    /// (or columns) reach the panel.
     fn paint_bar<D>(
         &self,
         target: &mut D,
         bar: Rectangle,
+        from: Option<f32>,
         frac: f32,
         fill: Rgb565,
         knob: Rgb565,
@@ -1586,48 +1639,84 @@ impl Face {
         D: DrawTarget<Color = Rgb565>,
     {
         let t = self.theme;
+        let reach = KNOB + 1;
         let travel = Rectangle::new(
-            bar.top_left - Point::new(KNOB + 1, KNOB + 1),
-            bar.size + Size::new(2 * (KNOB as u32 + 1), 2 * (KNOB as u32 + 1)),
+            bar.top_left - Point::new(reach, reach),
+            bar.size + Size::new(2 * reach as u32, 2 * reach as u32),
         );
-        target.fill_solid(&travel, t.background)?;
-        draw::rounded(target, bar, 2, t.border, t.background)?;
         let frac = frac.clamp(0.0, 1.0);
-        if layout::is_fader(bar) {
-            // Filled from the foot; the knob rides the fill's top.
-            let filled = (bar.size.height as f32 * frac) as u32;
-            let top = bar.top_left.y + (bar.size.height - filled) as i32;
-            if filled > 0 {
-                draw::rounded(
-                    target,
-                    Rectangle::new(
-                        Point::new(bar.top_left.x, top),
-                        Size::new(bar.size.width, filled),
-                    ),
-                    2,
-                    fill,
-                    t.background,
-                )?;
+        let fader = layout::is_fader(bar);
+        // Pixels of fill for a fraction.
+        let along = |f: f32| {
+            if fader {
+                (bar.size.height as f32 * f) as i32
+            } else {
+                (bar.size.width as f32 * f) as i32
             }
-            let k = Point::new(bar.center().x, top);
-            return draw::disc(target, k, KNOB, knob, t.background);
-        }
-        let filled = (bar.size.width as f32 * frac) as u32;
+        };
+        // The knob's place along the bar for that much fill: a fader
+        // fills from the foot, a strip from the left.
+        let at = |filled: i32| {
+            if fader {
+                bar.top_left.y + bar.size.height as i32 - filled
+            } else {
+                bar.top_left.x + filled
+            }
+        };
+        let filled = along(frac);
+        let band = match from {
+            Some(was) => {
+                let (a, b) = (at(along(was.clamp(0.0, 1.0))), at(filled));
+                let (lo, hi) = (a.min(b) - reach, a.max(b) + reach + 1);
+                let band = if fader {
+                    Rectangle::new(
+                        Point::new(travel.top_left.x, lo),
+                        Size::new(travel.size.width, (hi - lo) as u32),
+                    )
+                } else {
+                    Rectangle::new(
+                        Point::new(lo, travel.top_left.y),
+                        Size::new((hi - lo) as u32, travel.size.height),
+                    )
+                };
+                band.intersection(&travel)
+            }
+            None => travel,
+        };
+        let mut target = target.clipped(&band);
+        target.fill_solid(&band, t.background)?;
+        draw::rounded(&mut target, bar, 2, t.border, t.background)?;
         if filled > 0 {
-            draw::rounded(
-                target,
+            let fill_rect = if fader {
+                Rectangle::new(
+                    Point::new(bar.top_left.x, at(filled)),
+                    Size::new(bar.size.width, filled as u32),
+                )
+            } else {
                 Rectangle::new(
                     bar.top_left,
-                    Size::new(filled, bar.size.height),
-                ),
-                2,
-                fill,
-                t.background,
-            )?;
+                    Size::new(filled as u32, bar.size.height),
+                )
+            };
+            draw::rounded(&mut target, fill_rect, 2, fill, t.background)?;
         }
-        let k = Point::new(bar.top_left.x + filled as i32, bar.center().y);
-        draw::disc(target, k, KNOB, knob, t.background)
+        let k = if fader {
+            Point::new(bar.center().x, at(filled))
+        } else {
+            Point::new(at(filled), bar.center().y)
+        };
+        draw::disc(&mut target, k, KNOB, knob, t.background)
     }
+}
+
+/// What each bar shows on the panel: the fraction, and for the volume
+/// whether it is painted muted. `None` until a full frame paints it, so
+/// the next paint is the whole bar.
+#[derive(Debug, Clone, Copy, Default)]
+struct Bars {
+    seek: Option<f32>,
+    volume: Option<f32>,
+    muted: Option<bool>,
 }
 
 #[cfg(test)]
@@ -1939,6 +2028,105 @@ mod tests {
             );
             assert_ne!(display.get_pixel(Point::new(2, 2)), Rgb565::BLACK);
         }
+    }
+
+    /// Paint `view` from scratch on a fresh face of `style`.
+    fn fresh(
+        rotation: u16,
+        style: Style,
+        view: &View,
+    ) -> (Face, SimulatorDisplay<Rgb565>) {
+        let mut face = Face::new(rotation, style, theme::EVO_DEFAULT);
+        let mut display = SimulatorDisplay::<Rgb565>::new(face.layout().frame);
+        while face.refresh(&mut display, view) != Ok(Repaint::Full) {}
+        (face, display)
+    }
+
+    fn same_pixels(a: &SimulatorDisplay<Rgb565>, b: &SimulatorDisplay<Rgb565>) {
+        let differ = a
+            .bounding_box()
+            .points()
+            .filter(|&p| a.get_pixel(p) != b.get_pixel(p))
+            .collect::<Vec<_>>();
+        assert!(
+            differ.is_empty(),
+            "{} pixels differ: {:?}",
+            differ.len(),
+            &differ[..differ.len().min(8)]
+        );
+    }
+
+    #[test]
+    fn a_slider_moved_in_place_matches_a_fresh_frame() {
+        for style in [Style::Disc, Style::Card, Style::Faders] {
+            for rotation in [0u16, 90] {
+                let view = View::new(&playing(), Some(&out()), "Card");
+                let (mut face, mut display) = fresh(rotation, style, &view);
+                // Up, down, to the ends, and the mute each way: every step
+                // leaves the panel as a frame painted whole would.
+                let steps: [(u8, bool, u64); 7] = [
+                    (55, false, 119_000),
+                    (20, false, 300_000),
+                    (100, false, 300_000),
+                    (0, false, 505_000),
+                    (0, true, 505_000),
+                    (63, true, 10_000),
+                    (63, false, 10_000),
+                ];
+                for (volume, muted, position_ms) in steps {
+                    let next = View {
+                        volume,
+                        muted,
+                        position_ms,
+                        ..view.clone()
+                    };
+                    assert!(
+                        face.light_repaint(&next),
+                        "{style:?}/{rotation}: a slider move is light"
+                    );
+                    // A position step repaints the progress, then the level.
+                    let mut n = 0;
+                    while face.refresh(&mut display, &next) != Ok(Repaint::None)
+                    {
+                        n += 1;
+                        assert!(n <= 2, "{style:?}/{rotation}: slider only");
+                    }
+                    assert!(!face.light_repaint(&next));
+                    let (_, whole) = fresh(rotation, style, &next);
+                    same_pixels(&display, &whole);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_light_repaint_is_a_slider_alone() {
+        let view = View::new(&playing(), Some(&out()), "Card");
+        let (mut face, mut display) = fresh(0, Style::Faders, &view);
+        assert!(!face.light_repaint(&view), "nothing to paint");
+        let louder = View {
+            volume: 70,
+            ..view.clone()
+        };
+        assert!(face.light_repaint(&louder));
+        // A track change is a frame, not a slider.
+        let other = View {
+            title: "Walk Of Life".into(),
+            ..louder.clone()
+        };
+        assert!(!face.light_repaint(&other));
+        // Mid-frame, nothing is light until the frame is done.
+        assert_eq!(face.refresh(&mut display, &other), Ok(Repaint::Partial));
+        assert!(!face.light_repaint(&other));
+        while face.refresh(&mut display, &other) != Ok(Repaint::Full) {}
+        assert!(!face.light_repaint(&other));
+        // The sheet up, or a page, is never light.
+        face.show_sheet(true);
+        let quieter = View {
+            volume: 10,
+            ..other.clone()
+        };
+        assert!(!face.light_repaint(&quieter));
     }
 
     #[test]
