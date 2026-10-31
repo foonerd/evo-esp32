@@ -28,13 +28,24 @@
 //!
 //! [`mdns`]: the device's `.local` name and the services it advertises
 //! (the Evo audio plane's `_evo._tcp`), on Espressif's mDNS responder.
+//!
+//! [`card`], [`net`], [`nvs`]: the FAT card on the panel's SPI bus, the
+//! Wi-Fi with its remembered access point, the settings store in NVS.
+//! Written for the Volumio ESP companion (MIT) and carried here when the
+//! two projects parted; see NOTICE.
 
 pub mod aac;
+pub mod card;
 pub mod dial;
 pub mod http;
 pub mod jpeg;
 pub mod mdns;
 pub mod mp3;
+pub mod net;
+pub mod nvs;
 pub mod png;
 
+pub use card::Card;
 pub use http::HttpOpener;
+pub use net::{ApHint, Band, WifiNet};
+pub use nvs::{NvsError, NvsStore};

@@ -20,10 +20,15 @@ members = [
     "distributions/host",
     "distributions/volumio",
     "distributions/update",
+    "drivers/ch32v003-expander",
+    "drivers/cst3530",
+    "drivers/es8311",
+    "drivers/es9018k2m",
+    "drivers/pcm512x",
 ]
-# Builds only inside a firmware crate's workspace: esp-idf-svc compiles for
+# Build only inside a firmware crate's workspace: esp-idf-svc compiles for
 # ESP-IDF targets alone.
-exclude = ["platform/esp-idf"]
+exclude = ["platform/esp-idf", "boards/waveshare-esp32-c5-touch-lcd-28"]
 
 [workspace.package]
 version = "0.2.3"

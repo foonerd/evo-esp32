@@ -16,13 +16,11 @@ harness = false
 [workspace]
 
 [dependencies]
-# The companion's hardware layers, by commit until its next tag (MIT; the
-# dependency runs this way only, never the reverse).
-board = { package = "companion-board-waveshare-esp32-c5-touch-lcd-28", git = "https://github.com/foonerd/volumio-esp-companion", rev = "ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef" }
-companion-platform-esp-idf = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef" }
-es8311 = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef" }
-es9018k2m = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef" }
-pcm512x = { git = "https://github.com/foonerd/volumio-esp-companion", rev = "ee3f2e41e48a86e5cd2da48fdc1c61bde2b9f9ef" }
+# The board and its drivers, this repository's own (boards/, drivers/).
+board = { package = "evo-esp32-board-waveshare-esp32-c5-touch-lcd-28", path = "../../boards/waveshare-esp32-c5-touch-lcd-28" }
+es8311 = { path = "../../drivers/es8311" }
+es9018k2m = { path = "../../drivers/es9018k2m" }
+pcm512x = { path = "../../drivers/pcm512x" }
 embedded-hal-bus = "0.3"
 esp-idf-svc = { version = "0.53", features = ["std", "binstart"] }
 log = "0.4"

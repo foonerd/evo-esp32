@@ -1,8 +1,8 @@
 # The check on every push and pull request, the firmware built for its
 # device, and the flashable image as a build artefact.
 #
-# The toolchain steps are volumio-esp-companion's ci.yml (itself
-# esp-rs/esp-idf-template's recipe, green for the esp32c5), with the
+# The toolchain steps follow esp-rs/esp-idf-template's recipe (green for
+# the esp32c5), with the
 # versions this repository pins: rust-toolchain.toml in each crate names its channel
 # and components; ldproxy is built at the version the firmware was first
 # built with. ESP-IDF and the chip's GCC are fetched by embuild into the

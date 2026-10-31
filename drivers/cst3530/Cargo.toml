@@ -1,0 +1,19 @@
+[package]
+name = "cst3530"
+description = "evo-esp32: driver for the Hynitron CST3530 capacitive touch controller, as Waveshare's ESP32 touch panels use it, over embedded-hal"
+version.workspace = true
+edition.workspace = true
+# Written for the Volumio ESP companion (MIT) and carried here as it was;
+# see NOTICE.
+license = "MIT"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal = "1"
+
+[dev-dependencies]
+embedded-hal-mock = { version = "0.11", default-features = false, features = ["eh1"] }

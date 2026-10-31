@@ -1,0 +1,19 @@
+[package]
+name = "pcm512x"
+description = "evo-esp32: driver for the TI PCM5121/PCM5122 DAC as Raspberry Pi HATs carry it (IQaudIO DAC+, HiFiBerry DAC+ and their kin, Waveshare's PCM5122 Audio Board): detection, the 3-wire bring-up with the PLL on BCK, word length, volume and mute over I2C, over embedded-hal"
+version.workspace = true
+edition.workspace = true
+# Written for the Volumio ESP companion (MIT) and carried here as it was;
+# see NOTICE.
+license = "MIT"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal = "1"
+
+[dev-dependencies]
+embedded-hal-mock = { version = "0.11", default-features = false, features = ["eh1"] }

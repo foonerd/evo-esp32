@@ -20,17 +20,17 @@ happenings and serves projections; the catalogue tool that validates a
 (a file source, a real decoder, a simulated one, a null output) and the
 example; and a host distribution that compiles its catalogue in, decodes
 FLAC, MP3 and WAV through the steward into a paced sink, bit-exact for
-the lossless two, and draws the companion's face from the projections.
+the lossless two, and draws the player's face from the projections.
 Every device-shaped crate builds for bare-metal RISC-V. The fabric runs
 on the first board: `firmware/waveshare-esp32-c5-touch-lcd-28` brings up
 the Waveshare ESP32-C5-Touch-LCD-2.8's codec and amplifier through the
-companion's drivers, stands the steward and the three plugins up as the
+drivers in `drivers/`, stands the steward and the three plugins up as the
 host distribution does, and plays the music on the card through an I2S
 sink paced by the I2S clock, to the board's speaker and to a Pi-HAT DAC
-on its header at once, with the panel showing the face. The hardware
-layers come from
-[volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion)
-by tag. The [wiki](https://github.com/foonerd/evo-esp32/wiki) has the
+on its header at once, with the panel showing the face. The board, its
+drivers and the ESP-IDF platform pieces are this repository's own
+(`boards/`, `drivers/`, `platform/`). The
+[wiki](https://github.com/foonerd/evo-esp32/wiki) has the
 [hardware](https://github.com/foonerd/evo-esp32/wiki/Hardware) the
 first device needs.
 
@@ -41,11 +41,9 @@ flowchart LR
     core["<b>evo-core</b><br/><i>the fabric on Linux</i><br/>steward · catalogue · slots<br/>happenings · projections"]
     audio["<b>evo-device-audio</b><br/><i>reference audio device</i><br/>the slot shapes of<br/>an audio player"]
     esp["<b>evo-esp32</b><br/><i>this repo</i><br/>the fabric on an MCU<br/>a player in a panel"]
-    comp["<b>volumio-esp-companion</b><br/><i>hardware layers, MIT</i><br/>hal · drivers · platform<br/>board firmware crates"]
 
     core -.->|concepts, not code| esp
     audio -.->|slot shapes, not code| esp
-    comp ==>|crates pinned by tag| esp
 ```
 
 evo-core is a fabric for Linux appliances: one long-running steward
@@ -58,12 +56,15 @@ authority over state, projections as the only thing a consumer reads.
 This repository takes that shape onto an ESP32 and finds out which
 parts of the fabric survive the move and which have to be reinvented.
 
-The hardware is not written here. The pins, the bring-up, the display,
-the touch controller, the IO expander, Wi-Fi, the configuration store
-and the HTTP client are the companion project's `hal`, `drivers`,
-`platform` and `firmware` crates, consumed by tag. This repository
-writes the application: the catalogue, the steward, the plugins that
-make a panel a player.
+The hardware is written here too, in crates of its own: the board's
+pins and bring-up (`boards/`), the chips on it and on a Pi-HAT DAC
+(`drivers/`: the touch controller, the IO expander, the ES8311 codec,
+the ES9018K2M and PCM512x DACs), and what every ESP-IDF firmware shares
+(`platform/esp-idf`: the card, Wi-Fi, NVS, the Espressif decoders). The
+board and the drivers began in the Volumio ESP companion project (MIT)
+and came here when the two projects parted; they are maintained here.
+The application is the catalogue, the steward, the plugins that make a
+panel a player.
 
 ## What this repository contains
 
@@ -86,7 +87,9 @@ make a panel a player.
 | `distributions/face/` | `evo-esp32-face` | The player's own face, shared by the host and the firmware: the playback and delivery projections drawn as Now Playing on any RGB565 draw target in the evo family's themes (evo-ui's tokens), in two styles (the disc with the progress on its ring; the card) and at four rotations, with Inter rasterised at build time into a glyph atlas and every edge anti-aliased against what it sits on; repainting only what changed. `no_std`. | BSL 1.1 |
 | `distributions/host/` | `evo-esp32-host` | What a firmware distribution does, on a desktop: the catalogue compiled in by `build.rs`, checked against the plugins at start, the three admitted, a track listed and decoded through the steward into a sink made of a clock and a file (`--wav` keeps what was heard), projections and happenings printed, and the panel as a consumer: the face drawn from the playback and delivery projections, written as a PNG; `--gallery` writes every rotation, style and theme. | BSL 1.1 |
 | `distributions/volumio/` | `evo-esp32-volumio` | The player as a Volumio device: announced where Volumio looks, listed in its Multiroom with what plays and its cover, grouped from Volumio's side. socket.io 2 over Engine.IO 3 on the HTTP long-polling transport, in plain std: a server for the Volumio that connects, a client session back to it for the leader's broadcasts, the state and output objects Volumio reads, the picture served. | BSL 1.1 |
-| `platform/esp-idf/` | `evo-esp32-platform-esp-idf` | What every Espressif firmware shares, over ESP-IDF: Espressif's fixed-point MP3 and AAC decoders behind Symphonia's codec registry, for chips without an FPU (Espressif Modified MIT, Espressif chips only); the JPEG and PNG decoders for art; `http://` and `https://` streams; the mDNS announcement. Builds only inside a firmware crate. | BSL 1.1 |
+| `drivers/` | `cst3530`, `ch32v003-expander`, `es8311`, `es9018k2m`, `pcm512x` | The chips on the board and on a Pi-HAT DAC, over `embedded-hal`, `no_std`: the touch controller, the IO expander, the mono codec, and the two DAC families a HAT carries. From the Volumio ESP companion, maintained here. | MIT |
+| `boards/` | `evo-esp32-board-waveshare-esp32-c5-touch-lcd-28` | The first board brought up in the vendor BSP's order: the shared SPI and I2C buses, the expander, the ST7789 panel, the CST3530 touch, the backlight. One crate per board. From the Volumio ESP companion, maintained here. | MIT |
+| `platform/esp-idf/` | `evo-esp32-platform-esp-idf` | What every Espressif firmware shares, over ESP-IDF: the card on the panel's SPI bus, Wi-Fi with a remembered access point, the settings in NVS; Espressif's fixed-point MP3 and AAC decoders behind Symphonia's codec registry, for chips without an FPU (Espressif Modified MIT, Espressif chips only); the JPEG and PNG decoders for art; `http://` and `https://` streams; the mDNS announcement. Builds only inside a firmware crate. | BSL 1.1 |
 | `firmware/` | `evo-esp32-waveshare-esp32-c5-touch-lcd-28` | One crate per board, each a distribution: the catalogue it ships, the plugins it stocks, the board it stands on. The first: the fabric on the Waveshare ESP32-C5-Touch-LCD-2.8, the card as the files source, the network's media servers as the DLNA source and the card's shares as the SMB and NFS sources, Symphonia into an I2S sink with the DMA as the buffer, the ES8311 following the stream's rate, a Pi-HAT DAC on the header playing the same frames, the face on the panel with touch and the album's art. | BSL 1.1 |
 
 Presentation is not a shelf: the panel is a consumer that reads projections, as the network is, and lives in the distribution's loop; `distributions/face` is that consumer, reading the fabric's state as a `View` and drawing it; the host writes it as a PNG, the firmware to the board's panel. Frames are not values either: the decoder writes to a `FrameSink` the distribution owns (`sdk::contract::audio::playback::FrameSink`), as evo-device-audio's decoder writes to the operating system's audio stack and not to the fabric; on a board that sink is the I2S peripheral, on the host a clock and a file. The companion is a dependency by commit until its first tag, and the dependency runs that way only. Next: the output plugin owning the codec's volume and mute instead of the null one; the panel as a consumer on the board's display; a DAC driver per HAT the fleet has.
@@ -122,9 +125,6 @@ machine, the check fails and says so.
   takes its shape from.
 - [evo-device-audio](https://github.com/foonerd/evo-device-audio): the
   reference audio device on Linux, whose slot shapes this reuses.
-- [volumio-esp-companion](https://github.com/foonerd/volumio-esp-companion):
-  the hardware layers this stands on, and the Volumio companion that
-  shares the same boards.
 
 ## License
 

@@ -1,0 +1,19 @@
+[package]
+name = "es8311"
+description = "evo-esp32: driver for the Everest ES8311 audio codec as Waveshare's ESP32 touch panels carry it: the DAC path over I2C, clocked from the I2S bit clock, over embedded-hal"
+version.workspace = true
+edition.workspace = true
+# Written for the Volumio ESP companion (MIT) and carried here as it was;
+# see NOTICE.
+license = "MIT"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal = "1"
+
+[dev-dependencies]
+embedded-hal-mock = { version = "0.11", default-features = false, features = ["eh1"] }

@@ -5,7 +5,7 @@
 //!
 //! The fabric on its first board. On boot:
 //! 1. The SPI bus and the card on it; then the board through the
-//!    companion's board crate: the I2C bus (SDA GPIO0, SCL GPIO1), the
+//!    board crate (`boards/`): the I2C bus (SDA GPIO0, SCL GPIO1), the
 //!    CH32V003 expander with its outputs high (EXIO3 is the NS4150B
 //!    amplifier's enable), the ST7789 panel, the CST3530 touch.
 //! 2. The codec and a HAT's DAC on the same I2C bus, handed out by the
@@ -57,7 +57,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use companion_platform_esp_idf::{Band, Card};
 use embedded_hal_bus::i2c::RefCellDevice;
 use es8311::Es8311;
 use es9018k2m::Es9018k2m;
@@ -75,6 +74,7 @@ use evo_esp32_face::{
 };
 use evo_esp32_platform_esp_idf::mdns::{Advertiser, Search};
 use evo_esp32_platform_esp_idf::HttpOpener;
+use evo_esp32_platform_esp_idf::{Band, Card};
 use evo_esp32_queue::{Queue, Repeat};
 use evo_esp32_sdk::catalogue::{Catalogue, ShelfRef};
 use evo_esp32_sdk::contract::audio::playback::{
@@ -132,7 +132,7 @@ const VOLUME_PERCENT: u8 = 40;
 /// (the vendor's 5 V amplifier against the codec's 3.3 V output).
 const HW_GAIN_HALF_DB: i16 = -7;
 /// Where the card appears, and where the files source looks.
-const MUSIC: &str = companion_platform_esp_idf::card::MOUNT_POINT;
+const MUSIC: &str = evo_esp32_platform_esp_idf::card::MOUNT_POINT;
 /// The facts reader's stack: an open and a 64-byte read of one file.
 const FACTS_STACK: usize = 8 * 1024;
 /// How long the facts reader waits for the first track to play before
@@ -154,7 +154,7 @@ const TICK: Duration = Duration::from_millis(5);
 /// How often the loop sleeps a millisecond for the idle task while the
 /// decoder is behind and would otherwise never let go of the core.
 const IDLE_EVERY: Duration = Duration::from_millis(250);
-/// The face's cadence: the companion steps its ticker every 40 ms.
+/// The face's cadence while a finger is about.
 const FACE_TICK: Duration = Duration::from_millis(40);
 /// The face's cadence at rest: no frame in progress and no finger on
 /// the panel for a second. Each look reads the fabric's state (two
@@ -166,7 +166,7 @@ const FACE_AWAKE: Duration = Duration::from_secs(1);
 /// How often an empty Network page asks the source again for servers
 /// while the search for them is out.
 const SERVERS_TICK: Duration = Duration::from_secs(2);
-/// The panel's rotation, degrees; the companion's default.
+/// The panel's rotation, degrees, when the card does not say.
 const ROTATION: u16 = 0;
 /// Backlight, 0 to 100.
 const BACKLIGHT_PERCENT: u8 = 100;

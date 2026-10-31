@@ -117,6 +117,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "ch32v003-expander"
+version = "0.2.3"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-mock",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -163,6 +171,14 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "cst3530"
+version = "0.2.3"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-mock",
 ]
 
 [[package]]
@@ -226,6 +242,48 @@ dependencies = [
  "base64",
  "embedded-graphics",
  "image",
+]
+
+[[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
+name = "embedded-hal-mock"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9a0f04f8886106faf281c47b6a0e4054a369baedaf63591fdb8da9761f3f379"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-nb",
+]
+
+[[package]]
+name = "embedded-hal-nb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba4268c14288c828995299e59b12babdbe170f6c6d73731af1b4648142e8605"
+dependencies = [
+ "embedded-hal",
+ "nb",
+]
+
+[[package]]
+name = "es8311"
+version = "0.2.3"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-mock",
+]
+
+[[package]]
+name = "es9018k2m"
+version = "0.2.3"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-mock",
 ]
 
 [[package]]
@@ -492,6 +550,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nb"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -633,6 +697,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "pcm512x"
+version = "0.2.3"
+dependencies = [
+ "embedded-hal",
+ "embedded-hal-mock",
 ]
 
 [[package]]

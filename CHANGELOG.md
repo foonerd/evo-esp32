@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The player stands on its own hardware layer. The board crate
+  (`boards/waveshare-esp32-c5-touch-lcd-28`), the chip drivers
+  (`drivers/`: CST3530 touch, CH32V003 expander, ES8311 codec, ES9018K2M
+  and PCM512x DACs) and the card, Wi-Fi and NVS modules of
+  `platform/esp-idf` are this repository's, carried over from the
+  Volumio ESP companion (MIT, same author) at the revision the firmware
+  was built against, less that project's HAL traits. No crate of
+  evo-esp32 depends on the companion any more, by git or otherwise; the
+  two projects share a vendor's board and nothing else. The firmware's
+  behaviour is unchanged.
+
 ## [0.2.3] - 2026-10-30
 
 - The panel lights in 5 s from power or a restart, not 14: the face

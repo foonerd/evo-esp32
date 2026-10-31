@@ -1,0 +1,19 @@
+[package]
+name = "ch32v003-expander"
+description = "evo-esp32: driver for the CH32V003 I2C IO expander Waveshare fits to its ESP32 touch panels: eight GPIO, one PWM output, one ADC input, over embedded-hal"
+version.workspace = true
+edition.workspace = true
+# Written for the Volumio ESP companion (MIT) and carried here as it was;
+# see NOTICE.
+license = "MIT"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal = "1"
+
+[dev-dependencies]
+embedded-hal-mock = { version = "0.11", default-features = false, features = ["eh1"] }

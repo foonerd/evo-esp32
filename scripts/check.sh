@@ -30,13 +30,14 @@ cargo build -p evo-esp32-sdk -p evo-esp32-steward -p org-evoframework-example-ec
   -p org-evoframework-playback-sim -p org-evoframework-delivery-null \
   -p evo-esp32-config -p evo-esp32-queue \
   -p evo-esp32-face \
+  -p cst3530 -p ch32v003-expander -p es8311 -p es9018k2m -p pcm512x \
   --target "$bare" --locked
 
 echo "== host distribution"
 # The fabric end to end on this machine: catalogue checked, three plugins
 # admitted, one track listed, decoded for real into the paced sink, played
 # to its end, custody released, every frame heard (the recorded WAV is the
-# tone's size to the byte), and the companion's face drawn from the
+# tone's size to the byte), and the player's face drawn from the
 # projection into target/.
 tmp=$(mktemp -d)
 cargo run -q -p evo-esp32-host --locked -- --tone "$tmp/tone.wav"

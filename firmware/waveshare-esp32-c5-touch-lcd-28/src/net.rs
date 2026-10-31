@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! The network, joined on its own thread so the music does not wait for
-//! the search. The companion's `WifiNet` does the joining; this module
+//! the search. The platform's `WifiNet` does the joining; this module
 //! owns the thread, keeps the link up, and tells the main loop what it
 //! has so Settings and `evostatus.txt` can say.
 
@@ -10,12 +10,12 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
-use companion_platform_esp_idf::{Band, NvsStore, WifiNet};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sys;
+use evo_esp32_platform_esp_idf::{Band, NvsStore, WifiNet};
 use log::{info, warn};
 
 /// The thread's stack: the driver's own tasks have theirs, this one
