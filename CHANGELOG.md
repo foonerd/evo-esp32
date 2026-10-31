@@ -26,6 +26,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   side (44 px across, a fingertip) rather than 12. The tracker's
   contract said this all along; the code now does it.
 
+- A finger on the seek slider shows where it would land: the knob, the
+  fill (the ring on the Disc) and the elapsed clock follow the finger
+  live, and the seek is applied on the lift, as before. Until now the
+  slider sat still through the drag and jumped on the lift. Moving
+  backwards on the Disc's ring erases the arc passed instead of
+  repainting the whole ring.
+
 - The player stands on its own hardware layer. The board crate
   (`boards/waveshare-esp32-c5-touch-lcd-28`), the chip drivers
   (`drivers/`: CST3530 touch, CH32V003 expander, ES8311 codec, ES9018K2M

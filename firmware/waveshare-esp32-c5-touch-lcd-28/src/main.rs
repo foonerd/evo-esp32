@@ -687,6 +687,9 @@ fn main() -> anyhow::Result<()> {
 
     // One finger on the panel, into taps and slides.
     let mut tracker = Tracker::default();
+    // A finger on the seek slider: where it would land, 0 to 1, shown as
+    // the position until the lift seeks there.
+    let mut scrub: Option<f32> = None;
 
     // The library page: the folder in view, the way back to the root, and
     // the folder's tracks in the source's order, which a tap plays from.
@@ -1013,7 +1016,13 @@ fn main() -> anyhow::Result<()> {
                                     apply_level(&steward, &volume, &mut level);
                                 }
                             }
+                            Intent::Slide(Hotspot::Seek(f)) => {
+                                if current.is_some() {
+                                    scrub = Some(f);
+                                }
+                            }
                             Intent::Commit(Hotspot::Seek(f)) => {
+                                scrub = None;
                                 let duration = playback_state(&steward)
                                     .and_then(|pb| pb.track)
                                     .and_then(|tr| tr.duration_ms);
@@ -1580,6 +1589,9 @@ fn main() -> anyhow::Result<()> {
             let pb = playback_state(&steward).unwrap_or_default();
             let source = rooms.source().map_or("Card", Source::label);
             let mut state = View::new(&pb, output.as_ref(), source);
+            if let (Some(f), Some(d)) = (scrub, state.duration_ms) {
+                state.position_ms = (f as f64 * d as f64) as u64;
+            }
             state.caution = net.as_ref().map_or("", |n| n.state.caution());
             state.shuffle = queue.shuffle();
             state.repeat = queue.repeat();

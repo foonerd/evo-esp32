@@ -1028,7 +1028,7 @@ impl Face {
             3..=5 => self.paint_text_line(target, view, stage - 3),
             6 => {
                 let frac = view.progress().unwrap_or(0.0);
-                self.paint_ring(target, 0.0, frac, true)?;
+                self.paint_ring(target, frac)?;
                 self.paint_times(target, view)?;
                 self.paint_seek(target, view)?;
                 self.second = Some(view.position_ms / 1000);
@@ -1454,22 +1454,47 @@ impl Face {
     {
         let frac = view.progress().unwrap_or(0.0);
         if frac < self.ring_to {
-            self.paint_ring(target, 0.0, frac, true)?;
+            // Back: the track's colour over the arc no longer reached. The
+            // arc's pixels are the ring's own, so the join is exact.
+            self.paint_arc(target, frac, self.ring_to, self.theme.border)?;
         } else {
-            self.paint_ring(target, self.ring_to, frac, false)?;
+            self.paint_arc(target, self.ring_to, frac, self.theme.accent)?;
         }
+        self.ring_to = frac;
         self.paint_times(target, view)?;
         self.paint_seek(target, view)
     }
 
-    /// The ring's track (if `lay_track`) and its accent from `from` to
-    /// `to`; nothing in the card style.
-    fn paint_ring<D>(
-        &mut self,
+    /// The ring whole: its track with the accent to `to`; nothing where
+    /// the style has no ring.
+    fn paint_ring<D>(&mut self, target: &mut D, to: f32) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let Some((inner, outer)) = self.layout.ring_radii() else {
+            return Ok(());
+        };
+        draw::ring_arc(
+            target,
+            self.layout.art_centre(),
+            (outer, inner),
+            (0.0, to),
+            self.theme.border,
+            self.theme.accent,
+            self.theme.background,
+        )?;
+        self.ring_to = to;
+        Ok(())
+    }
+
+    /// The ring's arc from `from` to `to` in `colour`, over whatever is
+    /// there.
+    fn paint_arc<D>(
+        &self,
         target: &mut D,
         from: f32,
         to: f32,
-        lay_track: bool,
+        colour: Rgb565,
     ) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
@@ -1477,29 +1502,14 @@ impl Face {
         let Some((inner, outer)) = self.layout.ring_radii() else {
             return Ok(());
         };
-        let c = self.layout.art_centre();
-        if lay_track {
-            draw::ring_arc(
-                target,
-                c,
-                (outer, inner),
-                (from, to),
-                self.theme.border,
-                self.theme.accent,
-                self.theme.background,
-            )?;
-        } else {
-            draw::arc(
-                target,
-                c,
-                (outer, inner),
-                (from, to),
-                self.theme.accent,
-                self.theme.background,
-            )?;
-        }
-        self.ring_to = to;
-        Ok(())
+        draw::arc(
+            target,
+            self.layout.art_centre(),
+            (outer, inner),
+            (from, to),
+            colour,
+            self.theme.background,
+        )
     }
 
     /// Elapsed and duration.
