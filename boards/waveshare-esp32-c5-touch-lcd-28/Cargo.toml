@@ -1,7 +1,7 @@
 [package]
 name = "evo-esp32-board-waveshare-esp32-c5-touch-lcd-28"
 description = "evo-esp32: the Waveshare ESP32-C5-Touch-LCD-2.8 brought up in the vendor BSP's order: the expander, the ST7789 panel over SPI, the CST3530 touch controller, the backlight, the shared buses"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 # Written for the Volumio ESP companion (MIT) and carried here as it was;
 # see NOTICE.

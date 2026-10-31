@@ -118,7 +118,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "ch32v003-expander"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "embedded-hal",
  "embedded-hal-mock",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "cst3530"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "embedded-hal",
  "embedded-hal-mock",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "es8311"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "embedded-hal",
  "embedded-hal-mock",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "es9018k2m"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "embedded-hal",
  "embedded-hal-mock",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-catalogue"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -297,11 +297,11 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-config"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "evo-esp32-face"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "ab_glyph",
  "embedded-graphics",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-host"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "embedded-graphics",
  "embedded-graphics-simulator",
@@ -332,11 +332,11 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-queue"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "evo-esp32-sdk"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-steward"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "serde_json",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-update"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "md-5",
  "serde_json",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "evo-esp32-volumio"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "log",
@@ -581,7 +581,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "org-evoframework-delivery-null"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-example-echo"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-catalogue",
  "evo-esp32-sdk",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-multiroom-receiver"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64",
  "evo-esp32-sdk",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-playback-sim"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-playback-symphonia"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-snapcast-receiver"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-dlna"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-files"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-nfs"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "evo-esp32-sdk",
  "evo-esp32-steward",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "org-evoframework-source-smb"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "pcm512x"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "embedded-hal",
  "embedded-hal-mock",
