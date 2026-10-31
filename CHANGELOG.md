@@ -4,7 +4,7 @@ All notable changes to evo-esp32 are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.4] - 2026-10-31
 
 - The volume follows the finger again while the decoder runs flat out
   (96 kHz). Since 0.2.2 the sink took its level only when the face
