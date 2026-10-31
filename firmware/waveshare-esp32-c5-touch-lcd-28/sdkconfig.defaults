@@ -61,6 +61,13 @@ CONFIG_APP_PROJECT_VER="0.2.3"
 # also switch the Wi-Fi/LwIP-in-PSRAM option off.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# The PSRAM clock. ESP-IDF's default for the C5 is 40 MHz; its own C5
+# example (peripherals/lcd/parlio_simulate) runs 80. The decoder's
+# buffers, the sink's reservoir and every thread's stack are in PSRAM
+# and stream through a 32 KB cache, so the clock bounds the decoder.
+# The boot memtest (SPIRAM_MEMTEST) and the update's trial cover a
+# module that cannot keep up.
+CONFIG_SPIRAM_SPEED_80M=y
 
 # Internal SRAM is the scarce memory on the C5 (code in IRAM and data
 # share it). The Wi-Fi driver's IRAM optimisations default on and cost

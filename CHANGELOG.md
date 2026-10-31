@@ -42,6 +42,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   slider can be set to the exact second or percent. The I2C bus is
   shared behind a mutex for it.
 
+- The PSRAM runs at 80 MHz, not ESP-IDF's 40 MHz default for the C5
+  (its own C5 example runs 80). The decoder's buffers, the sink's
+  reservoir and every thread's stack are in PSRAM and stream through a
+  32 KB cache, so the clock bounded the decoder. On the same 96 kHz
+  FLAC the main task fell from 70–73% of the core to 52–55% and idle
+  rose from 5–10% to 28–31%: the headroom the face and touch had lost
+  since 0.2.0 is back. The boot memory test and the update's trial
+  guard a module that cannot keep the clock.
+
 - The player stands on its own hardware layer. The board crate
   (`boards/waveshare-esp32-c5-touch-lcd-28`), the chip drivers
   (`drivers/`: CST3530 touch, CH32V003 expander, ES8311 codec, ES9018K2M
