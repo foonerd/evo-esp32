@@ -22,6 +22,7 @@ cst3530 = { path = "../../drivers/cst3530" }
 es8311 = { path = "../../drivers/es8311" }
 es9018k2m = { path = "../../drivers/es9018k2m" }
 pcm512x = { path = "../../drivers/pcm512x" }
+wm8960 = { path = "../../drivers/wm8960" }
 embedded-hal-bus = { version = "0.3", features = ["std"] }
 esp-idf-svc = { version = "0.53", features = ["std", "binstart"] }
 log = "0.4"

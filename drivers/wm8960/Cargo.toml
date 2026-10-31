@@ -1,0 +1,17 @@
+[package]
+name = "wm8960"
+description = "evo-esp32: driver for the Cirrus/Wolfson WM8960 stereo codec as Raspberry Pi HATs carry it (Waveshare WM8960 Audio HAT, the ReSpeaker 2-Mics class): the DAC path to headphones and the class-D speakers, clocked by the codec's PLL from its own crystal, over embedded-hal"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal = "1"
+
+[dev-dependencies]
+embedded-hal-mock = { version = "0.11", default-features = false, features = ["eh1"] }

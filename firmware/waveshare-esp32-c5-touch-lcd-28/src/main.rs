@@ -54,12 +54,14 @@ mod update;
 static ALLOC: alloc::Placed = alloc::Placed;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use embedded_hal_bus::i2c::MutexDevice;
 use es8311::Es8311;
 use es9018k2m::Es9018k2m;
+use esp_idf_svc::hal::delay::FreeRtos;
 use esp_idf_svc::hal::delay::TickType;
 use esp_idf_svc::hal::gpio::Pin;
 use esp_idf_svc::hal::i2c::I2cDriver;
@@ -111,6 +113,7 @@ use org_evoframework_source_nfs::{NfsOpener, Share as NfsShare, SourceNfs};
 use org_evoframework_source_smb::{Share, SmbOpener, SourceSmb};
 use pcm512x::{Pcm512x, WordLength};
 use sink::{I2sSink, RateFollower};
+use wm8960::Wm8960;
 
 mod generated {
     //! `catalogue()`, from `catalogue.toml` at build time.
@@ -124,8 +127,12 @@ const RATE: u32 = 44_100;
 /// FLAC decodes at 0.4 of real time on the C5 with the core saturated,
 /// and the ES8311 has no 192 kHz setting; 96 kHz plays at real time
 /// with the network up, 14% of the core to spare (the card read ahead
-/// on its own thread).
+/// on its own thread). A HAT with a lower ceiling of its own (a WM8960
+/// stops at 48 kHz) goes silent above it; the board plays on.
 const RATE_CEILING: u32 = 96_000;
+/// What the face's strip says while the HAT's codec sits out a stream
+/// above its range; `wm8960::MAX_RATE`, in words.
+const HAT_SILENT: &str = "HAT silent above 48 kHz";
 /// Playback volume, percent on the house curve, applied in the sink.
 const VOLUME_PERCENT: u8 = 40;
 /// The board's hardware gain the codec driver takes off, in half-dB
@@ -176,16 +183,39 @@ const SEARCH_FOR: Duration = Duration::from_secs(3);
 /// went away, the next search starts.
 const SEARCH_AGAIN: Duration = Duration::from_secs(30);
 
-/// The codec follows the sink's rate.
-struct Codec(Es8311<board::Device>);
+/// The codecs follow the sink's rate: the board's, and a HAT's when one
+/// is on the header. Both hear the same stream; a HAT that cannot play
+/// the rate stays muted for it, and says so through `hat_silent`.
+struct Codec {
+    board: Es8311<board::Device>,
+    hat: Option<Wm8960<board::Device>>,
+    hat_silent: Arc<AtomicBool>,
+}
 
 impl RateFollower for Codec {
     fn rate_changed(&mut self, rate: u32, bits: u8) {
         if let Err(e) =
-            self.0
+            self.board
                 .set_format_in_slots(rate, bits, sink::SLOT_BITS as u8)
         {
             warn!("es8311: no setting for {rate} Hz {bits}-bit: {e:?}; the speaker may be off-pitch");
+        }
+        if let Some(hat) = self.hat.as_mut() {
+            let silent = match hat.set_rate(rate, &mut FreeRtos) {
+                Ok(()) => false,
+                Err(wm8960::Error::Unsupported) => {
+                    warn!(
+                        "wm8960: {rate} Hz is above its {} Hz; muted for this stream",
+                        wm8960::MAX_RATE
+                    );
+                    true
+                }
+                Err(e) => {
+                    warn!("wm8960: rate change failed: {e:?}");
+                    false
+                }
+            };
+            self.hat_silent.store(silent, Ordering::Relaxed);
         }
     }
 }
@@ -297,14 +327,58 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("es8311 volume: {e:?}"))?;
     info!("es8311: open, {RATE} Hz 16-bit in {}-bit slots, started, at its 100% ({half_db} half-dB); the level is the sink's", sink::SLOT_BITS);
 
+    // A WM8960 HAT (Waveshare's) takes writes only, so the survey below
+    // cannot see it: its reset is the probe. It clocks itself from the
+    // HAT's 24 MHz oscillator through its PLL and stops at 48 kHz: above
+    // that it sits a stream out, muted, and the board plays on.
+    let mut hat_codec = Wm8960::new(MutexDevice::new(bus));
+    let hat_codec = match hat_codec.reset() {
+        Ok(()) => {
+            let brought = (|| -> Result<(), wm8960::Error<_>> {
+                hat_codec.open()?;
+                FreeRtos::delay_ms(wm8960::OPEN_SETTLE_MS);
+                hat_codec.start(RATE, &mut FreeRtos)
+            })();
+            match brought {
+                Ok(()) => {
+                    info!(
+                        "wm8960: found at {:#04x} (it took the reset), {RATE} Hz through its PLL from {} MHz, 16-bit I2S; headphones and speakers at 0 dB, the level is the sink's; silent above {} Hz",
+                        wm8960::ADDRESS,
+                        wm8960::MCLK_HZ / 1_000_000,
+                        wm8960::MAX_RATE
+                    );
+                    config.note(format!(
+                        "hat: WM8960 at {:#04x}, PLL from its 24 MHz, 16-bit I2S; silent above {} Hz",
+                        wm8960::ADDRESS,
+                        wm8960::MAX_RATE
+                    ));
+                    Some(hat_codec)
+                }
+                Err(e) => {
+                    warn!("wm8960: took the reset but would not start: {e:?}");
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            info!("wm8960: none on the bus");
+            None
+        }
+    };
+
     memory("after the panel and the codec");
+    let hat_silent = Arc::new(AtomicBool::new(false));
     let sink = I2sSink::new(
         i2s0,
         pins.gpio24,
         pins.gpio26,
         pins.gpio25,
         RATE,
-        Codec(codec),
+        Codec {
+            board: codec,
+            hat: hat_codec,
+            hat_silent: hat_silent.clone(),
+        },
     )?;
     info!("i2s0: master, Philips 16-bit stereo in 32-bit slots (64 fs), BCLK GPIO24, WS GPIO25, DOUT GPIO26");
     memory("after the DMA ring");
@@ -1569,7 +1643,11 @@ fn main() -> anyhow::Result<()> {
             if let (Some(f), Some(d)) = (scrub, state.duration_ms) {
                 state.position_ms = (f as f64 * d as f64) as u64;
             }
-            state.caution = net.as_ref().map_or("", |n| n.state.caution());
+            state.caution = if hat_silent.load(Ordering::Relaxed) {
+                HAT_SILENT
+            } else {
+                net.as_ref().map_or("", |n| n.state.caution())
+            };
             state.shuffle = queue.shuffle();
             state.repeat = queue.repeat();
             if current.is_none() {
@@ -1604,12 +1682,12 @@ fn main() -> anyhow::Result<()> {
                 facts_reading = true;
                 read_facts(card_facts.clone());
             }
-            // The chip's ceiling is the distribution's to enforce: the
-            // decoder would play it, badly.
+            // The ceiling is the distribution's to enforce: the decoder
+            // would play it, badly.
             if let (Some(handle), Some(f)) = (current, pb.format.as_ref()) {
                 if f.sample_rate > RATE_CEILING {
                     warn!(
-                        "{:?} is {} Hz, above this board's ceiling of {RATE_CEILING} Hz; passed over",
+                        "{:?} is {} Hz, above this player's ceiling of {RATE_CEILING} Hz; passed over",
                         pb.track.as_ref().map(|t| t.title.as_str()).unwrap_or("?"),
                         f.sample_rate
                     );
@@ -2424,9 +2502,9 @@ fn advance(
         step = Step::Skip;
         if !within_ceiling(&track, facts) {
             info!(
-                "{:?} is {} Hz, above this board's ceiling of {RATE_CEILING} Hz; passed over unopened",
+                "{:?} is {} Hz, above this player's ceiling of {RATE_CEILING} Hz; passed over unopened",
                 track.title,
-                track.sample_rate.unwrap_or(0)
+                known_rate(&track, facts).unwrap_or(0)
             );
             continue;
         }
@@ -2549,17 +2627,21 @@ fn plain(why: &str) -> &'static str {
     }
 }
 
-/// Whether the track's rate is one this board plays: the source's
-/// facts first (the listing may have come before they were read), then
-/// the listing's; a track whose rate neither knows is tried.
-fn within_ceiling(track: &Track, facts: &FactsCache) -> bool {
+/// The track's rate as best known: the source's facts first (the
+/// listing may have come before they were read), then the listing's.
+fn known_rate(track: &Track, facts: &FactsCache) -> Option<u32> {
     track
         .uri
         .strip_prefix("file://")
         .and_then(|p| facts.known(Path::new(p)))
         .and_then(|(rate, _)| rate)
         .or(track.sample_rate)
-        .is_none_or(|rate| rate <= RATE_CEILING)
+}
+
+/// Whether the track's rate is one this player plays; a track whose
+/// rate nobody knows is tried.
+fn within_ceiling(track: &Track, facts: &FactsCache) -> bool {
+    known_rate(track, facts).is_none_or(|rate| rate <= RATE_CEILING)
 }
 
 /// The thread that reads the card's files' headers for the facts

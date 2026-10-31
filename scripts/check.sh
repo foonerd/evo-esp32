@@ -31,6 +31,7 @@ cargo build -p evo-esp32-sdk -p evo-esp32-steward -p org-evoframework-example-ec
   -p evo-esp32-config -p evo-esp32-queue \
   -p evo-esp32-face \
   -p cst3530 -p ch32v003-expander -p es8311 -p es9018k2m -p pcm512x \
+  -p wm8960 \
   --target "$bare" --locked
 
 echo "== host distribution"

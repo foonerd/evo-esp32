@@ -4,6 +4,29 @@ All notable changes to evo-esp32 are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- The WM8960 Audio HAT (Waveshare's; the ReSpeaker 2-Mics class) plays.
+  A new `wm8960` driver brings the codec's DAC path up over I2C —
+  clocked by its PLL from the HAT's own 24 MHz oscillator, 16-bit I2S,
+  headphones and speakers at 0 dB with the level the sink's, like every
+  HAT. The codec takes writes only, so the bus survey cannot see it; the
+  player probes it with a reset at boot. It stops at 48 kHz: for a
+  stream above that it mutes itself, the board plays on, and the face's
+  strip says "HAT silent above 48 kHz".
+
+- The codecs are told of a rate change while the I2S clocks are
+  stopped. The WM8960's control interface takes the bit clock on the
+  HAT's wires as noise (every write succeeded with the clocks stopped
+  and none with them running), so the feeder holds the gap it opens
+  for the rate change until the main task has written the codecs. The
+  board's bus runs at 100 kHz, not 400: the WM8960 wants SCL low for
+  1.3 µs, which 400 kHz does not give, and the bus leaves the board over
+  wires; every part on it is within spec at 100.
+
+- The "passed over unopened" line names the rate it judged by, from
+  the card's facts, instead of "0 Hz" when the listing had none.
+
 ## [0.2.4] - 2026-10-31
 
 - The volume follows the finger again while the decoder runs flat out

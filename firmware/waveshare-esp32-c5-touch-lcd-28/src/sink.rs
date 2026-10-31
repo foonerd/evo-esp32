@@ -31,7 +31,7 @@
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{
-    AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering,
+    AtomicBool, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering,
 };
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -72,6 +72,9 @@ const FRAME_BYTES: usize = 4;
 /// buffers' worth, in internal SRAM by the allocator's rule.
 const CHUNK: usize = 4096;
 /// The feeder's stack, internal: small, and it never touches flash.
+/// (6 KB was tried for the codec drivers and took the last of the
+/// DMA-capable SRAM from the card and the panel; the codecs are
+/// written from the main task instead, in the window the feeder opens.)
 const FEEDER_STACK: usize = 4 * 1024;
 /// The feeder's priority: above the Wi-Fi driver's 23, the top the
 /// kernel allows.
@@ -145,7 +148,22 @@ pub fn report_dry() -> Option<String> {
     })
 }
 
-/// What the sink needs to say to the codec when the rate changes.
+/// How long the feeder holds the clocks stopped for the main task's
+/// codec writes before going on without them.
+const GATE_WAIT: Duration = Duration::from_millis(500);
+/// How long the main task waits for the feeder to stop the clocks.
+const GATE_OPEN_WAIT: Duration = Duration::from_secs(2);
+/// The gate's states: closed; open (the clocks are stopped, the feeder
+/// waits); done (the codecs are written, the feeder may go on).
+const GATE_CLOSED: u8 = 0;
+const GATE_OPEN: u8 = 1;
+const GATE_DONE: u8 = 2;
+
+/// What the sink needs to say to the codecs when the rate changes.
+/// Called between the I2S clocks stopping and starting again: a codec
+/// on the HAT header hears the bit clock as noise on its control lines
+/// (a WM8960 took every write with the clocks stopped and none with
+/// them running), so the codecs are written to in the gap.
 pub trait RateFollower {
     /// The stream's rate and width from here on.
     fn rate_changed(&mut self, rate: u32, bits: u8);
@@ -184,6 +202,9 @@ struct Reservoir {
     started: AtomicBool,
     /// What the DMA ring holds, by account.
     dma: Mutex<DmaModel>,
+    /// The clock-off window of a reopen, handed from the feeder to the
+    /// main task for the codec writes (`GATE_*`).
+    gate: AtomicU8,
 }
 
 /// The DMA ring's content, kept by account since the driver does not
@@ -250,6 +271,7 @@ impl Reservoir {
             rate: AtomicU32::new(0),
             started: AtomicBool::new(false),
             dma: Mutex::new(DmaModel::new()),
+            gate: AtomicU8::new(GATE_CLOSED),
         }
     }
 
@@ -375,7 +397,8 @@ pub struct I2sSink<F> {
 impl<F: RateFollower> I2sSink<F> {
     /// The channel at `rate`, master, Philips, 16-bit stereo, on the
     /// board's codec pins, and the feeder behind it; `follower` is told
-    /// each rate the stream takes.
+    /// each rate the stream takes, while the clocks are stopped for the
+    /// change.
     pub fn new(
         i2s0: I2S0<'static>,
         bclk: impl InputPin + OutputPin + 'static,
@@ -573,7 +596,12 @@ impl Channel {
     }
 
     /// The clock at `rate`, the ring kept; what the ring holds in time.
-    fn set_rate(&mut self, rate: u32) -> Result<u32, sys::EspError> {
+    /// `between` runs with the clocks stopped, before they start again.
+    fn set_rate(
+        &mut self,
+        rate: u32,
+        between: impl FnOnce(),
+    ) -> Result<u32, sys::EspError> {
         // SAFETY: the channel is ours and enabled; disabled around the
         // change as the driver requires, then enabled again.
         unsafe {
@@ -582,6 +610,7 @@ impl Channel {
                 self.0,
                 &Self::clock(rate),
             ));
+            between();
             esp(sys::i2s_channel_enable(self.0))?;
             set?;
         }
@@ -617,7 +646,8 @@ impl Channel {
 }
 
 /// The feeder: the reservoir's bytes, scaled, into the DMA, for as long
-/// as the sink lives.
+/// as the sink lives. On a reopen it holds the clocks stopped while the
+/// main task writes the codecs.
 fn feed(
     mut i2s: Channel,
     reservoir: &Reservoir,
@@ -639,8 +669,19 @@ fn feed(
         unsafe { sys::esp_task_wdt_reset() };
         match commands.try_recv() {
             Ok(Command::Reopen(rate)) => {
+                let gate = &reservoir.gate;
+                let hold = || {
+                    gate.store(GATE_OPEN, Ordering::Release);
+                    let deadline = Instant::now() + GATE_WAIT;
+                    while gate.load(Ordering::Acquire) != GATE_DONE
+                        && Instant::now() < deadline
+                    {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    gate.store(GATE_CLOSED, Ordering::Release);
+                };
                 // No channel is no player; say so and stop.
-                if let Err(e) = i2s.set_rate(rate) {
+                if let Err(e) = i2s.set_rate(rate, hold) {
                     panic!("i2s: could not set {rate} Hz: {e}");
                 }
                 if let Ok(mut m) = reservoir.dma.lock() {
@@ -741,6 +782,20 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
                 .send(Command::Reopen(format.sample_rate))
                 .is_ok()
             {
+                // The feeder stops the clocks and opens the gate; the
+                // codecs are written in that window, then it goes on.
+                let gate = &self.reservoir.gate;
+                let deadline = Instant::now() + GATE_OPEN_WAIT;
+                while gate.load(Ordering::Acquire) != GATE_OPEN
+                    && Instant::now() < deadline
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                if gate.load(Ordering::Acquire) != GATE_OPEN {
+                    warn!("i2s: the feeder did not stop the clocks for the codecs; writing anyway");
+                }
+                self.follower.rate_changed(format.sample_rate, 16);
+                gate.store(GATE_DONE, Ordering::Release);
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while self.opened.load(Ordering::Acquire) == before
                     && Instant::now() < deadline
@@ -757,7 +812,6 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
             let bytes = reservoir_bytes(self.rate).min(self.reservoir.capacity);
             self.reservoir.len.store(bytes, Ordering::Relaxed);
         }
-        self.follower.rate_changed(self.rate, 16);
         let prime_ms = if self.reservoir.started.swap(true, Ordering::Relaxed) {
             PRIME_MS
         } else {

@@ -7,7 +7,7 @@
 //!
 //! | Part | Where |
 //! | --- | --- |
-//! | I2C (expander, touch, codec, IMU, RTC) | SDA GPIO0, SCL GPIO1, 400 kHz |
+//! | I2C (expander, touch, codec, IMU, RTC; the HAT header) | SDA GPIO0, SCL GPIO1, 100 kHz |
 //! | CH32V003 expander | I2C `0x24`: EXIO0 touch reset, EXIO1 panel reset, EXIO3 amp enable, PWM backlight |
 //! | SPI2, shared by the panel and the TF card | SCK GPIO6, MOSI GPIO7, MISO GPIO8 |
 //! | ST7789 panel | SPI2 CS GPIO10, DC GPIO9; RGB565, inverted |
@@ -137,12 +137,16 @@ pub fn bring_up(
     rotation: u16,
 ) -> Result<Board, BringUpError> {
     // The bus, leaked: it lives as long as the firmware, and both the
-    // expander and the touch controller borrow it.
+    // expander and the touch controller borrow it. 100 kHz, not the
+    // BSP's 400: the bus also leaves the board for the HAT header over
+    // wires, and a WM8960 there wants SCL low for 1.3 µs (its datasheet),
+    // which 400 kHz does not give — one write in thirty went
+    // unacknowledged on the bench. Every part here is within spec at 100.
     let bus: Bus = Box::leak(Box::new(Mutex::new(I2cDriver::new(
         pins.i2c0,
         pins.sda,
         pins.scl,
-        &I2cConfig::new().baudrate(400.kHz().into()),
+        &I2cConfig::new().baudrate(100.kHz().into()),
     )?)));
 
     let mut expander = Expander::new(MutexDevice::new(bus));

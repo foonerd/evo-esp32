@@ -25,6 +25,7 @@ members = [
     "drivers/es8311",
     "drivers/es9018k2m",
     "drivers/pcm512x",
+    "drivers/wm8960",
 ]
 # Build only inside a firmware crate's workspace: esp-idf-svc compiles for
 # ESP-IDF targets alone.
