@@ -47,6 +47,12 @@ use mipidsi::{Builder, NoResetPin};
 /// SPI clock to the panel. The BSP runs 80 MHz; half that until the
 /// first frames on the bench say the wiring takes more.
 const PANEL_HZ: u32 = 40_000_000;
+/// The least the panel's transfer buffer may be: a window's worth of
+/// pixels per SPI transaction. The caller allocates it in DMA-capable
+/// internal memory (this crate has no `unsafe` to do so); a buffer the
+/// SPI master cannot reach by DMA is bounced through one it allocates
+/// per transfer, and fails to when internal memory is short.
+pub const PANEL_BUFFER: usize = 4096;
 
 /// The longest the touch controller is given to answer after its reset.
 const TOUCH_BOOT_MS: u32 = 500;
@@ -131,10 +137,13 @@ pub fn spi_bus(
 }
 
 /// Bring the board up in the BSP's order and return its parts.
+/// `panel_buffer` is at least [`PANEL_BUFFER`] bytes of DMA-capable
+/// internal memory, the panel's for the life of the firmware.
 pub fn bring_up(
     pins: Pins,
     spi: Spi,
     rotation: u16,
+    panel_buffer: &'static mut [u8],
 ) -> Result<Board, BringUpError> {
     // The bus, leaked: it lives as long as the firmware, and both the
     // expander and the touch controller borrow it. 100 kHz, not the
@@ -166,9 +175,10 @@ pub fn bring_up(
         &SpiConfig::new().baudrate(PANEL_HZ.Hz()).write_only(true),
     )?;
     let dc = PinDriver::output(pins.dc)?;
-    let buffer: &'static mut [u8] =
-        Box::leak(vec![0u8; 4096].into_boxed_slice());
-    let di = SpiInterface::new(device, dc, buffer);
+    if panel_buffer.len() < PANEL_BUFFER {
+        return Err(BringUpError::Memory(PANEL_BUFFER));
+    }
+    let di = SpiInterface::new(device, dc, panel_buffer);
     let panel = Builder::new(ST7789, di)
         .display_size(240, 320)
         .color_order(ColorOrder::Rgb)
@@ -232,6 +242,9 @@ pub enum BringUpError {
     /// The touch controller did not answer within this many milliseconds
     /// of its reset.
     Touch(u32),
+    /// No DMA-capable memory for a buffer of this many bytes, or the
+    /// buffer given is shorter.
+    Memory(usize),
 }
 
 impl std::fmt::Display for BringUpError {
@@ -242,6 +255,9 @@ impl std::fmt::Display for BringUpError {
             Self::Panel(e) => write!(f, "panel: {e}"),
             Self::Touch(ms) => {
                 write!(f, "touch: no answer {ms} ms after reset")
+            }
+            Self::Memory(bytes) => {
+                write!(f, "panel: its buffer must be {bytes} B of DMA memory")
             }
         }
     }

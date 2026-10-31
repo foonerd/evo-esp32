@@ -10,25 +10,23 @@
 //! small strings (60 KB of them on a card of fifty tracks). What must be
 //! in SRAM asks for it by capability: the I2S ring and the SD card's DMA
 //! buffers (the drivers), task stacks (the kernel), the Wi-Fi driver's
-//! pools. Rust's heap is placed by size: the small things, which are
-//! records and text, go to PSRAM; the medium buffers, which are the
-//! decoder's packets and frames and the sink's scratch and are read in
-//! tight loops, go to SRAM (measured: the same buffers in PSRAM cost
-//! the decoder a third more of the core at 96 kHz FLAC and let the DMA
-//! run dry during a Wi-Fi search); the large buffers, the stream's ring
-//! and the album art, go to PSRAM as they always did. Each falls back to
-//! the other memory when its first choice is out.
+//! pools, the panel's transfer buffer (the board crate). Rust's heap
+//! goes to PSRAM, SRAM only when PSRAM is out.
 //!
-//! SRAM is also what the drivers take at run time without asking the
-//! Rust heap: the Wi-Fi driver's transmit buffers (1.6 KB each, DMA-
-//! capable internal, as many as are in flight), lwIP's and the card's
-//! bounce buffer. So the medium band keeps a floor: once internal SRAM
-//! is down to [`FLOOR`], a medium allocation goes to PSRAM first, and
-//! what the drivers need stays theirs. Measured before the floor: an
-//! MP3 track's decoder took internal from 49 KB free to 7 KB, every one
-//! of its buffers landing in the band. The heartbeat's `heap:` line
-//! reports the band's live bytes in each memory and how often the floor
-//! spoke.
+//! Until 0.2.5 the medium band (512 B to 16 KB: the decoder's packets
+//! and frames, the sink's scratch) went to SRAM first while a floor of
+//! internal memory held, because at the PSRAM's 40 MHz the same buffers
+//! cost the decoder a third more of the core at 96 kHz FLAC. Two things
+//! changed the sum. The PSRAM runs at 80 MHz, and the decoder's share
+//! measured the same with the band in either memory (54% at 96 kHz,
+//! 2026-10-31). And the floor measured the wrong pool: it counted all
+//! of internal memory, which includes the C5's 16 KB of LP SRAM that DMA
+//! cannot reach, so it held while the card and the SPI master could not
+//! get a 512 B buffer (37 KB internal free, the largest DMA-capable
+//! block 336 B, then a panic inside the SPI master). The band's 30 KB
+//! of SRAM was exactly what the drivers were missing. So the band is in
+//! PSRAM, and the DMA-capable SRAM is the drivers'. The heartbeat's
+//! `heap:` line still reports the band's live bytes in each memory.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
@@ -42,23 +40,22 @@ use esp_idf_svc::sys;
 pub struct Placed;
 
 /// Allocations from this size up to [`LARGE`] are the decoder's and the
-/// sink's working buffers: SRAM first.
+/// sink's working buffers; the heartbeat accounts for them by memory.
 const MEDIUM: usize = 512;
-/// From this size up, PSRAM first: the stream's ring, the art.
+/// From this size up: the stream's ring, the art.
 const LARGE: usize = 16 * 1024;
-/// Internal SRAM kept free of the medium band, for the drivers.
-const FLOOR: usize = 32 * 1024;
 
 const SPIRAM: u32 = sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT;
 const INTERNAL: u32 = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+/// PSRAM first, SRAM when it is out: every size.
+const PREFER: [u32; 2] = [SPIRAM, INTERNAL];
 
-/// The medium band's live bytes and blocks in each memory, and the
-/// allocations the floor sent to PSRAM; for the heartbeat.
+/// The medium band's live bytes and blocks in each memory, for the
+/// heartbeat.
 static SRAM_BYTES: AtomicUsize = AtomicUsize::new(0);
 static SRAM_BLOCKS: AtomicUsize = AtomicUsize::new(0);
 static PSRAM_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PSRAM_BLOCKS: AtomicUsize = AtomicUsize::new(0);
-static DIVERTED: AtomicUsize = AtomicUsize::new(0);
 /// The codecs' live bytes in each memory, through the hooks below.
 static CODEC_SRAM: AtomicUsize = AtomicUsize::new(0);
 static CODEC_PSRAM: AtomicUsize = AtomicUsize::new(0);
@@ -74,8 +71,6 @@ pub struct Account {
     pub psram_bytes: usize,
     /// Live blocks of the band in PSRAM.
     pub psram_blocks: usize,
-    /// Medium allocations the floor sent to PSRAM, since boot.
-    pub diverted: usize,
     /// The codecs' live bytes in SRAM.
     pub codec_sram: usize,
     /// The codecs' live bytes in PSRAM.
@@ -90,7 +85,6 @@ impl Account {
             sram_blocks: SRAM_BLOCKS.load(Relaxed),
             psram_bytes: PSRAM_BYTES.load(Relaxed),
             psram_blocks: PSRAM_BLOCKS.load(Relaxed),
-            diverted: DIVERTED.load(Relaxed),
             codec_sram: CODEC_SRAM.load(Relaxed),
             codec_psram: CODEC_PSRAM.load(Relaxed),
         }
@@ -99,12 +93,11 @@ impl Account {
     /// One line for the heartbeat.
     pub fn line(&self) -> String {
         format!(
-            "medium band {} KB in {} blocks in SRAM, {} KB in {} in PSRAM, {} sent to PSRAM by the floor; codec {} KB in SRAM, {} KB in PSRAM",
+            "medium band {} KB in {} blocks in SRAM, {} KB in {} in PSRAM; codec {} KB in SRAM, {} KB in PSRAM",
             self.sram_bytes / 1024,
             self.sram_blocks,
             self.psram_bytes / 1024,
             self.psram_blocks,
-            self.diverted,
             self.codec_sram / 1024,
             self.codec_psram / 1024
         )
@@ -116,28 +109,6 @@ fn in_psram(p: *mut u8) -> bool {
     let a = p as usize;
     a >= sys::SOC_EXTRAM_DATA_LOW as usize
         && a < sys::SOC_EXTRAM_DATA_HIGH as usize
-}
-
-/// The capabilities tried for `size`, in order.
-fn prefer(size: usize) -> [u32; 2] {
-    if (MEDIUM..LARGE).contains(&size) {
-        under_floor(size)
-    } else {
-        [SPIRAM, INTERNAL]
-    }
-}
-
-/// SRAM first while [`FLOOR`] would still be free after `size`, else
-/// PSRAM first.
-fn under_floor(size: usize) -> [u32; 2] {
-    // SAFETY: a plain getter; sums the registered heaps' counters.
-    let free = unsafe { sys::heap_caps_get_free_size(INTERNAL) };
-    if free < FLOOR + size {
-        DIVERTED.fetch_add(1, Relaxed);
-        [SPIRAM, INTERNAL]
-    } else {
-        [INTERNAL, SPIRAM]
-    }
 }
 
 fn account(p: *mut u8, size: usize, freed: bool) {
@@ -163,7 +134,7 @@ unsafe impl GlobalAlloc for Placed {
         // The heap aligns to 4 on its own; `aligned_alloc` serves any
         // power of two and frees with the same `free`.
         let align = layout.align().max(4);
-        for caps in prefer(layout.size()) {
+        for caps in PREFER {
             let p = sys::heap_caps_aligned_alloc(align, layout.size(), caps);
             if !p.is_null() {
                 account(p.cast(), layout.size(), false);
@@ -182,14 +153,11 @@ unsafe impl GlobalAlloc for Placed {
 // Espressif's audio codecs (the MP3 and AAC decoders) take their working
 // memory through four hooks the library defines weak, for an application
 // to place as it sees fit; the library's own go to `malloc`, which on
-// ESP-IDF means internal SRAM for anything under 16 KB, outside the
-// floor's reach (measured: MP3's state took 29 KB of internal). Here
-// they follow the medium band's rule: SRAM while the floor holds, PSRAM
-// after, so the decoder's hot state runs from the faster memory as far
-// as the drivers can spare it (the same state in PSRAM cost the MP3
-// decoder a quarter more of the core). These live in the firmware
-// crate, whose objects the linker takes whole, so the strong definitions
-// are present before the library's weak ones are met.
+// ESP-IDF means internal SRAM for anything under 16 KB (measured: MP3's
+// state took 29 KB of internal). Here they go where the Rust heap goes:
+// PSRAM, SRAM when it is out. These live in the firmware crate, whose
+// objects the linker takes whole, so the strong definitions are present
+// before the library's weak ones are met.
 
 fn codec_account(p: *mut c_void, freed: bool) {
     if p.is_null() {
@@ -237,7 +205,7 @@ pub unsafe extern "C" fn media_lib_module_malloc(
     size: usize,
 ) -> *mut c_void {
     let mut p = core::ptr::null_mut();
-    for caps in under_floor(size) {
+    for caps in PREFER {
         p = sys::heap_caps_malloc(size, caps);
         if !p.is_null() {
             break;
@@ -256,7 +224,7 @@ pub unsafe extern "C" fn media_lib_module_calloc(
     size: usize,
 ) -> *mut c_void {
     let mut p = core::ptr::null_mut();
-    for caps in under_floor(n.saturating_mul(size)) {
+    for caps in PREFER {
         p = sys::heap_caps_calloc(n, size, caps);
         if !p.is_null() {
             break;
@@ -276,7 +244,7 @@ pub unsafe extern "C" fn media_lib_module_realloc(
 ) -> *mut c_void {
     codec_account(ptr, true);
     let mut p = core::ptr::null_mut();
-    for caps in under_floor(size) {
+    for caps in PREFER {
         p = sys::heap_caps_realloc(ptr, size, caps);
         if !p.is_null() {
             break;
@@ -339,6 +307,26 @@ static RESERVE_LENT: AtomicBool = AtomicBool::new(false);
 /// Rings reading through the driver's bounce buffer right now: their
 /// chunk is not in memory the card's DMA reaches. The heartbeat says so.
 static BOUNCING: AtomicUsize = AtomicUsize::new(0);
+
+/// `len` bytes of DMA-capable internal memory for the life of the
+/// firmware, zeroed: for a buffer a driver reaches by DMA (the panel's
+/// transfer buffer), so the driver never has to bounce it through one it
+/// allocates per transfer. `None` when there is none, which at boot
+/// there always is.
+pub fn dma_buffer(len: usize) -> Option<&'static mut [u8]> {
+    let caps =
+        sys::MALLOC_CAP_DMA | sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    // SAFETY: an allocation call with a plain size and capability set.
+    let p = unsafe { sys::heap_caps_aligned_alloc(4, len, caps) };
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: `p` is `len` bytes of live, aligned allocation that nothing
+    // else holds and that is never freed.
+    let buffer = unsafe { core::slice::from_raw_parts_mut(p.cast(), len) };
+    buffer.fill(0);
+    Some(buffer)
+}
 
 /// Set `len` bytes of internal DMA memory aside for the card's ring.
 /// Called once, early, before the network and the page's server take

@@ -133,6 +133,14 @@ const RATE_CEILING: u32 = 96_000;
 /// What the face's strip says while the HAT's codec sits out a stream
 /// above its range; `wm8960::MAX_RATE`, in words.
 const HAT_SILENT: &str = "HAT silent above 48 kHz";
+/// Below this largest free DMA-capable block the heartbeat warns: the
+/// card's driver needs 512 B contiguous for a read, the SPI master up to
+/// a transaction for a write it has to bounce.
+const DMA_TRIPWIRE: usize = 2048;
+/// This many tracks failing to open within [`FAILURE_WINDOW`] of each
+/// other hold the player with a notice instead of the next track.
+const FAILURE_LIMIT: u32 = 3;
+const FAILURE_WINDOW: Duration = Duration::from_secs(10);
 /// Playback volume, percent on the house curve, applied in the sink.
 const VOLUME_PERCENT: u8 = 40;
 /// The board's hardware gain the codec driver takes off, in half-dB
@@ -298,6 +306,12 @@ fn main() -> anyhow::Result<()> {
         },
         spi,
         rotation,
+        alloc::dma_buffer(board::PANEL_BUFFER).ok_or_else(|| {
+            anyhow::anyhow!(
+                "panel: no {} B of DMA memory for its buffer",
+                board::PANEL_BUFFER
+            )
+        })?,
     )?;
 
     let mut codec = Es8311::new(MutexDevice::new(bus));
@@ -656,6 +670,10 @@ fn main() -> anyhow::Result<()> {
     });
     // Why the last thing asked for did not play, for the status strip.
     let mut notice: Option<String> = None;
+    // Tracks that failed to open, one after another: the streak and when
+    // the last did.
+    let mut failures: u32 = 0;
+    let mut last_failure: Option<Instant> = None;
     // An update in hand: playback stopped for it, the queue held.
     let mut updating = false;
     let (asks_tx, asks) = std::sync::mpsc::channel::<update::Ask>();
@@ -1883,6 +1901,30 @@ fn main() -> anyhow::Result<()> {
                     if let Some(why) = reason {
                         warn!("the track failed: {why}; moving on");
                     }
+                    // Tracks failing one after another within seconds are
+                    // not the tracks: the card unreadable, memory gone.
+                    // Moving on would run the whole library through the
+                    // same fault at three a second; the player holds and
+                    // says so, and Play tries again.
+                    if reason.is_some() {
+                        failures = match last_failure {
+                            Some(at) if at.elapsed() < FAILURE_WINDOW => {
+                                failures + 1
+                            }
+                            _ => 1,
+                        };
+                        last_failure = Some(Instant::now());
+                        if failures >= FAILURE_LIMIT {
+                            let why = reason.as_deref().map_or("", plain);
+                            warn!("{failures} tracks failed within {} s ({why}); holding", FAILURE_WINDOW.as_secs());
+                            notice = Some(format!("tracks are failing: {why}"));
+                            failures = 0;
+                            last_failure = None;
+                            current = None;
+                            track_started = Instant::now();
+                            continue;
+                        }
+                    }
                     let step = then.take().unwrap_or(if on_its_own {
                         Step::Next
                     } else {
@@ -1959,6 +2001,11 @@ fn main() -> anyhow::Result<()> {
                 "heap: internal largest block {largest} B, DMA-capable {largest_dma} B; {}",
                 alloc::Account::now().line()
             );
+            if largest_dma < DMA_TRIPWIRE {
+                warn!(
+                    "heap: the largest DMA-capable block is {largest_dma} B: the card and the panel are about to fail their reads and writes"
+                );
+            }
             let snap = rooms.snap.session();
             if snap.connected {
                 info!(

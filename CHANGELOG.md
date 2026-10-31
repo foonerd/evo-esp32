@@ -27,6 +27,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The "passed over unopened" line names the rate it judged by, from
   the card's facts, instead of "0 Hz" when the listing had none.
 
+- The heap lives in PSRAM; the internal SRAM is the drivers'. The
+  mid-size allocations (512 B to 16 KB) went to internal memory first
+  for the decoder's sake when PSRAM ran at 40 MHz. At 80 MHz the decoder
+  costs the same from either, and the 30 KB they held was the DMA-capable
+  memory the card's driver and the panel's SPI master were failing to
+  get: within minutes the largest DMA-capable block had drifted from
+  31 KB to a few hundred bytes, the card could not read, every track
+  failed to open, the player advanced through the library at three a
+  second, and the SPI master's unchecked allocation ended in a panic.
+  Every allocation now prefers PSRAM and falls back to internal; the
+  panel's transfer buffer is allocated by DMA capability. Measured over
+  an MP3 album and a 96 kHz FLAC: internal free 42–50 KB (was 16–23),
+  the largest DMA-capable block 23 KB and flat (was draining).
+
+- Three tracks failing to open within ten seconds hold the player with
+  "tracks are failing: …" on the face instead of the next track; Play
+  tries again. The heartbeat warns when the largest DMA-capable block
+  is under 2 KB.
+
 ## [0.2.4] - 2026-10-31
 
 - The volume follows the finger again while the decoder runs flat out
