@@ -1,6 +1,6 @@
 [package]
 name = "evo-esp32-waveshare-esp32-c5-touch-lcd-28"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 license = "BUSL-1.1"
 repository = "https://github.com/foonerd/evo-esp32"

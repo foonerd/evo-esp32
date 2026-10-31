@@ -32,7 +32,7 @@ members = [
 exclude = ["platform/esp-idf", "boards/waveshare-esp32-c5-touch-lcd-28"]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 rust-version = "1.85"
 license = "BUSL-1.1"
