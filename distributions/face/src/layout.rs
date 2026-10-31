@@ -523,38 +523,20 @@ impl Layout {
         if within(t.repeat, t.mode_r) {
             return Some(Hotspot::Repeat);
         }
-        // A slider is hit 12 px to either side of its bar; where two
-        // sliders' reaches meet, the nearer bar takes the touch. A bar
-        // taller than wide is a fader: its fraction runs up from the foot.
-        let along = |bar: Rectangle| {
-            let (reach, f, d) = if is_fader(bar) {
-                (
-                    Rectangle::new(
-                        bar.top_left - Point::new(12, 4),
-                        bar.size + Size::new(24, 8),
-                    ),
-                    1.0 - (p.y - bar.top_left.y) as f32
-                        / bar.size.height as f32,
-                    (p.x - bar.center().x).abs(),
-                )
+        // A slider takes a finger that lands in its grab zone; where two
+        // zones meet, the nearer bar takes it. Once taken, the finger is
+        // read by `along`, wherever it goes.
+        let grab = |bar: Rectangle| {
+            let d = if is_fader(bar) {
+                (p.x - bar.center().x).abs()
             } else {
-                (
-                    Rectangle::new(
-                        bar.top_left - Point::new(4, 12),
-                        bar.size + Size::new(8, 24),
-                    ),
-                    (p.x - bar.top_left.x) as f32 / bar.size.width as f32,
-                    (p.y - bar.center().y).abs(),
-                )
+                (p.y - bar.center().y).abs()
             };
-            reach.contains(p).then(|| (d, f.clamp(0.0, 1.0)))
+            grab_zone(bar).contains(p).then(|| (d, fraction_on(bar, p)))
         };
         let volume =
-            along(self.volume.bar).map(|(d, f)| (d, Hotspot::Volume(f)));
-        let seek = self
-            .seek
-            .and_then(along)
-            .map(|(d, f)| (d, Hotspot::Seek(f)));
+            grab(self.volume.bar).map(|(d, f)| (d, Hotspot::Volume(f)));
+        let seek = self.seek.and_then(grab).map(|(d, f)| (d, Hotspot::Seek(f)));
         if let Some((_, hotspot)) =
             [volume, seek].into_iter().flatten().min_by_key(|(d, _)| *d)
         {
@@ -582,6 +564,48 @@ impl Layout {
         }
         None
     }
+
+    /// The slider `on` (from a [`hit`](Self::hit) that began a slide)
+    /// read at `p`, wherever the finger has gone: a bar by the finger's
+    /// position along its axis, the ring by the finger's bearing from
+    /// its centre. The grab zone is for taking a finger; a finger taken
+    /// is followed to the panel's edge, as a finger on a slider expects.
+    pub fn along(&self, on: &Hotspot, p: Point) -> Option<f32> {
+        match on {
+            Hotspot::Volume(_) => Some(fraction_on(self.volume.bar, p)),
+            Hotspot::Seek(_) => Some(match self.seek {
+                Some(bar) => fraction_on(bar, p),
+                None => {
+                    let c = self.art_centre();
+                    turns(p.x - c.x, p.y - c.y)
+                }
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Where a finger lands to take a slider. A fader stands in a column of
+/// its own and takes 20 px either side of its bar (44 px across, a
+/// fingertip); a strip lies between text and transport and takes the
+/// 12 px above and below that the rows leave it.
+fn grab_zone(bar: Rectangle) -> Rectangle {
+    let (across, beyond) = if is_fader(bar) { (20, 4) } else { (4, 12) };
+    Rectangle::new(
+        bar.top_left - Point::new(across, beyond),
+        bar.size + Size::new(2 * across as u32, 2 * beyond as u32),
+    )
+}
+
+/// The fraction `p` reads on `bar`, 0 to 1: a fader from its foot up, a
+/// strip from its left.
+fn fraction_on(bar: Rectangle, p: Point) -> f32 {
+    let f = if is_fader(bar) {
+        1.0 - (p.y - bar.top_left.y) as f32 / bar.size.height as f32
+    } else {
+        (p.x - bar.top_left.x) as f32 / bar.size.width as f32
+    };
+    f.clamp(0.0, 1.0)
 }
 
 /// Whether a slider's bar stands rather than lies: it fills from the

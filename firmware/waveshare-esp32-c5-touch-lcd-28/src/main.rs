@@ -901,9 +901,13 @@ fn main() -> anyhow::Result<()> {
                     last_touch = Instant::now();
                     touch_waiting.get_or_insert(last_touch);
                     let p = face.layout().map_touch(r.x, r.y);
-                    if let Some(intent) =
-                        tracker.sample(|p| face.hit(p), r.touching(), p, t.0)
-                    {
+                    if let Some(intent) = tracker.sample(
+                        |p| face.hit(p),
+                        |h, p| face.along(h, p),
+                        r.touching(),
+                        p,
+                        t.0,
+                    ) {
                         match intent {
                             Intent::Tap(Hotspot::Play | Hotspot::BarPlay) => {
                                 let status = playback_state(&steward)

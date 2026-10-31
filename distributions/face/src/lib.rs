@@ -468,6 +468,13 @@ impl Face {
         }
     }
 
+    /// The slider `on` (a hotspot from [`hit`](Self::hit) that began a
+    /// slide) read at `p`, wherever the finger is now; see
+    /// [`Layout::along`].
+    pub fn along(&self, on: &Hotspot, p: Point) -> Option<f32> {
+        self.layout.along(on, p)
+    }
+
     /// How many rows the list page in front has filled.
     fn rows_filled(&self) -> usize {
         let shown = self.layout.page.rows();

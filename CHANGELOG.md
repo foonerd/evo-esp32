@@ -18,6 +18,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   few windows on the panel. Measured on the bench at 96 kHz: the
   level moves every 74–122 ms (median 90) against 500–1400 ms before.
 
+- A slider holds the finger until it lifts. Once a slide has begun,
+  every sample is read along the slider's axis wherever the finger has
+  drifted — into the text, past either end — instead of freezing when
+  it left the 12 px either side of the bar, which on a 4 px fader it
+  did on most sweeps. A fader also takes a finger from 20 px either
+  side (44 px across, a fingertip) rather than 12. The tracker's
+  contract said this all along; the code now does it.
+
 - The player stands on its own hardware layer. The board crate
   (`boards/waveshare-esp32-c5-touch-lcd-28`), the chip drivers
   (`drivers/`: CST3530 touch, CH32V003 expander, ES8311 codec, ES9018K2M
