@@ -19,9 +19,9 @@
 //! cropped to its centre square; a logo is set whole on a square of the
 //! face's background, since its width is its shape.
 
+use evo_esp32_sdk::mailbox::{mailbox, Receiver, Sender, TryRecvError};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
@@ -120,8 +120,8 @@ impl Fetcher {
                 u32::from(crate::threads::MAIN_PRIORITY),
             );
         }
-        let (requests, inbox) = channel::<Ask>();
-        let (outbox, results) = channel::<Found>();
+        let (requests, inbox) = mailbox::<Ask>();
+        let (outbox, results) = mailbox::<Found>();
         let before = ThreadSpawnConfiguration::get();
         ThreadSpawnConfiguration {
             name: Some(c"art"),

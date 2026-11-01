@@ -6,7 +6,7 @@
 //! owns the thread, keeps the link up, and tells the main loop what it
 //! has so Settings and `evostatus.txt` can say.
 
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use evo_esp32_sdk::mailbox::{mailbox, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -147,7 +147,7 @@ impl Net {
         hostname: Option<String>,
         band: Band,
     ) -> Result<Self, std::io::Error> {
-        let (tx, events) = channel::<Event>();
+        let (tx, events) = mailbox::<Event>();
         let before = ThreadSpawnConfiguration::get();
         ThreadSpawnConfiguration {
             name: Some(c"net"),

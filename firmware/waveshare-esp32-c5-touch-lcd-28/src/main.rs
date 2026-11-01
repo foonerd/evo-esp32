@@ -720,7 +720,7 @@ fn main() -> anyhow::Result<()> {
     let mut last_failure: Option<Instant> = None;
     // An update in hand: playback stopped for it, the queue held.
     let mut updating = false;
-    let (asks_tx, asks) = std::sync::mpsc::channel::<update::Ask>();
+    let (asks_tx, asks) = evo_esp32_sdk::mailbox::mailbox::<update::Ask>();
     let mut page: Option<update::Page> = None;
     let mut gate = update::Gate::new(standing);
     let mut sink_seen = false;
@@ -909,7 +909,7 @@ fn main() -> anyhow::Result<()> {
     let mut turn_started = Instant::now();
     let mut turn_max = Duration::ZERO;
     // The page's ask to stop, answered once the face shows it.
-    let mut update_ack: Option<std::sync::mpsc::Sender<()>> = None;
+    let mut update_ack: Option<evo_esp32_sdk::mailbox::Sender<()>> = None;
     // The face must show the update's new state before the loop idles
     // again (the restart is seconds away).
     let mut show_now = false;

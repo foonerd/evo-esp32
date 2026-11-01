@@ -43,6 +43,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the face paints when it likes. The gate that held the face back
   stays in place for now; it simply has nothing to do.
 
+- The player no longer hangs at a sample-rate change. Threads passed
+  messages through the standard library's channel, which hands a
+  message over in two steps; when the thread reading it stood at a
+  higher priority than the thread writing it and read between the two,
+  it spun for good and the writer never ran again — the main task's
+  hang first seen on 23 October, caught on 1 November in a core dump
+  with the feeder spinning and the main task one instruction short of
+  the message. Every hand-over between threads is now a mailbox that
+  holds its messages under a mutex, which the kernel lends the writer
+  the reader's priority for; the check refuses a standard channel.
+
 ## [0.2.6] - 2026-10-31
 
 - PCM5122 boards with oscillators of their own play every rate. The

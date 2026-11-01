@@ -39,7 +39,6 @@ use std::ffi::CStr;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +53,7 @@ use esp_idf_svc::sys;
 use evo_esp32_config::Update;
 use evo_esp32_platform_esp_idf::http::HttpOpener;
 use evo_esp32_sdk::contract::audio::playback::StreamOpener;
+use evo_esp32_sdk::mailbox::{mailbox, Receiver, Sender};
 use evo_esp32_update::lock::Lock;
 use evo_esp32_update::{
     applied_name, image_identity, image_length, is_card_image, is_whole,
@@ -872,7 +872,7 @@ impl Page {
                     Err(why) => return reply(req, &s.name, browser, false, "Not a firmware upload", &why, None),
                 };
                 // Playback stops before the flash is touched.
-                let (tx, rx) = channel();
+                let (tx, rx) = mailbox();
                 let _ = s.asks.send(Ask::Quiet(tx));
                 let _ = rx.recv_timeout(STOP_WAIT);
                 let began = Instant::now();
@@ -939,7 +939,7 @@ impl Page {
                         None,
                     );
                 }
-                let (tx, rx) = channel();
+                let (tx, rx) = mailbox();
                 let _ = s.asks.send(Ask::Quiet(tx));
                 let _ = rx.recv_timeout(STOP_WAIT);
                 let began = Instant::now();
@@ -1525,7 +1525,7 @@ pub fn apply_from_card(
         .name("card-update".into())
         .stack_size(CARD_STACK)
         .spawn(move || {
-            let (tx, rx) = channel();
+            let (tx, rx) = mailbox();
             let _ = asks.send(Ask::Quiet(tx));
             let _ = rx.recv_timeout(STOP_WAIT);
             let began = Instant::now();
@@ -1597,7 +1597,7 @@ where
         .name(name.into())
         .stack_size(CARD_STACK)
         .spawn(move || {
-            let (tx, rx) = channel();
+            let (tx, rx) = mailbox();
             let _ = asks.send(Ask::Quiet(tx));
             let _ = rx.recv_timeout(STOP_WAIT);
             let began = Instant::now();
@@ -1662,7 +1662,7 @@ pub struct Pull {
 
 impl Pull {
     pub fn new(mode: Update, url: Option<&str>, asks: Sender<Ask>) -> Self {
-        let (tx, events) = channel();
+        let (tx, events) = mailbox();
         let board = env!("CARGO_PKG_NAME")
             .strip_prefix("evo-esp32-")
             .unwrap_or(env!("CARGO_PKG_NAME"))
@@ -1795,8 +1795,9 @@ impl Pull {
         }
         self.applied = true;
         self.standing = manifest::Standing::Applying(m.version.clone());
-        let (chunks_tx, chunks_rx) =
-            std::sync::mpsc::sync_channel::<Result<Vec<u8>, String>>(IN_FLIGHT);
+        let (chunks_tx, chunks_rx) = evo_esp32_sdk::mailbox::bounded::<
+            Result<Vec<u8>, String>,
+        >(IN_FLIGHT);
         let url = m.url.clone();
         let fetch = evo_esp32_sdk::thread::spawn(
             evo_esp32_sdk::thread::Role::Background,

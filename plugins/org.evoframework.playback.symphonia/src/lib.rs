@@ -54,7 +54,6 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -64,6 +63,9 @@ use evo_esp32_sdk::contract::audio::playback::{
     Correction, Format, FrameSink, Play, State, Status, KIND,
 };
 use evo_esp32_sdk::contract::audio::{from_value, shelf, to_value, Track};
+use evo_esp32_sdk::mailbox::{
+    mailbox, Receiver, RecvTimeoutError, Sender, TryRecvError,
+};
 use evo_esp32_sdk::plugin::{
     InstanceShape, InteractionShape, LoadError, Plugin, PluginDescription,
     Stocking,
@@ -474,7 +476,7 @@ impl Warden for PlaybackSymphonia {
                 ));
             }
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mailbox();
         let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
         let card_memory = self.card_memory;
         evo_esp32_sdk::thread::spawn(
@@ -767,8 +769,8 @@ fn begin(
     h.state.position_ms = base_ms;
     h.state.format = Some(format.clone());
     let shared = Arc::new(SharedState::new(h.state.clone()));
-    let (commands, command_rx) = mpsc::channel();
-    let (ending_tx, ending) = mpsc::channel();
+    let (commands, command_rx) = mailbox();
+    let (ending_tx, ending) = mailbox();
     let mut decoder = Decoder {
         stream,
         sink,

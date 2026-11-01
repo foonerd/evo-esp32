@@ -33,7 +33,9 @@
 //! cross the contract are [`Value`] (JSON), as they are on evo-core's
 //! wire, so a projection serialises for the network without translation.
 //! With the `std` feature, [`thread`] is how a plugin starts a thread:
-//! named by what it is for, placed by the distribution.
+//! named by what it is for, placed by the distribution; [`mailbox`] is
+//! how threads at different priorities pass messages without one
+//! spinning on the other.
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![forbid(unsafe_code)]
 
@@ -43,6 +45,8 @@ pub mod catalogue;
 pub mod context;
 pub mod contract;
 pub mod happening;
+#[cfg(feature = "std")]
+pub mod mailbox;
 pub mod plugin;
 pub mod projection;
 pub mod respondent;

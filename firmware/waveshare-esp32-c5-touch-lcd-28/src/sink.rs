@@ -29,11 +29,11 @@
 //! in between took the ring's place in internal SRAM — 33 KB of it lost
 //! at every change of rate, measured) and the codec told.
 
+use evo_esp32_sdk::mailbox::{mailbox, Receiver, Sender, TryRecvError};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{
     AtomicBool, AtomicU16, AtomicU32, AtomicU8, AtomicUsize, Ordering,
 };
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -425,7 +425,7 @@ impl<F: RateFollower> I2sSink<F> {
             bytes >> 10
         );
         let volume = Volume(Arc::new(AtomicU16::new(UNITY)));
-        let (commands, inbox) = channel::<Command>();
+        let (commands, inbox) = mailbox::<Command>();
         let opened = Arc::new(AtomicU32::new(1));
         fn fail<E>(_: E) -> sys::EspError {
             sys::EspError::from_infallible::<{ sys::ESP_FAIL }>()

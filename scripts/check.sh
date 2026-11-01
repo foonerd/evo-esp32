@@ -18,6 +18,18 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 
+echo "== thread hand-overs"
+# std's channel claims a slot, then fills it; a receiver at a higher
+# FreeRTOS priority that reads between the two spins for good and the
+# sender never runs again (the main task's hang, 2026-11-01). Every
+# hand-over between threads is the sdk's mailbox; the one mention of the
+# std channel is the mailbox's own explanation.
+if grep -rn --include='*.rs' 'std::sync::mpsc\|sync::mpsc::\|use std::sync::{[^}]*mpsc' \
+    --exclude-dir=target . | grep -v '^./sdk/src/mailbox.rs:'; then
+  echo "std::sync::mpsc is not safe across FreeRTOS priorities: use evo_esp32_sdk::mailbox" >&2
+  exit 1
+fi
+
 echo "== no_std, on bare metal"
 # The sdk, the steward and the device-shaped plugins claim no_std; proving
 # it means building them for a target that has no std at all.
