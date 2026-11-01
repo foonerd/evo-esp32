@@ -425,22 +425,35 @@ pub fn card_chunk(
     Box::new(DmaChunk { p: p.cast(), len })
 }
 
-/// A census of the internal heap's used blocks between two heartbeats.
-/// What appeared since the last census and is still there at the next
-/// is what a track left behind; its size names the culprit before any
-/// deeper trace is switched on.
+/// A census of the internal heap's used blocks between heartbeats. What
+/// appeared since the last census and is still there at the next, and
+/// what has survived a minute, is what a track left behind; its size
+/// names the culprit before any deeper trace is switched on.
 pub struct Census {
     /// Used blocks at the last census: address → size.
     last: std::collections::BTreeMap<usize, usize>,
     /// Blocks that were new at the last census.
     appeared: std::collections::BTreeMap<usize, usize>,
+    /// Every used block's address → (size, the census it was first seen
+    /// at); a block is reported once, when it reaches [`AGED`].
+    born: std::collections::BTreeMap<usize, (usize, u32)>,
+    /// How many censuses so far.
+    generation: u32,
 }
+
+/// Censuses a block survives before it is reported as settled: a
+/// minute. The churn of a track change (packets, sessions, scratch) is
+/// gone by then; what remains is what the track left behind, or a
+/// peer that joined.
+const AGED: u32 = 6;
 
 impl Census {
     pub fn new() -> Self {
         Self {
             last: std::collections::BTreeMap::new(),
             appeared: std::collections::BTreeMap::new(),
+            born: std::collections::BTreeMap::new(),
+            generation: 0,
         }
     }
 
@@ -494,12 +507,26 @@ impl Census {
             .filter(|(p, _)| !self.last.contains_key(p))
             .map(|(p, s)| (*p, *s))
             .collect();
+        // Births and deaths, and the blocks that reach the age today.
+        self.generation += 1;
+        let generation = self.generation;
+        self.born.retain(|p, _| now.contains_key(p));
+        for (p, s) in &now {
+            self.born.entry(*p).or_insert((*s, generation));
+        }
+        let aged: Vec<usize> = self
+            .born
+            .values()
+            .filter(|(_, g)| generation - g == AGED)
+            .map(|(s, _)| *s)
+            .collect();
         self.last = now;
         format!(
-            "census: {} used blocks, {bytes} B; new {}; kept from last {}",
+            "census: {} used blocks, {bytes} B; new {}; kept from last {}; settled a minute ago {}",
             self.last.len(),
             histogram(&new),
-            histogram(&kept)
+            histogram(&kept),
+            histogram(&aged)
         )
     }
 }

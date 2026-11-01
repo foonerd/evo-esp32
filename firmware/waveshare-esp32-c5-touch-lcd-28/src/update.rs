@@ -798,6 +798,64 @@ impl Page {
             )
             .map_err(|e| format!("route /status: {e}"))?;
 
+        // The last crash, if there is one, as the core-dump partition
+        // holds it: `espcoredump.py info_corefile --core-format raw` on
+        // the bytes with the build's ELF names every task's stack. A
+        // player on a shelf is read without a cable or a reset. 404 when
+        // no dump has been written.
+        let s = Arc::clone(&shared);
+        server
+            .fn_handler::<anyhow::Error, _>(
+                "/coredump",
+                Method::Get,
+                move |req| {
+                    let req = match s.admit(req, "GET") {
+                        Ok(r) => r,
+                        Err(sent) => return sent,
+                    };
+                    let Some((partition, len)) = core_dump() else {
+                        let mut resp = req.into_response(
+                            404,
+                            Some("Not Found"),
+                            &[("Content-Type", "text/plain; charset=utf-8")],
+                        )?;
+                        resp.write_all(b"no core dump\n")?;
+                        return Ok(());
+                    };
+                    let length = len.to_string();
+                    let mut resp = req.into_response(
+                        200,
+                        Some("OK"),
+                        &[
+                            ("Content-Type", "application/octet-stream"),
+                            ("Content-Length", &length),
+                        ],
+                    )?;
+                    let mut buf = vec![0u8; 4096];
+                    let mut at = 0usize;
+                    while at < len {
+                        let n = buf.len().min(len - at);
+                        // SAFETY: a read within the partition's bounds into
+                        // a buffer of at least `n` bytes.
+                        let rc = unsafe {
+                            sys::esp_partition_read(
+                                partition,
+                                at,
+                                buf.as_mut_ptr().cast(),
+                                n,
+                            )
+                        };
+                        if rc != sys::ESP_OK {
+                            anyhow::bail!("partition read: {rc}");
+                        }
+                        resp.write_all(&buf[..n])?;
+                        at += n;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("route /coredump: {e}"))?;
+
         let s = Arc::clone(&shared);
         server
             .fn_handler::<anyhow::Error, _>("/update", Method::Post, move |req| {
@@ -1881,6 +1939,30 @@ fn internal_free() -> usize {
 fn internal_low() -> usize {
     // SAFETY: a plain getter.
     unsafe { sys::heap_caps_get_minimum_free_size(sys::MALLOC_CAP_INTERNAL) }
+}
+
+/// The core-dump partition and the length of the dump it holds, when
+/// one has been written and checks out.
+fn core_dump() -> Option<(*const sys::esp_partition_t, usize)> {
+    // SAFETY: plain lookups and out-parameters of the right types.
+    unsafe {
+        if sys::esp_core_dump_image_check() != sys::ESP_OK {
+            return None;
+        }
+        let (mut addr, mut size) = (0usize, 0usize);
+        if sys::esp_core_dump_image_get(&mut addr, &mut size) != sys::ESP_OK {
+            return None;
+        }
+        let partition = sys::esp_partition_find_first(
+            sys::esp_partition_type_t_ESP_PARTITION_TYPE_DATA,
+            sys::esp_partition_subtype_t_ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
+            core::ptr::null(),
+        );
+        if partition.is_null() {
+            return None;
+        }
+        Some((partition, size.min((*partition).size as usize)))
+    }
 }
 
 /// GET the manifest and read it.
