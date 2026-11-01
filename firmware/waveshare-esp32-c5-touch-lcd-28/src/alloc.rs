@@ -427,40 +427,40 @@ pub fn card_chunk(
 
 /// A census of the internal heap's used blocks between heartbeats. What
 /// appeared since the last census and is still there at the next, and
-/// what has survived a minute, is what a track left behind; its size
-/// names the culprit before any deeper trace is switched on.
+/// how the count of each size has drifted over a minute, is what a
+/// track left behind; its size names the culprit before any deeper
+/// trace is switched on.
 pub struct Census {
     /// Used blocks at the last census: address → size.
     last: std::collections::BTreeMap<usize, usize>,
     /// Blocks that were new at the last census.
     appeared: std::collections::BTreeMap<usize, usize>,
-    /// Every used block's address → (size, the census it was first seen
-    /// at); a block is reported once, when it reaches [`AGED`].
-    born: std::collections::BTreeMap<usize, (usize, u32)>,
-    /// How many censuses so far.
-    generation: u32,
+    /// Each size's count of used blocks at the last [`AGED`] censuses,
+    /// oldest first.
+    counts:
+        std::collections::VecDeque<std::collections::BTreeMap<usize, usize>>,
 }
 
-/// Censuses a block survives before it is reported as settled: a
-/// minute. The churn of a track change (packets, sessions, scratch) is
-/// gone by then; what remains is what the track left behind, or a
+/// Censuses apart the drift is measured over: a minute. The churn of a
+/// track change (packets, sessions, scratch) is gone by then; a size
+/// whose count still stands higher is what the track left behind, or a
 /// peer that joined.
-const AGED: u32 = 6;
+const AGED: usize = 6;
 
 impl Census {
     pub fn new() -> Self {
         Self {
             last: std::collections::BTreeMap::new(),
             appeared: std::collections::BTreeMap::new(),
-            born: std::collections::BTreeMap::new(),
-            generation: 0,
+            counts: std::collections::VecDeque::new(),
         }
     }
 
     /// Walk the internal heap and say what moved: the used blocks and
-    /// their bytes; what is new since the last census; and what was new
-    /// at the last census and is still here — the leak candidates, as
-    /// `size×count`.
+    /// their bytes; what is new since the last census; what was new at
+    /// the last census and is still here; and, per size, how many more
+    /// or fewer blocks there are than a minute ago — the leak named, as
+    /// `+size×count`.
     pub fn take(&mut self) -> String {
         let mut now: std::collections::BTreeMap<usize, usize> =
             std::collections::BTreeMap::new();
@@ -507,26 +507,28 @@ impl Census {
             .filter(|(p, _)| !self.last.contains_key(p))
             .map(|(p, s)| (*p, *s))
             .collect();
-        // Births and deaths, and the blocks that reach the age today.
-        self.generation += 1;
-        let generation = self.generation;
-        self.born.retain(|p, _| now.contains_key(p));
-        for (p, s) in &now {
-            self.born.entry(*p).or_insert((*s, generation));
+        // Each size's count now against a minute ago.
+        let mut counted: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        for s in now.values() {
+            *counted.entry(*s).or_default() += 1;
         }
-        let aged: Vec<usize> = self
-            .born
-            .values()
-            .filter(|(_, g)| generation - g == AGED)
-            .map(|(s, _)| *s)
-            .collect();
+        let drift = match self.counts.front() {
+            Some(before) if self.counts.len() == AGED => {
+                drift(before, &counted)
+            }
+            _ => "not yet".into(),
+        };
+        if self.counts.len() == AGED {
+            self.counts.pop_front();
+        }
+        self.counts.push_back(counted);
         self.last = now;
         format!(
-            "census: {} used blocks, {bytes} B; new {}; kept from last {}; settled a minute ago {}",
+            "census: {} used blocks, {bytes} B; new {}; kept from last {}; drift over a minute {drift}",
             self.last.len(),
             histogram(&new),
             histogram(&kept),
-            histogram(&aged)
         )
     }
 }
@@ -553,4 +555,32 @@ fn histogram(sizes: &[usize]) -> String {
         .map(|(s, n)| format!("{s}×{n}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `+348×1 +92×2 -64×1`: each size whose count of used blocks moved
+/// from `before` to `now`, largest first; `none` when nothing did.
+fn drift(
+    before: &std::collections::BTreeMap<usize, usize>,
+    now: &std::collections::BTreeMap<usize, usize>,
+) -> String {
+    let sizes: std::collections::BTreeSet<usize> =
+        before.keys().chain(now.keys()).copied().collect();
+    let moved: Vec<String> = sizes
+        .iter()
+        .rev()
+        .filter_map(|s| {
+            let was = before.get(s).copied().unwrap_or(0) as isize;
+            let is = now.get(s).copied().unwrap_or(0) as isize;
+            match is - was {
+                0 => None,
+                d if d > 0 => Some(format!("+{s}×{d}")),
+                d => Some(format!("-{s}×{}", -d)),
+            }
+        })
+        .collect();
+    if moved.is_empty() {
+        "none".into()
+    } else {
+        moved.join(" ")
+    }
 }
