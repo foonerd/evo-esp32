@@ -2,7 +2,7 @@
 # Name the code addresses in a heap-trace dump (or any console text).
 #
 # Usage: scripts/symbolise.sh <elf> < console-excerpt
-# Needs: riscv32-esp-elf-gdb on PATH or named by EVO_GDB
+# Needs: riscv32-esp-elf-gdb on PATH or named by EVO_GDB; python3
 #
 # Every 0x4xxxxxxx in the input is looked up once in the ELF and the
 # text is printed again with "0xADDR" followed by "<symbol+off>"; an
@@ -20,19 +20,41 @@ text=$(cat)
 mapfile -t addrs < <(grep -oE '0x4[0-9a-fA-F]{7}' <<<"$text" | sort -u)
 [ "${#addrs[@]}" -gt 0 ] || { printf '%s\n' "$text"; exit 0; }
 
+# One gdb run; each lookup is preceded by a marker line so the answers
+# (one or two lines each: the code section and the overlapping rodata
+# placeholder) can be told apart.
 cmds=$(mktemp)
-for a in "${addrs[@]}"; do echo "info symbol $a"; done > "$cmds"
-mapfile -t names < <("$gdb" -batch -x "$cmds" "$elf" 2>/dev/null \
-  | sed -E 's/ in section .*//; s/^No symbol matches .*//')
-rm -f "$cmds"
-
-sed_script=$(mktemp)
-for i in "${!addrs[@]}"; do
-  name="${names[$i]:-}"
-  [ -n "$name" ] || continue
-  # Rust's mangled names are long; keep the path's tail.
-  short=$(sed -E 's/^<?(.*::)?([^:<>]+(<[^>]*>)?)>? \+ ([0-9]+)$/\2+\4/' <<<"$name")
-  printf 's|%s\\b|%s <%s>|g\n' "$a" "$a" "${short//|/\\|}" >> "$sed_script"
-done
-sed -f "$sed_script" <<<"$text"
-rm -f "$sed_script"
+for a in "${addrs[@]}"; do
+  printf 'echo @@%s\\n\ninfo symbol %s\n' "$a" "$a"
+done > "$cmds"
+answers=$(mktemp)
+"$gdb" -batch -x "$cmds" "$elf" > "$answers" 2>/dev/null || true
+python3 - "$text" "$answers" <<'PY'
+import re, sys
+text = sys.argv[1]
+names = {}
+addr = None
+for line in open(sys.argv[2]):
+    line = line.rstrip("\n")
+    if line.startswith("@@"):
+        addr = line[2:]
+        continue
+    if addr is None or "No symbol matches" in line or "_flash_rodata_dummy_start" in line:
+        continue
+    m = re.match(r"(.*) in section (\S+)", line)
+    if not m:
+        continue
+    name = m.group(1)
+    # Rust paths are long; keep the last segment and the offset.
+    m2 = re.match(r"^<?(.*?)>? \+ (\d+)$", name)
+    if m2:
+        path, off = m2.group(1), m2.group(2)
+        tail = re.split(r"::(?![^<]*>)", path)[-1]
+        name = f"{tail}+{off}"
+    names.setdefault(addr, name)
+def sub(m):
+    a = m.group(0)
+    return f"{a} <{names[a]}>" if a in names else a
+print(re.sub(r"0x4[0-9a-fA-F]{7}", sub, text))
+PY
+rm -f "$cmds" "$answers"
