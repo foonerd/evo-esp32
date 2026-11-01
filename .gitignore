@@ -1,5 +1,6 @@
-# Rust build output
+# Rust build output; target-trace/ is scripts/trace.sh's
 target/
+target-trace/
 
 # embuild: ESP-IDF checkout and toolchains, fetched per firmware crate on first build
 .embuild/
