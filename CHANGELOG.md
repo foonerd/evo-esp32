@@ -14,6 +14,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in a second write, and a slightly longer token would have failed the
   check outright. The buffer is 2 KB.
 
+- The shipped station list re-checked on 1 November: every one of the
+  56 streams answers and every logo decodes, except KEXP's, whose site
+  now serves a web page in place of its icons; the station stays, its
+  logo is left out.
+
 ## [0.2.6] - 2026-10-31
 
 - PCM5122 boards with oscillators of their own play every rate. The

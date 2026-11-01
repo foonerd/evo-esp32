@@ -8,8 +8,9 @@
 #
 # A selection of UK stations, with a few from further afield, drawn
 # from the radio-browser.info and TuneIn directories and checked on
-# 20 October 2026 (the BBC's on the 21st): every stream answered,
-# every logo decoded. The streams and logos are the broadcasters' own.
+# 1 November 2026: every stream answered, every logo decoded. The
+# streams and logos are the broadcasters' own; KEXP's logo is left
+# out since its site stopped serving the picture to players.
 # The player decodes MP3, AAC (AAC-LC and HE-AAC), FLAC and Ogg Vorbis
 # from the air, as one stream or as HLS (a playlist of short segments
 # in MPEG-TS, the way the BBC broadcasts). Where a broadcaster offers
@@ -75,7 +76,7 @@ http://ice-sov.musicradio.com/HeartLondonMP3
 https://stream-al.hellorayo.co.uk/hits.mp3?direct=true&aw_0_1st.skey=1602676850
 #EXTINF:-1 tvg-logo="https://cdn-profiles.tunein.com/s45579/images/logod.png",Kerrang! Radio
 https://stream-al.hellorayo.co.uk/kerrang.mp3?direct=true&aw_0_1st.skey=1602676850
-#EXTINF:-1 tvg-logo="https://www.kexp.org/apple-touch-icon.png",KEXP
+#EXTINF:-1,KEXP
 http://live-aacplus-64.kexp.org/kexp64.aac
 #EXTINF:-1 tvg-logo="https://media.bauerradio.com/image/upload/c_crop,g_custom/v1678797505/brand_manager/stations/mahvph4fqjmnp4y8d6wt.png",KISS
 https://live-kiss.sharp-stream.com/kiss100.mp3
