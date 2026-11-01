@@ -24,8 +24,13 @@ use evo_esp32_sdk::contract::audio::playback::{ByteStream, StreamOpener};
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// The client's receive buffer, internal SRAM: one chunk of a stream.
 const BUFFER: usize = 4096;
-/// The client's send buffer: the request is a few hundred bytes.
-const BUFFER_TX: usize = 1024;
+/// The client's send buffer. The request line carries the whole path
+/// and query of a redirect's target: GitHub's release assets redirect
+/// to a signed URL of about 990 characters (960 bytes of request line,
+/// measured 2026-11-01), which left 64 bytes of a 1 KB buffer for the
+/// headers — `HTTP_HEADER: Buffer length is small` on every update
+/// check, and a hard "Out of buffer" one longer token away.
+const BUFFER_TX: usize = 2048;
 /// Who is asking.
 const USER_AGENT: &str = concat!("evo-esp32/", env!("CARGO_PKG_VERSION"));
 

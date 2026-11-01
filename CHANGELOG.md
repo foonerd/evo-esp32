@@ -4,6 +4,16 @@ All notable changes to evo-esp32 are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- The HTTP client's send buffer holds a redirect's whole request line.
+  GitHub answers a release-asset request with a redirect to a signed
+  URL of about 990 characters; with a 1 KB send buffer, 64 bytes were
+  left for the headers, the client logged `HTTP_HEADER: Buffer length
+  is small to fit all the headers` on every update check and sent them
+  in a second write, and a slightly longer token would have failed the
+  check outright. The buffer is 2 KB.
+
 ## [0.2.6] - 2026-10-31
 
 - PCM5122 boards with oscillators of their own play every rate. The
