@@ -899,6 +899,8 @@ fn main() -> anyhow::Result<()> {
     let mut last_idle = Instant::now();
     let mut shares = CoreShares::new();
     let mut census = alloc::Census::new();
+    #[cfg(feature = "heap-trace")]
+    alloc::trace::init();
     let mut busy = Duration::ZERO;
     // What a finger waits for: the first touch report of a run until the
     // face next looks; and the longest turn of the loop, which is the
@@ -1889,6 +1891,10 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             if let HappeningKind::CustodyReleased { warden, reason } = &h.kind {
+                // The next track's open follows; the trace window
+                // starts before it.
+                #[cfg(feature = "heap-trace")]
+                alloc::trace::open();
                 if let Some(source) = Source::of_warden(warden) {
                     // The source is over: it left or went quiet. The
                     // queue plays again where it was. A release from the
@@ -2047,6 +2053,8 @@ fn main() -> anyhow::Result<()> {
                 alloc::Account::now().line()
             );
             info!("{}", census.take());
+            #[cfg(feature = "heap-trace")]
+            alloc::trace::beat();
             if largest_dma < DMA_TRIPWIRE {
                 warn!(
                     "heap: the largest DMA-capable block is {largest_dma} B: the card and the panel are about to fail their reads and writes"

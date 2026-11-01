@@ -584,3 +584,93 @@ fn drift(
         moved.join(" ")
     }
 }
+
+/// The heap trace across a track change: what the change left behind,
+/// each allocation with the call stack that made it. Built by
+/// `scripts/trace.sh`, whose sdkconfig gives the kernel a frame pointer
+/// to walk; without one the trace records no callers.
+#[cfg(feature = "heap-trace")]
+pub mod trace {
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicBool, AtomicU8, Ordering::Relaxed};
+
+    use esp_idf_svc::sys;
+
+    /// Allocations alive at once within a window; a minute of play
+    /// after a track open holds a few hundred.
+    const RECORDS: usize = 600;
+    /// A record with twelve callers each way is 120 bytes; room for
+    /// more should the depth change.
+    const RECORD_BYTES: usize = 160;
+    /// Heartbeats a window lasts: the churn of a track change is gone
+    /// by then.
+    pub const WINDOW_BEATS: u8 = 6;
+
+    static READY: AtomicBool = AtomicBool::new(false);
+    static OPEN: AtomicBool = AtomicBool::new(false);
+    static BEATS: AtomicU8 = AtomicU8::new(0);
+
+    // Not in the generated bindings; from esp_heap_trace.h.
+    extern "C" {
+        fn heap_trace_init_standalone(
+            records: *mut c_void,
+            count: usize,
+        ) -> sys::esp_err_t;
+        fn heap_trace_start(mode: u32) -> sys::esp_err_t;
+        fn heap_trace_stop() -> sys::esp_err_t;
+        fn heap_trace_dump_caps(caps: u32);
+    }
+    const HEAP_TRACE_LEAKS: u32 = 1;
+
+    /// Give the trace its records, in PSRAM, once.
+    pub fn init() {
+        if READY.load(Relaxed) {
+            return;
+        }
+        // SAFETY: the buffer is the trace's for the life of the firmware.
+        let ok = unsafe {
+            let p = sys::heap_caps_calloc(
+                RECORDS,
+                RECORD_BYTES,
+                sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT,
+            );
+            !p.is_null() && heap_trace_init_standalone(p, RECORDS) == 0
+        };
+        if ok {
+            READY.store(true, Relaxed);
+            log::info!("trace: {RECORDS} records ready");
+        } else {
+            log::warn!("trace: no records; the trace is off");
+        }
+    }
+
+    /// A track is about to change: trace from here. Nothing while a
+    /// window is open.
+    pub fn open() {
+        if !READY.load(Relaxed) || OPEN.swap(true, Relaxed) {
+            return;
+        }
+        BEATS.store(0, Relaxed);
+        // SAFETY: records are ready; a plain kernel call.
+        let r = unsafe { heap_trace_start(HEAP_TRACE_LEAKS) };
+        log::info!("trace: window open ({r})");
+    }
+
+    /// A heartbeat passed; at the window's end, stop and print what the
+    /// internal heap kept.
+    pub fn beat() {
+        if !OPEN.load(Relaxed) {
+            return;
+        }
+        if BEATS.fetch_add(1, Relaxed) + 1 < WINDOW_BEATS {
+            return;
+        }
+        // SAFETY: plain kernel calls; the dump prints to the console.
+        unsafe {
+            heap_trace_stop();
+            log::info!("trace: window closed; what the internal heap kept:");
+            heap_trace_dump_caps(sys::MALLOC_CAP_INTERNAL);
+        }
+        OPEN.store(false, Relaxed);
+    }
+}

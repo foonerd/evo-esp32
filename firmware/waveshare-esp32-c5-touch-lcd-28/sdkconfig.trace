@@ -1,0 +1,6 @@
+# The leak hunt's build (scripts/trace.sh): frame pointers so a heap
+# trace can walk the call stack on RISC-V, and the standalone heap trace
+# itself. Never a release: both cost code size and speed.
+CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
+CONFIG_HEAP_TRACING_STANDALONE=y
+CONFIG_HEAP_TRACING_STACK_DEPTH=12

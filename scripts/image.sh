@@ -7,6 +7,8 @@
 # Env:   EVO_SIGNING_KEY=<pem>  the ECDSA P-256 key the app is signed with,
 #        required when the crate's sdkconfig.defaults requires signed apps
 #        (make one: espsecure generate-signing-key --version 2 --scheme ecdsa256 key.pem)
+#        EVO_TARGET_DIR=<dir>   the crate's cargo target directory when it
+#        is not target/ (scripts/trace.sh builds into target-trace/)
 #
 # Offsets and flash settings come from ESP-IDF's flasher_args.json, so they
 # track the crate's sdkconfig. The app image is built from the Rust ELF; the
@@ -35,7 +37,8 @@ print(pkg["name"], pkg["version"], target)
 PY
 )
 
-elf="$crate/target/$target/release/$name"
+target_dir="$crate/${EVO_TARGET_DIR:-target}"
+elf="$target_dir/$target/release/$name"
 [ -f "$elf" ] || { echo "missing $elf: run cargo build --release in $1 first" >&2; exit 1; }
 
 # The app descriptor names the version from sdkconfig; it must be the
@@ -49,9 +52,9 @@ fi
 # esp-idf-sys leaves one build per configuration under target/; an
 # sdkconfig change makes a second. The newest is the one the ELF was
 # linked against.
-mapfile -t found < <(find "$crate/target/$target/release/build" -path '*esp-idf-sys*' -name flasher_args.json -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
-[ "${#found[@]}" -ge 1 ] || { echo "no flasher_args.json under $1/target: build first" >&2; exit 1; }
-[ "${#found[@]}" -eq 1 ] || echo "note: ${#found[@]} esp-idf-sys builds under $1/target; using the newest"
+mapfile -t found < <(find "$target_dir/$target/release/build" -path '*esp-idf-sys*' -name flasher_args.json -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
+[ "${#found[@]}" -ge 1 ] || { echo "no flasher_args.json under $target_dir: build first" >&2; exit 1; }
+[ "${#found[@]}" -eq 1 ] || echo "note: ${#found[@]} esp-idf-sys builds under $target_dir; using the newest"
 args="${found[0]}"
 build="$(dirname "$args")"
 

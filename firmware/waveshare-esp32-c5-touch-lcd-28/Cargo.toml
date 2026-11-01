@@ -58,6 +58,11 @@ gate-test = []
 # A firmware whose page is locked as `bench`/`bench` when the card
 # names no web_user: the bench's proof of the lock. Never released.
 lock-test = []
+# A firmware that traces the internal heap across a track change and
+# prints what the change left behind with the call stack of each
+# allocation. Built by scripts/trace.sh with sdkconfig.trace. Never
+# released.
+heap-trace = []
 
 [build-dependencies]
 embuild = "0.33.5"
