@@ -257,6 +257,7 @@ fn main() -> anyhow::Result<()> {
     threads::default_configuration().set()?;
     evo_esp32_sdk::thread::place(&threads::Placing)
         .map_err(anyhow::Error::msg)?;
+    threads::check_exit_returns_memory();
 
     // The SPI bus first, so the card is read before the panel is up.
     let spi = board::spi_bus(spi2, pins.gpio6, pins.gpio7, pins.gpio8)?;

@@ -103,3 +103,44 @@ impl Placement for Placing {
         }
     }
 }
+
+/// A thread that exits must give its memory back. Without
+/// `evo_esp32_platform_esp_idf::tls` every exit kept the thread's
+/// handle, 168 bytes of internal SRAM; this spawns a thread that does
+/// nothing, joins it, and reads the internal heap around it. The first
+/// thread pays for the runtime's thread-local keys, so the second is
+/// the one measured. Noise from other tasks is a few bytes; a kept
+/// handle is far more.
+pub fn check_exit_returns_memory() {
+    fn free() -> usize {
+        // SAFETY: a plain heap query.
+        unsafe {
+            esp_idf_svc::sys::heap_caps_get_free_size(
+                esp_idf_svc::sys::MALLOC_CAP_INTERNAL,
+            )
+        }
+    }
+    fn once() -> Option<isize> {
+        let before = free();
+        std::thread::Builder::new()
+            .name("probe".into())
+            .stack_size(4096)
+            .spawn(|| {})
+            .ok()?
+            .join()
+            .ok()?;
+        // The kernel's idle task frees the task's own block after the join.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Some(before as isize - free() as isize)
+    }
+    const KEPT: isize = 128;
+    match (once(), once()) {
+        (Some(_), Some(kept)) if kept < KEPT => {
+            log::info!("threads: a thread that exits gives its memory back")
+        }
+        (Some(_), Some(kept)) => log::warn!(
+            "threads: a thread that exits keeps {kept} B of internal SRAM; every track will cost that"
+        ),
+        _ => log::warn!("threads: the exit check could not run"),
+    }
+}

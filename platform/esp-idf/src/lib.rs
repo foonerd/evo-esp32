@@ -33,6 +33,10 @@
 //! Wi-Fi with its remembered access point, the settings store in NVS.
 //! Written for the Volumio ESP companion (MIT) and carried here when the
 //! two projects parted; see NOTICE.
+//!
+//! [`tls`]: thread-local destructors run in POSIX order at thread exit,
+//! so a thread that ends gives its handle back; ESP-IDF's own order
+//! leaks it. Linked in by the firmware's `build.rs` through `--wrap`.
 
 pub mod aac;
 pub mod card;
@@ -45,6 +49,7 @@ pub mod net;
 pub mod nvs;
 pub mod png;
 pub mod seal;
+pub mod tls;
 
 pub use card::Card;
 pub use http::HttpOpener;

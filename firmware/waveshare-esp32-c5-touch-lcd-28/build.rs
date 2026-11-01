@@ -9,6 +9,15 @@
 
 fn main() {
     embuild::espidf::sysenv::output();
+    // evo_esp32_platform_esp_idf::tls stands between ESP-IDF's pthreads
+    // and their thread-local storage; see that module.
+    for symbol in [
+        "pthread_key_create",
+        "pthread_key_delete",
+        "pthread_internal_local_storage_destructor_callback",
+    ] {
+        println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
+    }
     println!("cargo:rerun-if-changed=catalogue.toml");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");
