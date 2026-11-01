@@ -34,6 +34,9 @@ use std::sync::Mutex;
 use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
 use evo_esp32_sdk::thread::{Placement, Role};
 
+/// The sink's feeder, which moves frames from the reservoir into the
+/// I2S DMA ring: above the Wi-Fi driver's 23, the top the kernel allows.
+pub const FEEDER_PRIORITY: u8 = 24;
 /// The main task: touch, face and the decoder's tick. ESP-IDF starts
 /// it at 1; it is raised once the art worker exists.
 pub const MAIN_PRIORITY: u8 = 5;
@@ -46,6 +49,10 @@ pub const INPUT_PRIORITY: u8 = 7;
 /// Threads that open, list, search, talk to peers and fetch art: one
 /// below.
 pub const BACKGROUND_PRIORITY: u8 = 4;
+/// The network's join thread, below everything: the join's key
+/// derivation is a few hundred milliseconds of arithmetic the decoder
+/// is not to wait for.
+pub const JOIN_PRIORITY: u8 = 1;
 
 /// The threads' placement on this board.
 pub struct Placing;

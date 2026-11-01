@@ -76,9 +76,6 @@ const CHUNK: usize = 4096;
 /// DMA-capable SRAM from the card and the panel; the codecs are
 /// written from the main task instead, in the window the feeder opens.)
 const FEEDER_STACK: usize = 4 * 1024;
-/// The feeder's priority: above the Wi-Fi driver's 23, the top the
-/// kernel allows.
-const FEEDER_PRIORITY: u8 = 24;
 /// The feeder's wait when there is nothing to feed.
 const EMPTY_NAP: Duration = Duration::from_millis(2);
 /// What a stream starting into an empty reservoir gathers before the
@@ -444,7 +441,7 @@ impl<F: RateFollower> I2sSink<F> {
             ThreadSpawnConfiguration {
                 name: Some(c"feeder"),
                 stack_size: FEEDER_STACK,
-                priority: FEEDER_PRIORITY,
+                priority: crate::threads::FEEDER_PRIORITY,
                 ..Default::default()
             }
             .set()

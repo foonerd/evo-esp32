@@ -23,10 +23,6 @@ use log::{info, warn};
 /// thread writes NVS, and a task whose stack is in PSRAM may not run
 /// while the flash cache is off.
 const STACK: usize = 8 * 1024;
-/// Below the main task's (raised by the art fetcher): the join's key
-/// derivation is a few hundred milliseconds of arithmetic, and the
-/// decoder is not to wait for it.
-const PRIORITY: u8 = 1;
 /// How often the link is checked once up.
 const WATCH: Duration = Duration::from_secs(2);
 /// How long to wait after a failed join before the next.
@@ -156,7 +152,7 @@ impl Net {
         ThreadSpawnConfiguration {
             name: Some(c"net"),
             stack_size: STACK,
-            priority: PRIORITY,
+            priority: crate::threads::JOIN_PRIORITY,
             ..Default::default()
         }
         .set()
