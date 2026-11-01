@@ -596,11 +596,12 @@ pub mod trace {
 
     use esp_idf_svc::sys;
 
-    /// Allocations alive at once within a window; a minute of play
-    /// after a track open holds a few hundred.
-    const RECORDS: usize = 600;
-    /// A record with twelve callers each way is 120 bytes; room for
-    /// more should the depth change.
+    /// Allocations alive at once within a window, every heap counted:
+    /// the first window overflowed 600 in 52 s (194,886 allocations,
+    /// 177,902 frees). 24,000 records are 3.8 MB of PSRAM.
+    const RECORDS: usize = 24_000;
+    /// A record with twelve callers each way and the hash-map link is
+    /// 124 bytes; room for more should the depth change.
     const RECORD_BYTES: usize = 160;
     /// Heartbeats a window lasts: the churn of a track change is gone
     /// by then.

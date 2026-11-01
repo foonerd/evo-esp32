@@ -4,3 +4,9 @@
 CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
 CONFIG_HEAP_TRACING_STANDALONE=y
 CONFIG_HEAP_TRACING_STACK_DEPTH=12
+# The trace sees every heap; a minute of play holds many thousand live
+# allocations (the first window overflowed 600 records in 52 s), so the
+# records are many and found through a hash map, both in PSRAM.
+CONFIG_HEAP_TRACE_HASH_MAP=y
+CONFIG_HEAP_TRACE_HASH_MAP_IN_EXT_RAM=y
+CONFIG_HEAP_TRACE_HASH_MAP_SIZE=8192
