@@ -838,6 +838,9 @@ dependencies = [
 [[package]]
 name = "evo-esp32-config"
 version = "0.2.6"
+dependencies = [
+ "aes-gcm",
+]
 
 [[package]]
 name = "evo-esp32-face"
@@ -854,6 +857,7 @@ name = "evo-esp32-platform-esp-idf"
 version = "0.2.6"
 dependencies = [
  "esp-idf-svc",
+ "evo-esp32-config",
  "evo-esp32-sdk",
  "libc",
  "log",

@@ -298,6 +298,9 @@ dependencies = [
 [[package]]
 name = "evo-esp32-config"
 version = "0.2.6"
+dependencies = [
+ "aes-gcm",
+]
 
 [[package]]
 name = "evo-esp32-face"

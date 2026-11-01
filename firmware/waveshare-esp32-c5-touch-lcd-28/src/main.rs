@@ -411,10 +411,37 @@ fn main() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| DEFAULT_NAME.to_string());
 
+    // The card's passwords, sealed to this player: any still in plain
+    // text are sealed and written back now, the sealed ones opened for
+    // use. The key lives in NVS; a flash from nothing makes a new one.
+    let unopened =
+        match evo_esp32_platform_esp_idf::seal::device_key(nvs.clone()) {
+            Ok(key) => config.seal_passwords(
+                &evo_esp32_config::Sealer::new(&key),
+                evo_esp32_platform_esp_idf::seal::nonce,
+            ),
+            Err(e) => {
+                warn!(
+                    "seal: no key: {e}; the card's passwords stay as written"
+                );
+                config.note(format!(
+                    "the passwords on the card could not be sealed: {e}"
+                ));
+                Vec::new()
+            }
+        };
+    let wifi_password_unopened = unopened.iter().any(|k| k == "wifi_password");
+
     // The network, on its own thread, after the ring has its memory: the
     // music does not wait for the search, and the ring is not short for
     // the driver. Its line in the status and in Settings follows the link.
     let mut net = match config.settings.wifi_ssid.clone() {
+        Some(_) if wifi_password_unopened => {
+            config.set_network(
+                "wifi: the password on the card is sealed for another player; write it again in evoconfig.txt",
+            );
+            None
+        }
         Some(ssid) => {
             let password =
                 config.settings.wifi_password.clone().unwrap_or_default();

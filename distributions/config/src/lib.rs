@@ -21,15 +21,20 @@
 //!
 //! The keys are [`KEYS`]; [`parse`] gives [`Parsed`] with the typed
 //! [`Settings`] and every line that needs the user's attention; [`set`]
-//! edits one key in the file's text in place.
+//! edits one key in the file's text in place. Passwords are sealed to the
+//! player on the card: [`seal`].
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod seal;
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+
+pub use seal::{is_sealed, is_secret_key, Sealer, Unsealable, SEALED_PREFIX};
 
 /// The file's name at the card's root.
 pub const FILE_NAME: &str = "evoconfig.txt";
@@ -425,7 +430,9 @@ fn take(settings: &mut Settings, key: &str, value: &str) -> bool {
             settings.wifi_ssid = text;
         }
         "wifi_password" => {
-            if value.len() > 63 {
+            // A sealed value is longer than any password; the limit is
+            // the plain text's, checked where it is written.
+            if !is_sealed(value) && value.len() > 63 {
                 return false;
             }
             // An open network has a password line that is empty, which
@@ -547,7 +554,7 @@ fn is_host_port(s: &str) -> bool {
     host_ok && port.is_none_or(|p| p.parse::<u16>().is_ok_and(|n| n > 0))
 }
 
-fn unquote(v: &str) -> &str {
+pub(crate) fn unquote(v: &str) -> &str {
     match v.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
         Some(inner) if v.len() >= 2 => inner,
         _ => v,
@@ -640,6 +647,8 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
     if let Some(v) = &s.wifi_password {
         let shown = if v.is_empty() {
             "(empty: an open network)".to_string()
+        } else if is_sealed(v) {
+            "(sealed to this player)".to_string()
         } else {
             format!("({} characters, not shown)", v.chars().count())
         };
@@ -672,7 +681,11 @@ pub fn status_lines(parsed: &Parsed) -> Vec<String> {
     if let Some(v) = &s.web_password {
         applied.push((
             "web_password",
-            format!("({} characters, not shown)", v.chars().count()),
+            if is_sealed(v) {
+                "(sealed to this player)".to_string()
+            } else {
+                format!("({} characters, not shown)", v.chars().count())
+            },
         ));
     }
     if let Some(v) = s.update {

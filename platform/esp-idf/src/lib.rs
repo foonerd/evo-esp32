@@ -44,6 +44,7 @@ pub mod mp3;
 pub mod net;
 pub mod nvs;
 pub mod png;
+pub mod seal;
 
 pub use card::Card;
 pub use http::HttpOpener;

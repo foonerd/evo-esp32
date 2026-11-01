@@ -19,6 +19,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now serves a web page in place of its icons; the station stays, its
   logo is left out.
 
+- Passwords on the card are sealed to the player. A password written
+  in plain text in `evoconfig.txt` (`wifi_password`, `web_password`, a
+  share's) is sealed at the next boot and the line rewritten as
+  `sealed:1:…` — AES-256-GCM under a key the player makes for itself
+  and keeps in its flash — so a card taken out of the player gives
+  nothing away. To change a password, write it in plain text again. A
+  card moved to another player, or a player flashed over USB from
+  nothing, reports the password as sealed for another player and waits
+  for it to be written again; the Wi-Fi join is not attempted with a
+  password the player cannot open. `evostatus.txt` says what was
+  sealed. A lock on the card, not a vault: the key is in the device.
+
 ## [0.2.6] - 2026-10-31
 
 - PCM5122 boards with oscillators of their own play every rate. The

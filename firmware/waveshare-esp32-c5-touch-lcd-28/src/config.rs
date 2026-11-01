@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use evo_esp32_config::{
-    parse, set, status_lines, Settings, FILE_NAME, STATUS_NAME,
+    parse, seal, set, status_lines, Sealer, Settings, FILE_NAME, STATUS_NAME,
 };
 use evo_esp32_face::{theme, Style, Theme};
 use log::{info, warn};
@@ -152,5 +152,47 @@ impl Config {
             }
             Err(e) => warn!("config: {FILE_NAME}: {e}"),
         }
+    }
+
+    /// Seal every password the file still holds in plain text and write
+    /// it back; then open the sealed ones for use. A password sealed by
+    /// another player (or this one before a flash from nothing) is
+    /// cleared, said in the status, and returned by name so the caller
+    /// can say it where it matters.
+    pub fn seal_passwords(
+        &mut self,
+        sealer: &Sealer,
+        nonce: impl FnMut() -> [u8; seal::NONCE_LEN],
+    ) -> Vec<String> {
+        if let Some(text) = self.text.as_deref() {
+            if let Some((sealed, count)) = seal::seal_text(text, sealer, nonce)
+            {
+                match std::fs::write(&self.path, &sealed) {
+                    Ok(()) => {
+                        info!("config: {count} password(s) sealed to this player in {FILE_NAME}");
+                        self.report.push(format!(
+                            "{count} password(s) were in plain text and are now sealed to this player"
+                        ));
+                        self.text = Some(sealed);
+                    }
+                    Err(e) => {
+                        warn!("config: {FILE_NAME}: could not write the sealed passwords: {e}");
+                        self.report.push(format!(
+                            "the passwords could not be sealed: {e}; they stay in plain text"
+                        ));
+                    }
+                }
+            }
+        }
+        let failed = self.settings.open_secrets(sealer);
+        let mut names = Vec::new();
+        for (key, why) in failed {
+            warn!("config: {key} on the card did not open: {why:?}");
+            self.report.push(format!(
+                "{key} is sealed for another player (or this one before a USB flash): write it again in plain text"
+            ));
+            names.push(key);
+        }
+        names
     }
 }

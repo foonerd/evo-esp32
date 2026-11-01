@@ -33,7 +33,12 @@ name = evo-player
 
 # The Wi-Fi network to join, 2.4 or 5 GHz, WPA2 or WPA3. Leave the
 # password empty for an open network. The address appears in Settings
-# and in evostatus.txt once joined.
+# and in evostatus.txt once joined. Write the password in plain text:
+# at its next boot the player seals it to itself and rewrites this
+# line as sealed:1:..., so the card alone gives nothing away. The same
+# goes for every password in this file. To change one, write it in
+# plain text again. A player flashed over USB from nothing cannot open
+# the old seals and asks for the passwords again.
 wifi_ssid = Your Network
 wifi_password = your password
 
