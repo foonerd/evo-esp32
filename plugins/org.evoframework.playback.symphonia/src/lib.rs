@@ -7,13 +7,17 @@
 //! a [`Play`] it opens the track's URI (`file://` on the host; `http://`
 //! and `https://` through the [`StreamOpener`] the distribution gave it,
 //! buffered on a thread of its own, see [`stream`]), probes the
-//! container, makes a decoder for its first audio track and, tick by
-//! tick, decodes a bounded slice and offers the frames to the
-//! [`FrameSink`] the distribution gave it. The sink paces: when it takes
-//! less than offered the warden keeps the remainder and asks to be
-//! ticked again shortly, so a tick is never longer than a few packets'
-//! decode and a copy. A network stream is decoded only from what has
-//! arrived, and the titles it carries become the track's.
+//! container, makes a decoder for its first audio track and hands
+//! stream and sink to a decode thread of its own (the Feed tier, one
+//! above the loop that reads the touch and paints), which decodes block
+//! by block and offers the frames to the [`FrameSink`] the distribution
+//! gave it. The sink paces: when it takes nothing the thread waits a
+//! moment and offers again. Pause, resume, seek and stop reach the
+//! thread as commands between blocks; its position, format and the
+//! station's title come back through shared state the warden's tick
+//! publishes, so the tick itself is a hand-over of microseconds and the
+//! loop paints when it likes. A network stream is decoded only from
+//! what has arrived, and the titles it carries become the track's.
 //!
 //! The position a consumer draws is the frames the sink has accepted,
 //! which is as near the ear as the warden can know without the sink's
@@ -50,8 +54,9 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use evo_esp32_sdk::context::Context;
@@ -114,12 +119,26 @@ const OPEN_STACK: usize = 32 * 1024;
 /// it is boxed, the probe needs far more; a host has it to spare.
 #[cfg(feature = "aac-symphonia")]
 const OPEN_STACK: usize = 256 * 1024;
-/// The most audio one tick decodes, in milliseconds. Past this the
-/// warden yields even if the sink would take more: a sink that runs the
-/// decoder ahead of the ear would otherwise take whole ticks of the
-/// loop that also reads the touch and paints, and a tick is at least
-/// one packet (a FLAC block is up to 93 ms of audio at 44.1 kHz).
-const TICK_BUDGET_MS: u64 = 50;
+/// The most audio the decode thread takes in one block before it looks
+/// at its commands and publishes its state: a pause or a seek waits at
+/// most this long, and a block is at least one packet (a FLAC block is
+/// up to 93 ms of audio at 44.1 kHz).
+const BLOCK_MS: u64 = 50;
+/// How long the warden asks to be left alone while the decode thread
+/// plays: each tick reads the thread's state and publishes it if it
+/// moved, and learns of the end of the track; the next track's open
+/// starts within this of the last frame.
+const DECODING_IDLE_MS: u32 = 20;
+/// The decode thread's stack. Placed by the distribution (PSRAM on the
+/// board); a FLAC frame's decode and the sink's copy live on it.
+#[cfg(not(feature = "aac-symphonia"))]
+const DECODE_STACK: usize = 16 * 1024;
+/// Symphonia's AAC decoder keeps a large working set on the stack.
+#[cfg(feature = "aac-symphonia")]
+const DECODE_STACK: usize = 64 * 1024;
+/// How long a release waits for the decode thread to finish its block.
+const STOP_WAIT: Duration = Duration::from_millis(500);
+
 /// What a file on a server must have in its read-ahead ring before the
 /// tick decodes from it: a 96 kHz FLAC frame is up to 24 KB, and a read
 /// that finds less would block the loop on the network.
@@ -175,13 +194,92 @@ struct Opening {
     hold: bool,
 }
 
-/// The custody in hand.
-struct InHand {
-    handle: CustodyHandle,
+/// What the plugin asks of the decode thread.
+enum Command {
+    Pause,
+    Resume,
+    Seek(u64),
+    Stop,
+}
+
+/// What the decode thread says once, as it ends.
+enum Ending {
+    /// The stream played to its end.
+    Done,
+    /// The stream was lost, for this reason.
+    Failed(String),
+    /// Told to stop.
+    Stopped,
+}
+
+/// The sink, shared between the plugin (which stops it when a custody
+/// ends) and the decode thread (which starts, writes and flushes it).
+type SharedSink = Arc<SinkCell>;
+
+/// The sink behind a lock that does not poison: a decoder that panicked
+/// mid-write must not take the sink down with it.
+struct SinkCell(Mutex<Box<dyn FrameSink + Send>>);
+
+impl SinkCell {
+    fn lock(&self) -> MutexGuard<'_, Box<dyn FrameSink + Send>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The decode thread's state as the plugin reads it on each tick.
+struct SharedState(Mutex<State>);
+
+impl SharedState {
+    fn new(state: State) -> Self {
+        Self(Mutex::new(state))
+    }
+
+    fn get(&self) -> State {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set(&self, state: &State) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = state.clone();
+    }
+}
+
+/// The decode thread, from the plugin's side.
+struct Decoding {
+    commands: Sender<Command>,
+    ending: Receiver<Ending>,
+    shared: Arc<SharedState>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Decoding {
+    /// Stop the thread and wait for it, within reason.
+    fn stop(mut self) {
+        let _ = self.commands.send(Command::Stop);
+        match self.ending.recv_timeout(STOP_WAIT) {
+            Ok(_) | Err(RecvTimeoutError::Disconnected) => {
+                if let Some(t) = self.thread.take() {
+                    let _ = t.join();
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                log::warn!(
+                    "decode: the thread did not stop within {} ms; left to finish its block",
+                    STOP_WAIT.as_millis()
+                );
+            }
+        }
+    }
+}
+
+/// The decode thread's own: the stream, the sink, and the account of
+/// what has been decoded and what the sink has taken.
+struct Decoder {
+    stream: Stream,
+    sink: SharedSink,
+    /// The state as this thread knows it, published to `shared`.
     state: State,
-    /// The open stream; none while `opening`.
-    stream: Option<Stream>,
-    opening: Option<Opening>,
+    shared: Arc<SharedState>,
+    commands: Receiver<Command>,
     /// Interleaved samples decoded but not yet taken by the sink.
     pending: Vec<i16>,
     /// How far into `pending` the sink has got, in samples.
@@ -196,19 +294,18 @@ struct InHand {
     skip: u64,
     /// The reader has no more packets; drain `pending`, then done.
     ended: bool,
+    paused: bool,
 }
 
-impl InHand {
-    /// The position being heard: what the sink took, less what it still
-    /// holds.
-    fn position_ms(&self, held: usize) -> u64 {
-        let rate = self.state.format.as_ref().map_or(0, |f| f.sample_rate);
-        if rate == 0 {
-            return self.base_ms;
-        }
-        let heard = self.frames_out.saturating_sub(held as u64);
-        self.base_ms + heard * 1000 / u64::from(rate)
-    }
+/// The custody in hand.
+struct InHand {
+    handle: CustodyHandle,
+    /// The state as last published.
+    state: State,
+    /// The stream being reached; none once it is.
+    opening: Option<Opening>,
+    /// The decode thread; none while `opening`.
+    decoding: Option<Decoding>,
 }
 
 pub use symphonia::core::codecs::registry::CodecRegistry;
@@ -237,7 +334,7 @@ pub fn default_codecs() -> CodecRegistry {
 
 /// The Symphonia playback warden.
 pub struct PlaybackSymphonia {
-    sink: Box<dyn FrameSink>,
+    sink: SharedSink,
     codecs: Arc<CodecRegistry>,
     /// How `http://` and `https://` tracks are reached; none, and they
     /// are refused.
@@ -254,19 +351,19 @@ pub struct PlaybackSymphonia {
 
 impl PlaybackSymphonia {
     /// A plugin ready to be admitted, writing to `sink`, decoding with
-    /// Symphonia's own codecs.
-    pub fn new(sink: Box<dyn FrameSink>) -> Self {
+    /// Symphonia's own codecs. The sink crosses to the decode thread.
+    pub fn new(sink: Box<dyn FrameSink + Send>) -> Self {
         Self::with_codecs(sink, default_codecs())
     }
 
     /// As [`new`](Self::new), decoding with `codecs`: a distribution's
     /// registry, where a platform decoder may stand above Symphonia's.
     pub fn with_codecs(
-        sink: Box<dyn FrameSink>,
+        sink: Box<dyn FrameSink + Send>,
         codecs: CodecRegistry,
     ) -> Self {
         Self {
-            sink,
+            sink: Arc::new(SinkCell(Mutex::new(sink))),
             codecs: Arc::new(codecs),
             opener: None,
             files: Arc::new(Vec::new()),
@@ -310,9 +407,7 @@ impl PlaybackSymphonia {
 
     fn publish_in_hand(&self, ctx: &mut dyn Context) {
         if let Some(h) = &self.in_hand {
-            let mut state = h.state.clone();
-            state.position_ms = h.position_ms(self.sink.held());
-            self.publish(ctx, &state);
+            self.publish(ctx, &h.state);
         }
     }
 }
@@ -341,8 +436,11 @@ impl Plugin for PlaybackSymphonia {
     }
 
     fn unload(&mut self, ctx: &mut dyn Context) {
-        if self.in_hand.take().is_some() {
-            self.sink.stop();
+        if let Some(h) = self.in_hand.take() {
+            if let Some(decoding) = h.decoding {
+                decoding.stop();
+                self.sink.lock().stop();
+            }
         }
         if let Some(id) = self.subject.take() {
             let _ = ctx.retract(&id);
@@ -405,18 +503,12 @@ impl Warden for PlaybackSymphonia {
         self.in_hand = Some(InHand {
             handle,
             state,
-            stream: None,
             opening: Some(Opening {
                 result: rx,
                 start_ms: play.start_ms,
                 hold: false,
             }),
-            pending: Vec::new(),
-            taken: 0,
-            frames_out: 0,
-            base_ms: 0,
-            skip: 0,
-            ended: false,
+            decoding: None,
         });
         Ok(())
     }
@@ -445,33 +537,34 @@ impl Warden for PlaybackSymphonia {
             }
             return Ok(());
         }
-        let Some(stream) = h.stream.as_mut() else {
+        let Some(decoding) = h.decoding.as_ref() else {
             return Err(CustodyError("no stream".into()));
         };
-        match c {
+        // The thread acts within a block; the state says so now, so the
+        // face does not wait on it.
+        let command = match c {
             Correction::Pause => {
                 h.state.status = Status::Paused;
-                self.sink.pause();
+                Command::Pause
             }
             Correction::Resume => {
                 h.state.status = Status::Playing;
-                self.sink.resume();
+                Command::Resume
             }
             Correction::Seek { position_ms } => {
                 let cap = h.state.track.as_ref().and_then(|t| t.duration_ms);
                 let target = cap.map_or(position_ms, |d| position_ms.min(d));
-                let rate = h.state.format.as_ref().map_or(0, |f| f.sample_rate);
-                let (landed, skip) = seek(stream, target, rate)?;
-                h.pending.clear();
-                h.taken = 0;
-                h.frames_out = 0;
-                h.base_ms = landed;
-                h.skip = skip;
-                h.ended = false;
-                self.sink.flush();
+                h.state.position_ms = target;
+                Command::Seek(target)
             }
-        }
-        self.publish_in_hand(ctx);
+        };
+        decoding
+            .commands
+            .send(command)
+            .map_err(|_| CustodyError("the decoder has gone".into()))?;
+        decoding.shared.set(&h.state);
+        let state = h.state.clone();
+        self.publish(ctx, &state);
         Ok(())
     }
 
@@ -483,10 +576,11 @@ impl Warden for PlaybackSymphonia {
         if self.in_hand.as_ref().is_some_and(|h| h.handle == handle) {
             // Dropping a custody still opening drops the thread's
             // receiver; what it opens is dropped in turn, fetcher and all.
-            let started =
-                self.in_hand.take().is_some_and(|h| h.stream.is_some());
-            if started {
-                self.sink.stop();
+            if let Some(h) = self.in_hand.take() {
+                if let Some(decoding) = h.decoding {
+                    decoding.stop();
+                    self.sink.lock().stop();
+                }
             }
             self.publish(ctx, &State::default());
         }
@@ -513,140 +607,43 @@ impl Warden for PlaybackSymphonia {
             };
             let Opening { start_ms, hold, .. } =
                 h.opening.take().expect("checked");
-            if let Err(e) = opened
-                .and_then(|o| begin(h, o, start_ms, hold, self.sink.as_mut()))
-            {
+            let begun = opened.and_then(|o| {
+                begin(h, o, start_ms, hold, Arc::clone(&self.sink))
+            });
+            if let Err(e) = begun {
                 log::warn!("open: {}; releasing", e.0);
                 return Progress::Failed(e.0);
             }
             self.publish_in_hand(ctx);
             return Progress::Working;
         }
-        if h.state.status == Status::Paused {
-            return Progress::Idle(PAUSED_IDLE_MS);
-        }
-        let rate =
-            u64::from(h.state.format.as_ref().map_or(0, |f| f.sample_rate));
-        let budget_frames = (rate * TICK_BUDGET_MS / 1000).max(1);
-        let mut decoded_frames: u64 = 0;
-        let channels_of = |state: &State| {
-            state
-                .format
-                .as_ref()
-                .map_or(1, |f| usize::from(f.channels).max(1))
-        };
-        // The fields apart, so the stream and the rest are borrowed side
-        // by side.
-        let InHand {
-            stream,
-            state,
-            pending,
-            taken,
-            frames_out,
-            base_ms,
-            skip,
-            ended,
-            ..
-        } = h;
-        let Some(stream) = stream.as_mut() else {
+        let Some(decoding) = h.decoding.as_mut() else {
             return Progress::Failed("no stream".into());
         };
-        if let Some(live) = stream.live.as_ref() {
-            if let Some(title) = live.take_title() {
-                if let Some(t) = state.track.as_mut() {
-                    // Stations say "Artist - Title".
-                    match title.split_once(" - ") {
-                        Some((artist, name)) if !name.trim().is_empty() => {
-                            t.artist = Some(artist.trim().to_string());
-                            t.title = name.trim().to_string();
-                        }
-                        _ => {
-                            t.artist = None;
-                            t.title = title;
-                        }
-                    }
-                }
+        // The thread's word, if it has ended; else its state, published
+        // when it moved.
+        match decoding.ending.try_recv() {
+            Ok(Ending::Done | Ending::Stopped)
+            | Err(TryRecvError::Disconnected) => {
+                return Progress::Done;
             }
+            Ok(Ending::Failed(why)) => return Progress::Failed(why),
+            Err(TryRecvError::Empty) => {}
         }
-        let progress = loop {
-            // Offer what is pending before decoding more.
-            if *taken < pending.len() {
-                let channels = channels_of(state);
-                let frames = self.sink.write(&pending[*taken..]);
-                if frames == 0 {
-                    break Progress::Idle(SINK_FULL_IDLE_MS);
-                }
-                *taken += frames * channels;
-                *frames_out += frames as u64;
-                if *taken < pending.len() {
-                    continue;
-                }
-                pending.clear();
-                *taken = 0;
-            }
-            if *ended {
-                break Progress::Done;
-            }
-            if decoded_frames >= budget_frames {
-                break Progress::Working;
-            }
-            // A stream from the network is decoded only from what has
-            // arrived; short of that, the tick waits for the fetcher.
-            if stream.live.as_mut().is_some_and(|l| !l.ready())
-                || stream.ahead.as_ref().is_some_and(|a| !a.ready())
-            {
-                break Progress::Idle(BUFFERING_IDLE_MS);
-            }
-            match next_frames(stream, pending) {
-                Ok(Some((frames, rate, channels))) => {
-                    // The decoder has the last word on the format: when
-                    // it differs from what the sink was started with,
-                    // the sink is started again and the state says so.
-                    let differs = state.format.as_ref().is_some_and(|f| {
-                        f.sample_rate != rate || f.channels != channels
-                    });
-                    if differs {
-                        if let Some(f) = state.format.as_mut() {
-                            let played = if f.sample_rate == 0 {
-                                *base_ms
-                            } else {
-                                *base_ms
-                                    + *frames_out * 1000
-                                        / u64::from(f.sample_rate)
-                            };
-                            log::info!(
-                                "format: the decoder gives {rate} Hz {channels} ch, the container said {} Hz {} ch; following the decoder",
-                                f.sample_rate, f.channels
-                            );
-                            f.sample_rate = rate;
-                            f.channels = channels;
-                            self.sink.start(f);
-                            *base_ms = played;
-                            *frames_out = 0;
-                        }
-                    }
-                    decoded_frames += frames;
-                    *taken = 0;
-                    if *skip > 0 {
-                        let drop = (*skip).min(frames);
-                        *taken = drop as usize * channels_of(state);
-                        *skip -= drop;
-                    }
-                }
-                Ok(None) => *ended = true,
-                Err(e) => {
-                    // The stream is lost; the custody ends with the reason.
-                    log::warn!("decode: {e}; releasing");
-                    state.status = Status::Stopped;
-                    pending.clear();
-                    *taken = 0;
-                    *ended = true;
-                    break Progress::Failed(e.to_string());
-                }
-            }
-        };
-        self.publish_in_hand(ctx);
-        progress
+        let latest = decoding.shared.get();
+        let moved = latest != h.state;
+        if moved {
+            h.state = latest;
+        }
+        let paused = h.state.status == Status::Paused;
+        if moved {
+            self.publish_in_hand(ctx);
+        }
+        Progress::Idle(if paused {
+            PAUSED_IDLE_MS
+        } else {
+            DECODING_IDLE_MS
+        })
     }
 }
 
@@ -717,14 +714,15 @@ impl std::io::Seek for FileReader {
 }
 
 /// The stream is open: name the track from its tags, land the start,
-/// start the sink, and set the custody playing (or held, if a pause
-/// came while it was being reached).
+/// and hand stream and sink to the decode thread, which starts the sink
+/// and plays (or holds, if a pause came while the stream was being
+/// reached).
 fn begin(
     h: &mut InHand,
     (mut stream, format): (Stream, Format),
     start_ms: u64,
     hold: bool,
-    sink: &mut dyn FrameSink,
+    sink: SharedSink,
 ) -> Result<(), CustodyError> {
     let track = h
         .state
@@ -761,25 +759,270 @@ fn begin(
     } else {
         (0, 0)
     };
-    sink.start(&format);
-    if hold {
-        sink.pause();
-    }
     h.state.status = if hold {
         Status::Paused
     } else {
         Status::Playing
     };
     h.state.position_ms = base_ms;
-    h.state.format = Some(format);
-    h.stream = Some(stream);
-    h.pending.clear();
-    h.taken = 0;
-    h.frames_out = 0;
-    h.base_ms = base_ms;
-    h.skip = skip;
-    h.ended = false;
+    h.state.format = Some(format.clone());
+    let shared = Arc::new(SharedState::new(h.state.clone()));
+    let (commands, command_rx) = mpsc::channel();
+    let (ending_tx, ending) = mpsc::channel();
+    let mut decoder = Decoder {
+        stream,
+        sink,
+        state: h.state.clone(),
+        shared: Arc::clone(&shared),
+        commands: command_rx,
+        pending: Vec::new(),
+        taken: 0,
+        frames_out: 0,
+        base_ms,
+        skip,
+        ended: false,
+        paused: hold,
+    };
+    let thread = evo_esp32_sdk::thread::spawn(
+        evo_esp32_sdk::thread::Role::Feed,
+        "decode",
+        DECODE_STACK,
+        move || {
+            let ending = decoder.run(&format);
+            // The plugin may have let go; then nobody is listening.
+            let _ = ending_tx.send(ending);
+        },
+    )
+    .map_err(|e| CustodyError(format!("decode thread: {e}")))?;
+    h.decoding = Some(Decoding {
+        commands,
+        ending,
+        shared,
+        thread: Some(thread),
+    });
     Ok(())
+}
+
+impl Decoder {
+    /// Decode until the stream ends, fails, or a `Stop` arrives; what
+    /// happened is the answer. The sink is started here, on this
+    /// thread, so a codec written at a rate change is written from here
+    /// too.
+    fn run(&mut self, format: &Format) -> Ending {
+        {
+            let mut sink = self.sink.lock();
+            sink.start(format);
+            if self.paused {
+                sink.pause();
+            }
+        }
+        self.publish();
+        loop {
+            // Paused: wait for the next command rather than poll.
+            let command = if self.paused {
+                match self.commands.recv() {
+                    Ok(c) => Some(c),
+                    Err(_) => return Ending::Done,
+                }
+            } else {
+                match self.commands.try_recv() {
+                    Ok(c) => Some(c),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => return Ending::Done,
+                }
+            };
+            if let Some(c) = command {
+                if let Some(ending) = self.obey(c) {
+                    return ending;
+                }
+                continue;
+            }
+            match self.block() {
+                Step::Working => self.publish(),
+                Step::Wait(ms) => {
+                    // The sink may have taken part of a block before it
+                    // filled: the position moved.
+                    self.publish();
+                    std::thread::sleep(Duration::from_millis(u64::from(ms)));
+                }
+                Step::Ended(ending) => {
+                    self.publish();
+                    return ending;
+                }
+            }
+        }
+    }
+
+    /// Act on a command; `Some` when it ends the run.
+    fn obey(&mut self, command: Command) -> Option<Ending> {
+        match command {
+            Command::Pause => {
+                self.sink.lock().pause();
+                self.paused = true;
+                self.state.status = Status::Paused;
+            }
+            Command::Resume => {
+                self.sink.lock().resume();
+                self.paused = false;
+                self.state.status = Status::Playing;
+            }
+            Command::Seek(target) => {
+                let rate =
+                    self.state.format.as_ref().map_or(0, |f| f.sample_rate);
+                match seek(&mut self.stream, target, rate) {
+                    Ok((landed, skip)) => {
+                        self.pending.clear();
+                        self.taken = 0;
+                        self.frames_out = 0;
+                        self.base_ms = landed;
+                        self.skip = skip;
+                        self.ended = false;
+                        self.sink.lock().flush();
+                    }
+                    // The track plays on from where it was; the face
+                    // falls back to the published position.
+                    Err(e) => log::warn!("seek: {}", e.0),
+                }
+            }
+            Command::Stop => return Some(Ending::Stopped),
+        }
+        self.publish();
+        None
+    }
+
+    /// One bounded slice of decoding: what is pending offered to the
+    /// sink, then up to [`BLOCK_MS`] of audio decoded.
+    fn block(&mut self) -> Step {
+        if let Some(live) = self.stream.live.as_ref() {
+            if let Some(title) = live.take_title() {
+                if let Some(t) = self.state.track.as_mut() {
+                    // Stations say "Artist - Title".
+                    match title.split_once(" - ") {
+                        Some((artist, name)) if !name.trim().is_empty() => {
+                            t.artist = Some(artist.trim().to_string());
+                            t.title = name.trim().to_string();
+                        }
+                        _ => {
+                            t.artist = None;
+                            t.title = title;
+                        }
+                    }
+                }
+            }
+        }
+        let channels = self
+            .state
+            .format
+            .as_ref()
+            .map_or(1, |f| usize::from(f.channels).max(1));
+        let rate =
+            u64::from(self.state.format.as_ref().map_or(0, |f| f.sample_rate));
+        let budget_frames = (rate * BLOCK_MS / 1000).max(1);
+        let mut decoded_frames: u64 = 0;
+        loop {
+            // Offer what is pending before decoding more.
+            if self.taken < self.pending.len() {
+                let frames =
+                    self.sink.lock().write(&self.pending[self.taken..]);
+                if frames == 0 {
+                    return Step::Wait(SINK_FULL_IDLE_MS);
+                }
+                self.taken += frames * channels;
+                self.frames_out += frames as u64;
+                if self.taken < self.pending.len() {
+                    continue;
+                }
+                self.pending.clear();
+                self.taken = 0;
+            }
+            if self.ended {
+                return Step::Ended(Ending::Done);
+            }
+            if decoded_frames >= budget_frames {
+                return Step::Working;
+            }
+            // A stream from the network is decoded only from what has
+            // arrived; short of that, wait for the fetcher.
+            if self.stream.live.as_mut().is_some_and(|l| !l.ready())
+                || self.stream.ahead.as_ref().is_some_and(|a| !a.ready())
+            {
+                return Step::Wait(BUFFERING_IDLE_MS);
+            }
+            match next_frames(&mut self.stream, &mut self.pending) {
+                Ok(Some((frames, rate, channels_now))) => {
+                    // The decoder has the last word on the format: when
+                    // it differs from what the sink was started with,
+                    // the sink is started again and the state says so.
+                    let differs = self.state.format.as_ref().is_some_and(|f| {
+                        f.sample_rate != rate || f.channels != channels_now
+                    });
+                    if differs {
+                        if let Some(f) = self.state.format.as_mut() {
+                            let played = if f.sample_rate == 0 {
+                                self.base_ms
+                            } else {
+                                self.base_ms
+                                    + self.frames_out * 1000
+                                        / u64::from(f.sample_rate)
+                            };
+                            log::info!(
+                                "format: the decoder gives {rate} Hz {channels_now} ch, the container said {} Hz {} ch; following the decoder",
+                                f.sample_rate, f.channels
+                            );
+                            f.sample_rate = rate;
+                            f.channels = channels_now;
+                            self.sink.lock().start(f);
+                            self.base_ms = played;
+                            self.frames_out = 0;
+                        }
+                    }
+                    decoded_frames += frames;
+                    self.taken = 0;
+                    if self.skip > 0 {
+                        let drop = self.skip.min(frames);
+                        self.taken =
+                            drop as usize * usize::from(channels_now).max(1);
+                        self.skip -= drop;
+                    }
+                }
+                Ok(None) => self.ended = true,
+                Err(e) => {
+                    // The stream is lost; the custody ends with the reason.
+                    log::warn!("decode: {e}; releasing");
+                    self.state.status = Status::Stopped;
+                    self.pending.clear();
+                    self.taken = 0;
+                    self.ended = true;
+                    return Step::Ended(Ending::Failed(e.to_string()));
+                }
+            }
+        }
+    }
+
+    /// The position being heard: what the sink took, less what it still
+    /// holds; then the state as the plugin publishes it.
+    fn publish(&mut self) {
+        let rate = self.state.format.as_ref().map_or(0, |f| f.sample_rate);
+        self.state.position_ms = if rate == 0 {
+            self.base_ms
+        } else {
+            let held = self.sink.lock().held() as u64;
+            let heard = self.frames_out.saturating_sub(held);
+            self.base_ms + heard * 1000 / u64::from(rate)
+        };
+        self.shared.set(&self.state);
+    }
+}
+
+/// What one slice of the decode thread's work came to.
+enum Step {
+    /// Decoded a block; go round again.
+    Working,
+    /// Nothing to do for this many milliseconds: the sink is full or
+    /// the network has not delivered.
+    Wait(u32),
+    /// The run is over.
+    Ended(Ending),
 }
 
 /// Whether a server's `Content-Type` names something this build
@@ -1196,8 +1439,6 @@ mod tests {
     use evo_esp32_sdk::projection::ProjectionKey;
     use evo_esp32_sdk::Ticks;
     use evo_esp32_steward::{Config, Steward};
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use std::thread;
 
     fn catalogue() -> Catalogue {
@@ -1216,10 +1457,14 @@ mod tests {
         }
     }
 
-    /// A sink that takes up to `room` frames a write and keeps them all.
+    /// A sink that holds up to `cap` frames until the test's ear takes
+    /// them ([`Shared::hear`]), and keeps everything it ever took in
+    /// `frames` for the content checks. Full, it takes nothing, and
+    /// the decode thread waits — the pacing a real sink gives.
     #[derive(Default)]
     struct Tape {
-        room: usize,
+        cap: usize,
+        held: usize,
         format: Option<Format>,
         frames: Vec<i16>,
         flushes: u32,
@@ -1227,26 +1472,44 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct Shared(Rc<RefCell<Tape>>);
+    struct Shared(Arc<Mutex<Tape>>);
+
+    impl Shared {
+        fn tape(&self) -> MutexGuard<'_, Tape> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner())
+        }
+
+        /// The ear takes `frames` of what is held.
+        fn hear(&self, frames: usize) {
+            let mut t = self.tape();
+            t.held = t.held.saturating_sub(frames);
+        }
+    }
 
     impl FrameSink for Shared {
         fn start(&mut self, format: &Format) {
-            self.0.borrow_mut().format = Some(format.clone());
+            self.tape().format = Some(format.clone());
         }
         fn write(&mut self, interleaved: &[i16]) -> usize {
-            let mut t = self.0.borrow_mut();
+            let mut t = self.tape();
             let ch = t.format.as_ref().map_or(1, |f| usize::from(f.channels));
-            let frames = (interleaved.len() / ch).min(t.room);
+            let room = t.cap.saturating_sub(t.held);
+            let frames = (interleaved.len() / ch).min(room);
             t.frames.extend_from_slice(&interleaved[..frames * ch]);
+            t.held += frames;
             frames
         }
         fn flush(&mut self) {
-            let mut t = self.0.borrow_mut();
+            let mut t = self.tape();
             t.flushes += 1;
             t.frames.clear();
+            t.held = 0;
         }
         fn stop(&mut self) {
-            self.0.borrow_mut().stops += 1;
+            self.tape().stops += 1;
+        }
+        fn held(&self) -> usize {
+            self.tape().held
         }
     }
 
@@ -1317,9 +1580,9 @@ mod tests {
         path
     }
 
-    fn rig(room: usize) -> (Steward, Shared) {
-        let tape = Shared(Rc::new(RefCell::new(Tape {
-            room,
+    fn rig(cap: usize) -> (Steward, Shared) {
+        let tape = Shared(Arc::new(Mutex::new(Tape {
+            cap,
             ..Tape::default()
         })));
         let mut s = Steward::new(catalogue(), Config::default()).unwrap();
@@ -1391,6 +1654,31 @@ mod tests {
         .unwrap();
     }
 
+    /// Tick from `t` (stepping by the decoding idle, so the warden is
+    /// due each time) until `done` holds, within five seconds of real
+    /// time; the decode thread works between the ticks. Returns the
+    /// time of the last tick.
+    fn until(
+        s: &mut Steward,
+        t: &mut u64,
+        what: &str,
+        mut done: impl FnMut(&Steward) -> bool,
+    ) -> u64 {
+        let began = Instant::now();
+        loop {
+            s.tick(Ticks(*t));
+            if done(s) {
+                return *t;
+            }
+            assert!(
+                began.elapsed() < Duration::from_secs(5),
+                "waited five seconds for: {what}"
+            );
+            thread::sleep(Duration::from_millis(2));
+            *t += u64::from(DECODING_IDLE_MS);
+        }
+    }
+
     #[test]
     fn a_wav_plays_to_the_end_and_every_frame_reaches_the_sink() {
         let frames = 8000; // one second
@@ -1405,10 +1693,10 @@ mod tests {
         assert_eq!(f.codec, "pcm_s16le");
 
         let mut t = 1;
-        while s.tick(Ticks(t)).is_some() && t < 10_000 {
-            t += 1;
-        }
-        let tape = tape.0.borrow();
+        until(&mut s, &mut t, "the track to end", |s| {
+            state(s).status == Status::Stopped
+        });
+        let tape = tape.tape();
         assert_eq!(tape.frames.len(), frames * 2);
         assert_eq!(tape.frames[0..4], [0, 0, 7, -7]);
         assert_eq!(tape.stops, 1);
@@ -1441,48 +1729,79 @@ mod tests {
     }
 
     #[test]
-    fn a_full_sink_bounds_the_tick_and_the_position_follows_the_sink() {
+    fn a_full_sink_holds_the_decoder_and_the_position_follows_the_ear() {
         let path = wav(8000);
-        // 800 frames a write: a tenth of a second per tick.
+        // The sink holds a tenth of a second; nothing is heard yet.
         let (mut s, tape) = rig(800);
-        play(&mut s, file_track(&path), 0).unwrap();
-        // Past any tick the open's wait reached, so the warden is due.
-        s.tick(Ticks(60_000));
-        let got = tape.0.borrow().frames.len() / 2;
-        assert!((800..8000).contains(&got), "took {got} frames");
+        let (_, mut t) = play(&mut s, file_track(&path), 0).unwrap();
+        until(&mut s, &mut t, "the sink to fill", |_| {
+            tape.tape().frames.len() / 2 >= 800
+        });
+        thread::sleep(Duration::from_millis(50));
+        let got = tape.tape().frames.len() / 2;
+        assert_eq!(got, 800, "the full sink took no more");
+        // Everything taken is still held: nothing has been heard.
+        s.tick(Ticks(t + u64::from(DECODING_IDLE_MS)));
         let st = state(&s);
-        assert_eq!(st.position_ms, got as u64 * 1000 / u64::from(RATE));
+        assert_eq!(st.position_ms, 0);
         assert_eq!(st.status, Status::Playing);
+        // The ear takes half; the position follows it, and the decoder
+        // fills the room.
+        tape.hear(400);
+        t += 2 * u64::from(DECODING_IDLE_MS);
+        until(&mut s, &mut t, "the room to be filled", |s| {
+            tape.tape().frames.len() / 2 >= 1200
+                && state(s).position_ms == 400 * 1000 / u64::from(RATE)
+        });
     }
 
     #[test]
     fn pause_holds_and_resume_continues() {
         let path = wav(8000);
         let (mut s, tape) = rig(800);
-        let (h, t0) = play(&mut s, file_track(&path), 0).unwrap();
-        s.tick(Ticks(t0 + 1));
-        let before = tape.0.borrow().frames.len();
-        correct(&mut s, h, Correction::Pause, t0 + 2);
-        s.tick(Ticks(t0 + 100));
-        assert_eq!(tape.0.borrow().frames.len(), before);
+        let (h, mut t) = play(&mut s, file_track(&path), 0).unwrap();
+        until(&mut s, &mut t, "the sink to fill", |_| {
+            tape.tape().frames.len() / 2 >= 800
+        });
+        correct(&mut s, h, Correction::Pause, t + 1);
         assert_eq!(state(&s).status, Status::Paused);
-        correct(&mut s, h, Correction::Resume, t0 + 300);
-        s.tick(Ticks(t0 + 300));
-        assert!(tape.0.borrow().frames.len() > before);
+        // Room appears while paused; the decoder does not use it.
+        thread::sleep(Duration::from_millis(60));
+        tape.hear(800);
+        thread::sleep(Duration::from_millis(60));
+        let before = tape.tape().frames.len();
+        assert_eq!(before / 2, 800, "nothing written while paused");
+        t += 100;
+        correct(&mut s, h, Correction::Resume, t);
+        until(&mut s, &mut t, "frames after the resume", |_| {
+            tape.tape().frames.len() > before
+        });
+        assert_eq!(state(&s).status, Status::Playing);
     }
 
     #[test]
     fn seek_flushes_the_sink_and_moves_the_position() {
         let path = wav(8000);
         let (mut s, tape) = rig(800);
-        let (h, t0) = play(&mut s, file_track(&path), 0).unwrap();
-        s.tick(Ticks(t0 + 1));
-        correct(&mut s, h, Correction::Seek { position_ms: 500 }, t0 + 2);
-        assert_eq!(tape.0.borrow().flushes, 1);
+        let (h, mut t) = play(&mut s, file_track(&path), 0).unwrap();
+        until(&mut s, &mut t, "the sink to fill", |_| {
+            tape.tape().frames.len() / 2 >= 800
+        });
+        correct(&mut s, h, Correction::Seek { position_ms: 500 }, t + 1);
+        // The face hears the target at once; the thread flushes the
+        // sink within a block and lands.
         assert_eq!(state(&s).position_ms, 500);
-        s.tick(Ticks(t0 + 3));
-        let t = tape.0.borrow();
-        // The reader lands on the packet before 500 ms and the warden
+        until(
+            &mut s,
+            &mut t,
+            "the flush and the first frames after it",
+            |_| {
+                let t = tape.tape();
+                t.flushes == 1 && t.frames.len() >= 2
+            },
+        );
+        let t = tape.tape();
+        // The reader lands on the packet before 500 ms and the decoder
         // trims to the frame: the first sample after the flush is frame
         // 4000 of the ramp, not the packet's first.
         assert_eq!(t.frames[0], 4000i16.wrapping_mul(7));
@@ -1493,10 +1812,12 @@ mod tests {
     fn a_start_offset_is_honoured_to_the_frame() {
         let path = wav(8000);
         let (mut s, tape) = rig(800);
-        let (_, t0) = play(&mut s, file_track(&path), 250).unwrap();
+        let (_, mut t) = play(&mut s, file_track(&path), 250).unwrap();
         assert_eq!(state(&s).position_ms, 250);
-        s.tick(Ticks(t0 + 1));
-        assert_eq!(tape.0.borrow().frames[0], 2000i16.wrapping_mul(7));
+        until(&mut s, &mut t, "the first frames", |_| {
+            tape.tape().frames.len() >= 2
+        });
+        assert_eq!(tape.tape().frames[0], 2000i16.wrapping_mul(7));
     }
 
     #[test]
@@ -1552,9 +1873,9 @@ mod tests {
         }
     }
 
-    fn rig_with(room: usize, opener: Served) -> (Steward, Shared) {
-        let tape = Shared(Rc::new(RefCell::new(Tape {
-            room,
+    fn rig_with(cap: usize, opener: Served) -> (Steward, Shared) {
+        let tape = Shared(Arc::new(Mutex::new(Tape {
+            cap,
             ..Tape::default()
         })));
         let mut s = Steward::new(catalogue(), Config::default()).unwrap();
@@ -1599,20 +1920,17 @@ mod tests {
         assign_play(&mut s, tr, 0).unwrap();
         // Back at once, nothing out yet.
         assert_eq!(state(&s).status, Status::Opening);
-        assert!(tape.0.borrow().frames.is_empty());
+        assert!(tape.tape().frames.is_empty());
         let t = settle(&mut s, 5000);
         assert_eq!(state(&s).status, Status::Playing);
         let st = state(&s);
         assert_eq!(st.format.unwrap().sample_rate, RATE);
         // A station's name is its album line.
         assert_eq!(st.track.unwrap().album.as_deref(), Some("x"));
-        let mut i = 0;
-        while tape.0.borrow().frames.len() < 800 && i < 2000 {
-            s.tick(Ticks(t + i));
-            thread::sleep(Duration::from_millis(1));
-            i += 1;
-        }
-        assert!(tape.0.borrow().frames.len() >= 800, "{i} ticks");
+        let mut t = t;
+        until(&mut s, &mut t, "the sink to fill", |_| {
+            tape.tape().frames.len() >= 800
+        });
     }
 
     #[test]
@@ -1632,11 +1950,7 @@ mod tests {
         settle(&mut s, 5000);
         assert_eq!(state(&s).status, Status::Stopped);
         assert!(s.custodies().all(|c| c != h), "released");
-        assert_eq!(
-            tape.0.borrow().stops,
-            0,
-            "a sink never started is not stopped"
-        );
+        assert_eq!(tape.tape().stops, 0, "a sink never started is not stopped");
         let released = s
             .happenings_since(evo_esp32_sdk::happening::Seq(0))
             .happenings
@@ -1668,7 +1982,8 @@ mod tests {
         let (h, t0) = play(&mut s, tr, 0).unwrap();
         correct(&mut s, h, Correction::Pause, t0 + 1);
         settle(&mut s, t0 + 5000);
+        thread::sleep(Duration::from_millis(60));
         assert_eq!(state(&s).status, Status::Paused);
-        assert!(tape.0.borrow().frames.is_empty());
+        assert!(tape.tape().frames.is_empty());
     }
 }

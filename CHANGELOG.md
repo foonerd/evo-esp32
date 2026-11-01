@@ -31,6 +31,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   password the player cannot open. `evostatus.txt` says what was
   sealed. A lock on the card, not a vault: the key is in the device.
 
+- The decoder runs on a thread of its own. Until now the playback
+  plugin decoded on the main task, fifty milliseconds at a time between
+  the touch, the network and the face, and the loop held the face back
+  whenever the sink's reservoir ran low. Each track now gets a decode
+  thread one priority above the loop: it owns the stream and the sink,
+  decodes block by block, waits when the sink is full, and takes
+  pause, resume, seek and stop as commands between blocks; its
+  position, format and a station's title come back through shared
+  state. The loop's part is a hand-over measured in microseconds, and
+  the face paints when it likes. The gate that held the face back
+  stays in place for now; it simply has nothing to do.
+
 ## [0.2.6] - 2026-10-31
 
 - PCM5122 boards with oscillators of their own play every rate. The
