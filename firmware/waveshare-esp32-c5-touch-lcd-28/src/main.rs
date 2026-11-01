@@ -2457,6 +2457,8 @@ struct CoreShares {
     /// By the kernel's task number: two tasks may share a name.
     last: std::collections::HashMap<u32, u32>,
     last_total: u32,
+    /// The task count last reported; the names are listed when it moves.
+    last_count: Option<usize>,
 }
 
 impl CoreShares {
@@ -2464,6 +2466,7 @@ impl CoreShares {
         Self {
             last: std::collections::HashMap::new(),
             last_total: 0,
+            last_count: None,
         }
     }
 
@@ -2508,11 +2511,32 @@ impl CoreShares {
         }
         self.last = seen;
         shares.sort_by_key(|a| std::cmp::Reverse(a.1));
-        shares
+        let mut line = shares
             .iter()
             .map(|(n, p)| format!("{n} {p}%"))
             .collect::<Vec<_>>()
-            .join("  ")
+            .join("  ");
+        // The task count, and every task by name when it changed: a
+        // thread that never exits shows itself here, 352 B of internal
+        // SRAM (its control block) at a time.
+        let count = statuses.len();
+        line.push_str(&format!("  [{count} tasks"));
+        if self.last_count != Some(count) {
+            let mut names: Vec<String> = statuses
+                .iter()
+                .map(|s| {
+                    // SAFETY: as above.
+                    unsafe { std::ffi::CStr::from_ptr(s.pcTaskName) }
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            line.push_str(&format!(": {}", names.join(" ")));
+            self.last_count = Some(count);
+        }
+        line.push(']');
+        line
     }
 }
 
