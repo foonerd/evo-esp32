@@ -424,3 +424,106 @@ pub fn card_chunk(
     log::info!("ring: {len} B chunk for the card in internal DMA memory");
     Box::new(DmaChunk { p: p.cast(), len })
 }
+
+/// A census of the internal heap's used blocks between two heartbeats.
+/// What appeared since the last census and is still there at the next
+/// is what a track left behind; its size names the culprit before any
+/// deeper trace is switched on.
+pub struct Census {
+    /// Used blocks at the last census: address → size.
+    last: std::collections::BTreeMap<usize, usize>,
+    /// Blocks that were new at the last census.
+    appeared: std::collections::BTreeMap<usize, usize>,
+}
+
+impl Census {
+    pub fn new() -> Self {
+        Self {
+            last: std::collections::BTreeMap::new(),
+            appeared: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Walk the internal heap and say what moved: the used blocks and
+    /// their bytes; what is new since the last census; and what was new
+    /// at the last census and is still here — the leak candidates, as
+    /// `size×count`.
+    pub fn take(&mut self) -> String {
+        let mut now: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        unsafe extern "C" fn walker(
+            _heap: sys::walker_heap_into_t,
+            block: sys::walker_block_info_t,
+            user: *mut c_void,
+        ) -> bool {
+            if block.used {
+                // SAFETY: `user` is the map this walk was given, alive
+                // for the walk.
+                let map = unsafe {
+                    &mut *user
+                        .cast::<std::collections::BTreeMap<usize, usize>>()
+                };
+                map.insert(block.ptr as usize, block.size);
+            }
+            true
+        }
+        // SAFETY: the walker reads each block's record under the heap's
+        // lock and writes only into the map passed through `user`.
+        unsafe {
+            sys::heap_caps_walk(
+                sys::MALLOC_CAP_INTERNAL,
+                Some(walker),
+                (&mut now as *mut std::collections::BTreeMap<usize, usize>)
+                    .cast(),
+            );
+        }
+        let bytes: usize = now.values().sum();
+        let new: Vec<usize> = now
+            .iter()
+            .filter(|(p, _)| !self.last.contains_key(p))
+            .map(|(_, s)| *s)
+            .collect();
+        let kept: Vec<usize> = self
+            .appeared
+            .iter()
+            .filter(|(p, s)| now.get(p) == Some(s))
+            .map(|(_, s)| *s)
+            .collect();
+        self.appeared = now
+            .iter()
+            .filter(|(p, _)| !self.last.contains_key(p))
+            .map(|(p, s)| (*p, *s))
+            .collect();
+        self.last = now;
+        format!(
+            "census: {} used blocks, {bytes} B; new {}; kept from last {}",
+            self.last.len(),
+            histogram(&new),
+            histogram(&kept)
+        )
+    }
+}
+
+impl Default for Census {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `352×2 96×1`, largest first; `none` for nothing.
+fn histogram(sizes: &[usize]) -> String {
+    if sizes.is_empty() {
+        return "none".into();
+    }
+    let mut counts: std::collections::BTreeMap<usize, usize> =
+        std::collections::BTreeMap::new();
+    for s in sizes {
+        *counts.entry(*s).or_default() += 1;
+    }
+    counts
+        .iter()
+        .rev()
+        .map(|(s, n)| format!("{s}×{n}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}

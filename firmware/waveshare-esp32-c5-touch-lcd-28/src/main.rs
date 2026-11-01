@@ -898,6 +898,7 @@ fn main() -> anyhow::Result<()> {
     let mut last_beat = Instant::now();
     let mut last_idle = Instant::now();
     let mut shares = CoreShares::new();
+    let mut census = alloc::Census::new();
     let mut busy = Duration::ZERO;
     // What a finger waits for: the first touch report of a run until the
     // face next looks; and the longest turn of the loop, which is the
@@ -2045,6 +2046,7 @@ fn main() -> anyhow::Result<()> {
                 "heap: internal largest block {largest} B, DMA-capable {largest_dma} B; {}",
                 alloc::Account::now().line()
             );
+            info!("{}", census.take());
             if largest_dma < DMA_TRIPWIRE {
                 warn!(
                     "heap: the largest DMA-capable block is {largest_dma} B: the card and the panel are about to fail their reads and writes"
