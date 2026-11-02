@@ -911,21 +911,39 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         if frames == 0 {
             return 0;
         }
-        self.scratch.clear();
-        self.scratch.reserve(frames * FRAME_BYTES);
-        for f in interleaved[..frames * ch].chunks_exact(ch) {
-            let l = f[0].to_le_bytes();
-            let r = if ch >= 2 { f[1].to_le_bytes() } else { l };
-            self.scratch.extend_from_slice(&l);
-            self.scratch.extend_from_slice(&r);
-        }
-        let n = self.reservoir.push(&self.scratch);
+        // Stereo 16-bit little-endian is the wire's own layout: the
+        // samples go to the reservoir as they are. Through the scratch
+        // (a PSRAM buffer written and read again) the write cost 11% of
+        // the core at 96 kHz, measured 2026-11-02; PSRAM moves at
+        // ~10 MB/s here. Mono is doubled and more than two channels are
+        // cut to the first two through the scratch.
+        let bytes: &[u8] = if ch == 2 {
+            let samples = &interleaved[..frames * 2];
+            // SAFETY: i16 has no padding and the chip is little-endian;
+            // the view covers exactly the samples' bytes.
+            unsafe {
+                core::slice::from_raw_parts(
+                    samples.as_ptr().cast::<u8>(),
+                    samples.len() * 2,
+                )
+            }
+        } else {
+            self.scratch.clear();
+            self.scratch.reserve(frames * FRAME_BYTES);
+            for f in interleaved[..frames * ch].chunks_exact(ch) {
+                let l = f[0].to_le_bytes();
+                let r = if ch >= 2 { f[1].to_le_bytes() } else { l };
+                self.scratch.extend_from_slice(&l);
+                self.scratch.extend_from_slice(&r);
+            }
+            &self.scratch
+        };
+        let n = self.reservoir.push(bytes);
         let whole = n / FRAME_BYTES;
         let part = n % FRAME_BYTES;
         if part != 0 {
             self.carry.extend_from_slice(
-                &self.scratch
-                    [whole * FRAME_BYTES + part..(whole + 1) * FRAME_BYTES],
+                &bytes[whole * FRAME_BYTES + part..(whole + 1) * FRAME_BYTES],
             );
         }
         let took = whole + usize::from(part != 0);
