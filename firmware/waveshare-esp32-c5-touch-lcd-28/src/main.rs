@@ -2090,7 +2090,8 @@ fn main() -> anyhow::Result<()> {
                 // The audio path's cost since the last heartbeat, by
                 // stage, in milliseconds of the ten seconds.
                 let now = (
-                    org_evoframework_playback_symphonia::measure::Account::now(),
+                    org_evoframework_playback_symphonia::measure::Account::now(
+                    ),
                     sink::FeederAccount::now(),
                     org_evoframework_playback_symphonia::ahead::Account::now(),
                 );
