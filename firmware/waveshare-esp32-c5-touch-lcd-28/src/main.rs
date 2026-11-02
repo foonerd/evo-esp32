@@ -946,6 +946,11 @@ fn main() -> anyhow::Result<()> {
     let mut last_idle = Instant::now();
     let mut shares = CoreShares::new();
     let mut census = alloc::Census::new();
+    let mut audio_account = (
+        org_evoframework_playback_symphonia::measure::Account::now(),
+        sink::FeederAccount::now(),
+        org_evoframework_playback_symphonia::ahead::Account::now(),
+    );
     #[cfg(feature = "heap-trace")]
     alloc::trace::init();
     let mut busy = Duration::ZERO;
@@ -2081,6 +2086,33 @@ fn main() -> anyhow::Result<()> {
             }
             report_playback(&steward, track_started.elapsed());
             info!("core: {}", shares.line());
+            {
+                // The audio path's cost since the last heartbeat, by
+                // stage, in milliseconds of the ten seconds.
+                let now = (
+                    org_evoframework_playback_symphonia::measure::Account::now(),
+                    sink::FeederAccount::now(),
+                    org_evoframework_playback_symphonia::ahead::Account::now(),
+                );
+                let d = now.0.since(audio_account.0);
+                let f = now.1.since(audio_account.1);
+                let r = now.2.since(audio_account.2);
+                audio_account = now;
+                let low = sink::take_lead_low(lead.rate())
+                    .map_or("-".to_string(), |ms| format!("{ms} ms"));
+                info!(
+                    "audio: codec {} ms in {} packets, sink write {} ms; feeder pop {} ms, scale {} ms, dma {} ms in {} pops; card reads {} ms, seeks {} ms; lowest lead {low}",
+                    d.decode_us / 1000,
+                    d.packets,
+                    d.sink_write_us / 1000,
+                    f.pop_us / 1000,
+                    f.scale_us / 1000,
+                    f.write_us / 1000,
+                    f.pops,
+                    r.read_ms,
+                    r.seek_ms
+                );
+            }
             if let Some(line) = sink::report_dry() {
                 warn!("sink: {line}");
             }

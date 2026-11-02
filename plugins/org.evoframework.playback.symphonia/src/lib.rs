@@ -93,6 +93,7 @@ use symphonia::core::units::{Time, TimeBase, Timestamp};
 pub mod ahead;
 pub mod flac;
 pub mod hls;
+pub mod measure;
 pub mod netfile;
 pub mod stream;
 pub mod ts;
@@ -941,8 +942,10 @@ impl Decoder {
         loop {
             // Offer what is pending before decoding more.
             if self.taken < self.pending.len() {
+                let writing = Instant::now();
                 let frames =
                     self.sink.lock().write(&self.pending[self.taken..]);
+                measure::add(&measure::SINK_WRITE_US, writing);
                 if frames == 0 {
                     return Step::Wait(SINK_FULL_IDLE_MS);
                 }
@@ -967,7 +970,11 @@ impl Decoder {
             {
                 return Step::Wait(BUFFERING_IDLE_MS);
             }
-            match next_frames(&mut self.stream, &mut self.pending) {
+            let decoding = Instant::now();
+            let next = next_frames(&mut self.stream, &mut self.pending);
+            measure::add(&measure::DECODE_US, decoding);
+            measure::PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match next {
                 Ok(Some((frames, rate, channels_now))) => {
                     // The decoder has the last word on the format: when
                     // it differs from what the sink was started with,

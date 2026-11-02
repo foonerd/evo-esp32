@@ -95,6 +95,61 @@ const PRIME_MS: u32 = 250;
 /// worst starvation in milliseconds; read and cleared by [`report_dry`].
 static DRY_COUNT: AtomicU32 = AtomicU32::new(0);
 static DRY_WORST_MS: AtomicU32 = AtomicU32::new(0);
+/// The feeder's time since boot, microseconds, by stage: the pop from
+/// the reservoir (PSRAM into internal), the scaling, the DMA write;
+/// and the least the reservoir held at a pop since the last report.
+static POP_US: AtomicU32 = AtomicU32::new(0);
+static SCALE_US: AtomicU32 = AtomicU32::new(0);
+static WRITE_US: AtomicU32 = AtomicU32::new(0);
+static POPS: AtomicU32 = AtomicU32::new(0);
+static LEAD_LOW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// The feeder's account since boot, for differencing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FeederAccount {
+    /// Microseconds taking from the reservoir.
+    pub pop_us: u32,
+    /// Microseconds scaling.
+    pub scale_us: u32,
+    /// Microseconds writing the DMA, waits included.
+    pub write_us: u32,
+    /// Chunks popped.
+    pub pops: u32,
+}
+
+impl FeederAccount {
+    /// The counters now.
+    pub fn now() -> Self {
+        Self {
+            pop_us: POP_US.load(Ordering::Relaxed),
+            scale_us: SCALE_US.load(Ordering::Relaxed),
+            write_us: WRITE_US.load(Ordering::Relaxed),
+            pops: POPS.load(Ordering::Relaxed),
+        }
+    }
+
+    /// What was added since `earlier`.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            pop_us: self.pop_us.wrapping_sub(earlier.pop_us),
+            scale_us: self.scale_us.wrapping_sub(earlier.scale_us),
+            write_us: self.write_us.wrapping_sub(earlier.write_us),
+            pops: self.pops.wrapping_sub(earlier.pops),
+        }
+    }
+}
+
+/// The least the reservoir held at a pop since the last call, in
+/// milliseconds at the rate in hand; `None` if the feeder did not pop.
+pub fn take_lead_low(rate: u32) -> Option<u32> {
+    let low = LEAD_LOW.swap(usize::MAX, Ordering::Relaxed);
+    (low != usize::MAX)
+        .then(|| (low / FRAME_BYTES * 1000 / rate.max(1) as usize) as u32)
+}
+
+fn add_us(to: &AtomicU32, since: Instant) {
+    to.fetch_add(since.elapsed().as_micros() as u32, Ordering::Relaxed);
+}
 
 /// The lead a ring of `buffers` holds at `rate`, in milliseconds. The
 /// driver hands the writer each buffer as it finishes, so the ring plays
@@ -353,6 +408,11 @@ impl Reservoir {
 pub struct Lead(Arc<Reservoir>);
 
 impl Lead {
+    /// The stream's rate, for the heartbeat's figures.
+    pub fn rate(&self) -> u32 {
+        self.0.rate.load(Ordering::Relaxed)
+    }
+
     /// Milliseconds of audio held while a stream is being written;
     /// `None` when nothing is streaming (idle, paused, between tracks).
     pub fn ms(&self) -> Option<u32> {
@@ -707,7 +767,10 @@ fn feed(
             }
             reservoir.prime.store(0, Ordering::Relaxed);
         }
+        LEAD_LOW.fetch_min(reservoir.readable(), Ordering::Relaxed);
+        let popping = Instant::now();
         let n = reservoir.pop(&mut chunk);
+        add_us(&POP_US, popping);
         if n == 0 {
             if reservoir.armed.load(Ordering::Relaxed) && dry_since.is_none() {
                 dry_since = Some(Instant::now());
@@ -727,7 +790,11 @@ fn feed(
                 DRY_WORST_MS.fetch_max(dry, Ordering::Relaxed);
             }
         }
+        POPS.fetch_add(1, Ordering::Relaxed);
+        let scaling = Instant::now();
         scale(&mut chunk[..n], volume.gain());
+        add_us(&SCALE_US, scaling);
+        let writing = Instant::now();
         let mut offset = 0;
         while offset < n {
             match i2s.write(&chunk[offset..n], 200) {
@@ -745,6 +812,7 @@ fn feed(
                 }
             }
         }
+        add_us(&WRITE_US, writing);
     }
 }
 
