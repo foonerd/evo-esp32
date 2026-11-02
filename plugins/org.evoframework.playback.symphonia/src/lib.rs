@@ -786,7 +786,7 @@ fn begin(
         paused: hold,
     };
     let thread = evo_esp32_sdk::thread::spawn(
-        evo_esp32_sdk::thread::Role::Feed,
+        evo_esp32_sdk::thread::Role::Decode,
         "decode",
         DECODE_STACK,
         move || {

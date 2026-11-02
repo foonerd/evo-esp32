@@ -27,6 +27,10 @@ pub enum Role {
     /// station's fetcher, a room's receiver. It must not wait on
     /// anything that is not audio.
     Feed,
+    /// It turns bytes into frames: a decoder. It takes the core for as
+    /// long as the sink has room, which at a track's start is all of
+    /// it; the face must still be able to paint the new track.
+    Decode,
     /// It works in the background: an open, a listing, a search for
     /// servers, a session with a peer. The face comes first.
     Background,
