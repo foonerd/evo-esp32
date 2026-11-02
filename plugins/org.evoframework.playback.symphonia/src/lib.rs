@@ -283,7 +283,7 @@ struct Decoder {
     shared: Arc<SharedState>,
     commands: Receiver<Command>,
     /// Interleaved samples decoded but not yet taken by the sink.
-    pending: Vec<i16>,
+    pending: Vec<i32>,
     /// How far into `pending` the sink has got, in samples.
     taken: usize,
     /// Frames the sink has accepted since `base_ms`.
@@ -1389,7 +1389,9 @@ fn seek(
     Ok((ms, skip))
 }
 
-/// Decode the next packet of the track into `out` as interleaved i16.
+/// Decode the next packet of the track into `out` as interleaved i32,
+/// the source's bits at the top (Symphonia widens a 16- or 24-bit
+/// source by shifting; nothing is lost on the way to the sink).
 /// `Ok(Some(frames))` for frames appended, `Ok(None)` at the end of the
 /// stream; malformed packets are skipped, not errors.
 /// The next packet's frames into `out`: how many, and the rate and
@@ -1398,7 +1400,7 @@ fn seek(
 /// rate; an MP3's first frame may correct the probe).
 fn next_frames(
     stream: &mut Stream,
-    out: &mut Vec<i16>,
+    out: &mut Vec<i32>,
 ) -> Result<Option<(u64, u32, u8)>, SymphoniaError> {
     loop {
         let packet = match stream.reader.next_packet() {
@@ -1427,7 +1429,7 @@ fn next_frames(
                 let spec = buf.spec();
                 let rate = spec.rate();
                 let channels = spec.channels().count().clamp(1, 255) as u8;
-                buf.copy_to_vec_interleaved::<i16>(out);
+                buf.copy_to_vec_interleaved::<i32>(out);
                 return Ok(Some((frames, rate, channels)));
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
@@ -1491,7 +1493,7 @@ mod tests {
         cap: usize,
         held: usize,
         format: Option<Format>,
-        frames: Vec<i16>,
+        frames: Vec<i32>,
         flushes: u32,
         stops: u32,
     }
@@ -1515,7 +1517,7 @@ mod tests {
         fn start(&mut self, format: &Format) {
             self.tape().format = Some(format.clone());
         }
-        fn write(&mut self, interleaved: &[i16]) -> usize {
+        fn write(&mut self, interleaved: &[i32]) -> usize {
             let mut t = self.tape();
             let ch = t.format.as_ref().map_or(1, |f| usize::from(f.channels));
             let room = t.cap.saturating_sub(t.held);
@@ -1723,7 +1725,7 @@ mod tests {
         });
         let tape = tape.tape();
         assert_eq!(tape.frames.len(), frames * 2);
-        assert_eq!(tape.frames[0..4], [0, 0, 7, -7]);
+        assert_eq!(tape.frames[0..4], [0, 0, 7 << 16, -7 << 16]);
         assert_eq!(tape.stops, 1);
         assert_eq!(state(&s).status, Status::Stopped, "released at the end");
     }
@@ -1829,8 +1831,8 @@ mod tests {
         // The reader lands on the packet before 500 ms and the decoder
         // trims to the frame: the first sample after the flush is frame
         // 4000 of the ramp, not the packet's first.
-        assert_eq!(t.frames[0], 4000i16.wrapping_mul(7));
-        assert_eq!(t.frames[1], -(4000i16.wrapping_mul(7)));
+        assert_eq!(t.frames[0], i32::from(4000i16.wrapping_mul(7)) << 16);
+        assert_eq!(t.frames[1], i32::from(-(4000i16.wrapping_mul(7))) << 16);
     }
 
     #[test]
@@ -1842,7 +1844,10 @@ mod tests {
         until(&mut s, &mut t, "the first frames", |_| {
             tape.tape().frames.len() >= 2
         });
-        assert_eq!(tape.tape().frames[0], 2000i16.wrapping_mul(7));
+        assert_eq!(
+            tape.tape().frames[0],
+            i32::from(2000i16.wrapping_mul(7)) << 16
+        );
     }
 
     #[test]

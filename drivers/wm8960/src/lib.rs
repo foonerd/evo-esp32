@@ -68,8 +68,20 @@ pub enum Error<E> {
     /// The bus said no.
     Bus(E),
     /// No clock setting exists for the rate asked: above 48 kHz, or not
-    /// a rate the DAC divider makes.
+    /// a rate the DAC divider makes; or a word length the interface has
+    /// no code for (16, 20, 24 or 32 bits).
     Unsupported,
+}
+
+/// R7's WL code for a word length in bits.
+fn word_length(bits: u8) -> Option<u16> {
+    Some(match bits {
+        16 => 0b00,
+        20 => 0b01,
+        24 => 0b10,
+        32 => 0b11,
+        _ => return None,
+    })
 }
 
 impl<E> From<E> for Error<E> {
@@ -107,8 +119,10 @@ const SYSCLKDIV_2: u16 = 0b10 << 1;
 const DACDIV_SHIFT: u16 = 3;
 // R5 ADC & DAC control (1).
 const DACMU: u16 = 1 << 3;
-// R7 Audio interface: I2S, 16-bit words, slave, nothing inverted.
-const IFACE_I2S_16_SLAVE: u16 = 0b10;
+// R7 Audio interface: I2S (FORMAT 10), slave, nothing inverted; the
+// word length in WL, bits 3:2.
+const IFACE_I2S_SLAVE: u16 = 0b10;
+const WL_SHIFT: u16 = 2;
 // R25 Power (1).
 const VMID_50K: u16 = 0b01 << 7;
 const VMID_250K: u16 = 0b10 << 7;
@@ -314,20 +328,23 @@ impl<I2C: I2c> Wm8960<I2C> {
         self.write(POWER1, VMID_50K)
     }
 
-    /// Start the DAC path for a stream at `rate`: the reference on, the
-    /// clocks, the interface, the DAC into both output mixers, the
-    /// headphone and speaker amplifiers at 0 dB, the DAC unmuted. The
-    /// level is left to the device (the DAC at 0 dB, the outputs at
-    /// 0 dB) unless the volumes are set.
+    /// Start the DAC path for a stream at `rate` with words of `bits`
+    /// (16, 20, 24 or 32) in I2S framing: the reference on, the clocks,
+    /// the interface, the DAC into both output mixers, the headphone
+    /// and speaker amplifiers at 0 dB, the DAC unmuted. The level is
+    /// left to the device (the DAC at 0 dB, the outputs at 0 dB) unless
+    /// the volumes are set.
     pub fn start(
         &mut self,
         rate: u32,
+        bits: u8,
         delay: &mut impl DelayNs,
     ) -> Result<(), Error<I2C::Error>> {
         let clocks = clocks_for(rate).ok_or(Error::Unsupported)?;
+        let wl = word_length(bits).ok_or(Error::Unsupported)?;
         self.update(POWER1, VREF, VREF)?;
         self.write(APOP1, BUFIOEN)?;
-        self.write(IFACE1, IFACE_I2S_16_SLAVE)?;
+        self.write(IFACE1, IFACE_I2S_SLAVE | (wl << WL_SHIFT))?;
         self.set_clocks(clocks, delay)?;
         // The DAC into the mixers, the mixers on.
         self.write(LOUTMIX, D2O)?;
@@ -520,7 +537,7 @@ mod tests {
         ]);
         let mut codec = Wm8960::new(i2c.clone());
         codec.open().unwrap();
-        codec.start(44_100, &mut NoopDelay).unwrap();
+        codec.start(44_100, 16, &mut NoopDelay).unwrap();
         i2c.done();
     }
 

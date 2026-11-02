@@ -28,7 +28,7 @@ pub struct PacedWav {
     out: Option<Wav>,
     format: Option<Format>,
     /// Interleaved samples taken but not yet let out.
-    held: VecDeque<i16>,
+    held: VecDeque<i32>,
     /// When the stream started, and frames let out since.
     clock: Option<Instant>,
     let_out: u64,
@@ -78,7 +78,7 @@ impl PacedWav {
         if samples == 0 {
             return;
         }
-        let out: Vec<i16> = self.held.drain(..samples).collect();
+        let out: Vec<i32> = self.held.drain(..samples).collect();
         self.let_out += (samples / ch) as u64;
         if let Some(w) = self.out.as_mut() {
             if let Err(e) = w.write(&out) {
@@ -109,7 +109,7 @@ impl FrameSink for PacedWav {
         }
     }
 
-    fn write(&mut self, interleaved: &[i16]) -> usize {
+    fn write(&mut self, interleaved: &[i32]) -> usize {
         self.drain();
         let ch = self.channels();
         let frames = (interleaved.len() / ch).min(self.room());
@@ -129,7 +129,7 @@ impl FrameSink for PacedWav {
             return;
         }
         // The tail goes out whole; a real sink would play it to the end.
-        let rest: Vec<i16> = self.held.drain(..).collect();
+        let rest: Vec<i32> = self.held.drain(..).collect();
         if let Some(mut w) = self.out.take() {
             if let Err(e) = w.write(&rest).and_then(|()| w.finish()) {
                 eprintln!("wav: {e}");
@@ -167,10 +167,11 @@ impl Wav {
         Ok(Self { file, bytes: 0 })
     }
 
-    /// Append interleaved samples.
-    pub fn write(&mut self, samples: &[i16]) -> io::Result<()> {
+    /// Append interleaved samples: the top 16 bits of each, this being a
+    /// 16-bit file for the desk's ear and the check's byte count.
+    pub fn write(&mut self, samples: &[i32]) -> io::Result<()> {
         for s in samples {
-            self.file.write_all(&s.to_le_bytes())?;
+            self.file.write_all(&((s >> 16) as i16).to_le_bytes())?;
         }
         self.bytes += (samples.len() * 2) as u32;
         Ok(())
@@ -203,8 +204,8 @@ pub fn write_tone(path: &Path, rate: u32, ms: u64) -> io::Result<()> {
     for i in 0..frames {
         let t = i as f64 / f64::from(rate);
         let s = ((t * 440.0 * std::f64::consts::TAU).sin() * 12000.0) as i16;
-        buf.push(s);
-        buf.push(s);
+        buf.push(i32::from(s) << 16);
+        buf.push(i32::from(s) << 16);
         if buf.len() == buf.capacity() {
             w.write(&buf)?;
             buf.clear();
@@ -232,11 +233,11 @@ mod tests {
         let mut s = PacedWav::new(None);
         s.start(&fmt());
         // 1000 frames/s and a 200 ms lead: 200 frames of room at t=0.
-        let took = s.write(&[0i16; 2 * 1000]);
+        let took = s.write(&[0i32; 2 * 1000]);
         assert!(took <= 200 && took > 150, "took {took}");
-        assert_eq!(s.write(&[0i16; 2 * 100]), 0, "full");
+        assert_eq!(s.write(&[0i32; 2 * 100]), 0, "full");
         std::thread::sleep(Duration::from_millis(60));
-        let more = s.write(&[0i16; 2 * 1000]);
+        let more = s.write(&[0i32; 2 * 1000]);
         assert!(more >= 40, "the clock released {more}");
     }
 
@@ -248,10 +249,10 @@ mod tests {
         let path = dir.join("out.wav");
         let mut s = PacedWav::new(Some(path.clone()));
         s.start(&fmt());
-        s.write(&[1i16; 2 * 50]);
+        s.write(&[1i32 << 16; 2 * 50]);
         s.flush();
         assert!(s.held.is_empty());
-        s.write(&[2i16; 2 * 30]);
+        s.write(&[2i32 << 16; 2 * 30]);
         s.stop();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..4], b"RIFF");

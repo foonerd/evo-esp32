@@ -155,7 +155,7 @@ struct Chunk {
 /// bulk memory; a chunk is copied in and copied out.
 #[derive(Default)]
 struct Queue {
-    ring: Vec<i16>,
+    ring: Vec<i32>,
     head: usize,
     len: usize,
     chunks: VecDeque<Chunk>,
@@ -181,7 +181,7 @@ impl Queue {
 
     /// Append; the oldest chunks go when there is no room. The chunks
     /// dropped.
-    fn push(&mut self, due_us: i64, frames: usize, samples: &[i16]) -> u64 {
+    fn push(&mut self, due_us: i64, frames: usize, samples: &[i32]) -> u64 {
         let mut dropped = 0;
         if samples.len() > self.ring.len() {
             return 1;
@@ -204,7 +204,7 @@ impl Queue {
     }
 
     /// The front chunk's samples into `out` (replaced), and the chunk.
-    fn pop_into(&mut self, out: &mut Vec<i16>) -> Option<Chunk> {
+    fn pop_into(&mut self, out: &mut Vec<i32>) -> Option<Chunk> {
         let chunk = *self.chunks.front()?;
         let channels = self.sized_for.1;
         let n = chunk.frames * channels;
@@ -385,7 +385,7 @@ impl Link {
         &self,
         due_us: i64,
         frames: usize,
-        samples: &[i16],
+        samples: &[i32],
         rate: u32,
         channels: usize,
         buffer_ms: i64,
@@ -408,7 +408,7 @@ impl Link {
         self.0.queue.lock().ok()?.peek_due()
     }
 
-    fn pop_into(&self, out: &mut Vec<i16>) -> Option<Chunk> {
+    fn pop_into(&self, out: &mut Vec<i32>) -> Option<Chunk> {
         self.0.queue.lock().ok()?.pop_into(out)
     }
 
@@ -441,7 +441,7 @@ struct InHand {
     state: State,
     generation: u32,
     frames_out: u64,
-    pending: Vec<i16>,
+    pending: Vec<i32>,
     taken: usize,
     /// Frames dropped and doubled to hold the clocks together.
     dropped_frames: u64,
@@ -655,11 +655,14 @@ impl Warden for SnapcastReceiver {
         };
         let rate = i64::from(session.rate.max(1));
         let channels = usize::from(session.channels.max(1));
-        let gain = if session.muted {
-            0.0
+        // The server's volume as a Q15 gain, squared for a taper that
+        // the ear finds even; applied in 64-bit, not per sample in
+        // floating point, which the chip has no unit for.
+        let gain: i64 = if session.muted {
+            0
         } else {
-            let v = f32::from(session.volume.min(100)) / 100.0;
-            v * v
+            let v = i64::from(session.volume.min(100));
+            v * v * 32768 / 10_000
         };
         let progress = loop {
             if h.taken < h.pending.len() {
@@ -739,7 +742,7 @@ impl Warden for SnapcastReceiver {
                         if lean > 0 {
                             samples.drain(at * channels..(at + 1) * channels);
                         } else {
-                            let frame: Vec<i16> = samples
+                            let frame: Vec<i32> = samples
                                 [at * channels..(at + 1) * channels]
                                 .to_vec();
                             samples.splice(at * channels..at * channels, frame);
@@ -755,9 +758,9 @@ impl Warden for SnapcastReceiver {
                     h.ages.pop_front();
                 }
             }
-            if gain < 1.0 {
+            if gain < 32768 {
                 for s in samples.iter_mut() {
-                    *s = (f32::from(*s) * gain) as i16;
+                    *s = ((i64::from(*s) * gain) >> 15) as i32;
                 }
             }
             h.taken = 0;
@@ -1016,7 +1019,7 @@ fn serve(
                 let (frames, bad) = match &mut codec {
                     Codec::Flac(f) => f.decode_chunk(&payload, &mut out),
                     Codec::Pcm => {
-                        (pcm_to_i16(&payload, bits, channels, &mut out), 0)
+                        (pcm_to_i32(&payload, bits, channels, &mut out), 0)
                     }
                     Codec::None => continue,
                 };
@@ -1102,22 +1105,28 @@ fn serve(
     }
 }
 
-/// PCM bytes of `bits` depth into i16 samples; the frames appended.
-fn pcm_to_i16(
+/// PCM bytes of `bits` depth into i32 samples, the source's bits at
+/// the top; the frames appended. A 24-bit stream keeps all of its bits.
+fn pcm_to_i32(
     bytes: &[u8],
     bits: u8,
     channels: usize,
-    out: &mut Vec<i16>,
+    out: &mut Vec<i32>,
 ) -> usize {
     let width = usize::from(bits.max(8) / 8);
     let samples = bytes.len() / width;
     out.reserve(samples);
     for s in bytes.chunks_exact(width) {
         out.push(match width {
-            1 => i16::from(s[0] as i8) << 8,
-            2 => i16::from_le_bytes([s[0], s[1]]),
-            3 => i16::from_le_bytes([s[1], s[2]]),
-            _ => i16::from_le_bytes([s[width - 2], s[width - 1]]),
+            1 => i32::from(s[0] as i8) << 24,
+            2 => i32::from(i16::from_le_bytes([s[0], s[1]])) << 16,
+            3 => i32::from_le_bytes([0, s[0], s[1], s[2]]),
+            _ => i32::from_le_bytes([
+                s[width - 4],
+                s[width - 3],
+                s[width - 2],
+                s[width - 1],
+            ]),
         });
     }
     samples / channels.max(1)
@@ -1140,7 +1149,7 @@ mod tests {
         let mut q = Queue::default();
         q.fit(1000, 2, 1);
         assert_eq!(q.ring.len(), 2001 * 2);
-        let chunk = |v: i16| vec![v; 600 * 2];
+        let chunk = |v: i32| vec![v; 600 * 2];
         assert_eq!(q.push(0, 600, &chunk(1)), 0);
         assert_eq!(q.push(600, 600, &chunk(2)), 0);
         assert_eq!(q.push(1200, 600, &chunk(3)), 0);
@@ -1181,7 +1190,7 @@ mod tests {
 
     #[derive(Default)]
     struct Tape {
-        frames: Vec<i16>,
+        frames: Vec<i32>,
         starts: Vec<Format>,
         stops: usize,
     }
@@ -1193,7 +1202,7 @@ mod tests {
         fn start(&mut self, format: &Format) {
             self.0.borrow_mut().starts.push(format.clone());
         }
-        fn write(&mut self, interleaved: &[i16]) -> usize {
+        fn write(&mut self, interleaved: &[i32]) -> usize {
             self.0.borrow_mut().frames.extend_from_slice(interleaved);
             interleaved.len() / 2
         }
@@ -1455,7 +1464,7 @@ mod tests {
             );
             assert_eq!(t.frames[0], 0);
             assert_eq!(t.frames[1], 0);
-            assert!(t.frames[2] == 1 && t.frames[3] == -1);
+            assert!(t.frames[2] == 1 << 16 && t.frames[3] == -1 << 16);
         }
         thread::sleep(Duration::from_millis(30));
         s.tick(Ticks(3000));
@@ -1517,7 +1526,7 @@ mod tests {
         assert!(!t.frames.is_empty());
         // 1000 at a quarter (volume 50 squared) is 250; the first frame
         // is never the one dropped.
-        assert_eq!(t.frames[0], 250);
+        assert_eq!(t.frames[0], 250 << 16);
     }
 
     #[test]
@@ -1537,18 +1546,29 @@ mod tests {
     }
 
     #[test]
-    fn pcm_widths_come_out_as_i16() {
+    fn pcm_widths_come_out_as_i32_with_every_bit() {
         let mut out = Vec::new();
-        assert_eq!(pcm_to_i16(&[0x34, 0x12, 0x00, 0x80], 16, 2, &mut out), 1);
-        assert_eq!(out, [0x1234, i16::MIN]);
+        assert_eq!(pcm_to_i32(&[0x34, 0x12, 0x00, 0x80], 16, 2, &mut out), 1);
+        assert_eq!(out, [0x1234_0000, i32::MIN]);
         out.clear();
         assert_eq!(
-            pcm_to_i16(&[0xff, 0x34, 0x12, 0x00, 0x00, 0x80], 24, 2, &mut out),
+            pcm_to_i32(&[0xff, 0x34, 0x12, 0x00, 0x00, 0x80], 24, 2, &mut out),
             1
         );
-        assert_eq!(out, [0x1234, i16::MIN]);
+        assert_eq!(out, [0x1234_ff00, i32::MIN]);
         out.clear();
-        assert_eq!(pcm_to_i16(&[0x7f, 0x80], 8, 2, &mut out), 1);
-        assert_eq!(out, [0x7f00, i16::MIN]);
+        assert_eq!(pcm_to_i32(&[0x7f, 0x80], 8, 2, &mut out), 1);
+        assert_eq!(out, [0x7f00_0000, i32::MIN]);
+        out.clear();
+        assert_eq!(
+            pcm_to_i32(
+                &[0x78, 0x56, 0x34, 0x12, 0, 0, 0, 0x80],
+                32,
+                2,
+                &mut out
+            ),
+            1
+        );
+        assert_eq!(out, [0x1234_5678, i32::MIN]);
     }
 }

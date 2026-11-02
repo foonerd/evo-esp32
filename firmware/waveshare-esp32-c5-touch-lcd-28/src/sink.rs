@@ -4,7 +4,7 @@
 //! The board's frame sink: a reservoir of decoded audio in PSRAM, fed to
 //! I2S0's DMA by a task above everything else on the chip.
 //!
-//! The decoder offers interleaved 16-bit frames; the sink takes what the
+//! The decoder offers interleaved 32-bit frames; the sink takes what the
 //! reservoir has room for, with no waiting, and says how many frames
 //! that was, so the decoder runs ahead of the ear by up to [`LEAD_MS`]
 //! and a tick never waits. A feeder task takes the reservoir's bytes a
@@ -62,14 +62,16 @@ const CEILING_HZ: u32 = 96_000;
 /// after a starvation (21 ms at 48 kHz); shorter buffers would tighten
 /// that but cost the core at 96 kHz, where the decoder has none to
 /// spare (measured: 480-frame buffers starve a 96 kHz FLAC every few
-/// hundred milliseconds).
+/// hundred milliseconds). 40 ms since the samples went to 32 bits: the
+/// ring's bytes are what internal SRAM had for it at 16, and the
+/// feeder at the top priority is never away a tenth of that.
 const FRAMES_PER_BUFFER: u32 = 1023;
-const DMA_MS: u32 = 80;
+const DMA_MS: u32 = 40;
 const BUFFERS: u32 = (CEILING_HZ * DMA_MS / 1000).div_ceil(FRAMES_PER_BUFFER);
-/// Bytes per stereo 16-bit frame on the wire.
-const FRAME_BYTES: usize = 4;
-/// What the feeder takes from the reservoir at a time: 4 KB, a few DMA
-/// buffers' worth, in internal SRAM by the allocator's rule.
+/// Bytes per stereo 32-bit frame on the wire.
+const FRAME_BYTES: usize = 8;
+/// What the feeder takes from the reservoir at a time: 4 KB, a DMA
+/// buffer's worth, in internal SRAM by the allocator's rule.
 const CHUNK: usize = 4096;
 /// The feeder's stack, internal: small, and it never touches flash.
 /// (6 KB was tried for the codec drivers and took the last of the
@@ -108,9 +110,11 @@ fn lead_ms(rate: u32, buffers: u32) -> u32 {
 const UNITY: u16 = 32767;
 
 /// The width of each I2S slot on the wire: 32 bits, so the bit clock is
-/// 64 times the sample rate. The samples are 16-bit; the codec and a HAT
-/// are told both.
+/// 64 times the sample rate. The samples are 32-bit too, a source's
+/// bits at the top; the codec and a HAT are told both.
 pub const SLOT_BITS: u32 = 32;
+/// The width of each sample on the wire.
+pub const SAMPLE_BITS: u32 = 32;
 
 /// The volume the sink applies to every frame, shared with whoever owns
 /// the `output` subject: the one level both the speaker and a HAT hear,
@@ -392,7 +396,7 @@ pub struct I2sSink<F> {
 }
 
 impl<F: RateFollower> I2sSink<F> {
-    /// The channel at `rate`, master, Philips, 16-bit stereo, on the
+    /// The channel at `rate`, master, Philips, 32-bit stereo, on the
     /// board's codec pins, and the feeder behind it; `follower` is told
     /// each rate the stream takes, while the clocks are stopped for the
     /// change.
@@ -499,7 +503,7 @@ fn reservoir_bytes(rate: u32) -> usize {
     (rate as usize * LEAD_MS as usize / 1000) * FRAME_BYTES
 }
 
-/// I2S0's transmit channel: master, Philips, 16-bit stereo, over the
+/// I2S0's transmit channel: master, Philips, 32-bit stereo, over the
 /// raw driver, so that a change of rate is a change of clock and the
 /// DMA ring allocated at the open is the one for the life of the player.
 struct Channel(sys::i2s_chan_handle_t);
@@ -520,7 +524,7 @@ impl Channel {
         rate: u32,
     ) -> Result<(Self, u32), sys::EspError> {
         let lead = lead_ms(rate, BUFFERS);
-        info!("i2s: {rate} Hz, 16-bit samples in {SLOT_BITS}-bit slots (bit clock {} fs), {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead", 2 * SLOT_BITS);
+        info!("i2s: {rate} Hz, {SAMPLE_BITS}-bit samples in {SLOT_BITS}-bit slots (bit clock {} fs), {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead", 2 * SLOT_BITS);
         let chan = sys::i2s_chan_config_t {
             id: sys::i2s_port_t_I2S_NUM_0,
             role: sys::i2s_role_t_I2S_ROLE_MASTER,
@@ -544,13 +548,14 @@ impl Channel {
             ))?;
             let std = sys::i2s_std_config_t {
                 clk_cfg: Self::clock(rate),
-                // 16-bit samples in 32-bit slots: the bit clock is 64 fs,
+                // 32-bit samples in 32-bit slots: the bit clock is 64 fs,
                 // the frame every Pi-HAT DAC takes (a Sabre in hardware
                 // mode reads 32 fs as a wrong word and plays it loud);
-                // the samples sit at the top of the slot, Philips-shifted.
+                // the source's bits sit at the top, Philips-shifted, and
+                // a DAC of fewer bits takes the top ones.
                 slot_cfg: sys::i2s_std_slot_config_t {
                     data_bit_width:
-                        sys::i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT,
+                        sys::i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_32BIT,
                     slot_bit_width:
                         sys::i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_32BIT,
                     slot_mode: sys::i2s_slot_mode_t_I2S_SLOT_MODE_STEREO,
@@ -748,16 +753,19 @@ fn feed(
     }
 }
 
-/// Scale 16-bit little-endian samples in place by a Q15 gain.
+/// Scale 32-bit little-endian samples in place by a Q15 gain. The
+/// product is taken in 64 bits and rounded, so a sample keeps its bits
+/// down to the gain's own resolution: at −30 dB the error is a bit at
+/// 2^-31, far below what any DAC on the header resolves.
 fn scale(bytes: &mut [u8], gain: u16) {
     if gain == UNITY {
         return;
     }
-    let gain = i32::from(gain);
-    for s in bytes.as_chunks_mut::<2>().0 {
-        let v = i16::from_le_bytes(*s);
-        let scaled = ((i32::from(v) * gain) + (1 << 14)) >> 15;
-        *s = (scaled as i16).to_le_bytes();
+    let gain = i64::from(gain);
+    for s in bytes.as_chunks_mut::<4>().0 {
+        let v = i32::from_le_bytes(*s);
+        let scaled = ((i64::from(v) * gain) + (1 << 14)) >> 15;
+        *s = (scaled as i32).to_le_bytes();
     }
 }
 
@@ -791,7 +799,8 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
                 if gate.load(Ordering::Acquire) != GATE_OPEN {
                     warn!("i2s: the feeder did not stop the clocks for the codecs; writing anyway");
                 }
-                self.follower.rate_changed(format.sample_rate, 16);
+                self.follower
+                    .rate_changed(format.sample_rate, SAMPLE_BITS as u8);
                 gate.store(GATE_DONE, Ordering::Release);
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while self.opened.load(Ordering::Acquire) == before
@@ -823,7 +832,7 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         );
     }
 
-    fn write(&mut self, interleaved: &[i16]) -> usize {
+    fn write(&mut self, interleaved: &[i32]) -> usize {
         if !self.carry.is_empty() {
             let carry = std::mem::take(&mut self.carry);
             let n = self.reservoir.push(&carry);
@@ -927,7 +936,7 @@ impl<F: RateFollower> FrameSink for Shared<F> {
             .unwrap_or_else(|e| e.into_inner())
             .start(format);
     }
-    fn write(&mut self, interleaved: &[i16]) -> usize {
+    fn write(&mut self, interleaved: &[i32]) -> usize {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
