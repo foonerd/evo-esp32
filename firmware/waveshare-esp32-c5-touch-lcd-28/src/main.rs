@@ -12,7 +12,7 @@
 //!    board.
 //! 3. The ES8311 answers its chip ID, is opened, told the stream's
 //!    rate and width, started, unmuted, set to a modest volume.
-//! 4. I2S0 as master in Philips format, 32-bit stereo slots, on the
+//! 4. I2S0 as master in Philips format, 16-bit stereo slots, on the
 //!    BSP's pins (BCLK GPIO24, WS GPIO25, data to the codec GPIO26, no
 //!    MCLK), as the board's [`sink::I2sSink`].
 //! 5. The same three signals mirrored through the GPIO matrix onto the
@@ -337,11 +337,7 @@ fn main() -> anyhow::Result<()> {
         .open()
         .map_err(|e| anyhow::anyhow!("es8311 open: {e:?}"))?;
     codec
-        .set_format_in_slots(
-            RATE,
-            sink::SAMPLE_BITS as u8,
-            sink::SLOT_BITS as u8,
-        )
+        .set_format_in_slots(RATE, 16, sink::SLOT_BITS as u8)
         .map_err(|e| anyhow::anyhow!("es8311 format: {e:?}"))?;
     codec
         .start()
@@ -355,7 +351,7 @@ fn main() -> anyhow::Result<()> {
     codec
         .set_volume(half_db)
         .map_err(|e| anyhow::anyhow!("es8311 volume: {e:?}"))?;
-    info!("es8311: open, {RATE} Hz {}-bit in {}-bit slots, started, at its 100% ({half_db} half-dB); the level is the sink's", sink::SAMPLE_BITS, sink::SLOT_BITS);
+    info!("es8311: open, {RATE} Hz 16-bit in {}-bit slots, started, at its 100% ({half_db} half-dB); the level is the sink's", sink::SLOT_BITS);
 
     // A WM8960 HAT (Waveshare's) takes writes only, so the survey below
     // cannot see it: its reset is the probe. It clocks itself from the
@@ -367,21 +363,19 @@ fn main() -> anyhow::Result<()> {
             let brought = (|| -> Result<(), wm8960::Error<_>> {
                 hat_codec.open()?;
                 FreeRtos::delay_ms(wm8960::OPEN_SETTLE_MS);
-                hat_codec.start(RATE, sink::SAMPLE_BITS as u8, &mut FreeRtos)
+                hat_codec.start(RATE, &mut FreeRtos)
             })();
             match brought {
                 Ok(()) => {
                     info!(
-                        "wm8960: found at {:#04x} (it took the reset), {RATE} Hz through its PLL from {} MHz, {}-bit I2S; headphones and speakers at 0 dB, the level is the sink's; silent above {} Hz",
+                        "wm8960: found at {:#04x} (it took the reset), {RATE} Hz through its PLL from {} MHz, 16-bit I2S; headphones and speakers at 0 dB, the level is the sink's; silent above {} Hz",
                         wm8960::ADDRESS,
                         wm8960::MCLK_HZ / 1_000_000,
-                        sink::SAMPLE_BITS,
                         wm8960::MAX_RATE
                     );
                     config.note(format!(
-                        "hat: WM8960 at {:#04x}, PLL from its 24 MHz, {}-bit I2S; silent above {} Hz",
+                        "hat: WM8960 at {:#04x}, PLL from its 24 MHz, 16-bit I2S; silent above {} Hz",
                         wm8960::ADDRESS,
-                        sink::SAMPLE_BITS,
                         wm8960::MAX_RATE
                     ));
                     Some(hat_codec)
@@ -434,7 +428,7 @@ fn main() -> anyhow::Result<()> {
             hat_on,
         },
     )?;
-    info!("i2s0: master, Philips {}-bit stereo in {}-bit slots (64 fs), BCLK GPIO24, WS GPIO25, DOUT GPIO26", sink::SAMPLE_BITS, sink::SLOT_BITS);
+    info!("i2s0: master, Philips 16-bit stereo in 32-bit slots (64 fs), BCLK GPIO24, WS GPIO25, DOUT GPIO26");
     memory("after the DMA ring");
 
     // The TCP/IP stack before anything binds a socket: the multiroom
@@ -585,7 +579,7 @@ fn main() -> anyhow::Result<()> {
                     id.master_mode, id.routing
                 );
                 let brought_up = dac
-                    .init(WordLength::ThirtyTwo, Oscillators::Leave)
+                    .init(WordLength::Sixteen, Oscillators::Leave)
                     .and_then(|()| {
                         FreeRtos::delay_ms(2);
                         dac.sck_present()
@@ -594,7 +588,7 @@ fn main() -> anyhow::Result<()> {
                         if !sck {
                             return Ok("no SCK, as expected");
                         }
-                        dac.init(WordLength::ThirtyTwo, Oscillators::Off)?;
+                        dac.init(WordLength::Sixteen, Oscillators::Off)?;
                         FreeRtos::delay_ms(2);
                         Ok(if dac.sck_present()? {
                             "an SCK arrives and stays with the chip's GPIO3 and GPIO6 low: the board's oscillator is not switched the Boss way"
@@ -605,9 +599,9 @@ fn main() -> anyhow::Result<()> {
                 match brought_up {
                     Ok(sck) => {
                         let clocks = dac.clocks().ok();
-                        info!("pcm512x: initialised: PLL on BCK, 32-bit I2S, at its 0 dB; the level is the sink's; {sck}; clocks {clocks:?}");
+                        info!("pcm512x: initialised: PLL on BCK, 16-bit I2S, at its 0 dB; the level is the sink's; {sck}; clocks {clocks:?}");
                         config.note(format!(
-                            "hat: PCM512x at {address:#04x}, PLL on BCK, 32-bit I2S; {sck}"
+                            "hat: PCM512x at {address:#04x}, PLL on BCK, 16-bit I2S; {sck}"
                         ));
                         found.pcm512x = Some(dac);
                     }
@@ -2237,7 +2231,7 @@ struct Silent;
 
 impl evo_esp32_sdk::contract::audio::playback::FrameSink for Silent {
     fn start(&mut self, _: &evo_esp32_sdk::contract::audio::playback::Format) {}
-    fn write(&mut self, _: &[i32]) -> usize {
+    fn write(&mut self, _: &[i16]) -> usize {
         0
     }
     fn flush(&mut self) {}

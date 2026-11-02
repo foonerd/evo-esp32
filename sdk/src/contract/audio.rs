@@ -306,15 +306,11 @@ pub mod playback {
     /// output plugin's business through its own route to the hardware, so
     /// the two plugins still never meet.
     ///
-    /// Samples are signed 32-bit at full scale, interleaved by channel,
-    /// `channels` per frame as the last [`start`](Self::start) said. A
-    /// source's bits sit at the top: a 16-bit source fills the top 16, a
-    /// 24-bit source the top 24, the rest zero. The sink applies its
-    /// level in 32-bit and gives its DAC the word width the DAC takes, so
-    /// turning the volume down costs no bits of the source. A sink never
-    /// blocks: it takes what it has room for and says how much, and the
-    /// decoder keeps the rest for its next tick. That is how a tick stays
-    /// bounded and how the sink's clock, not the decoder's, paces playback.
+    /// Samples are signed 16-bit, interleaved by channel, `channels` per
+    /// frame as the last [`start`](Self::start) said. A sink never blocks:
+    /// it takes what it has room for and says how much, and the decoder
+    /// keeps the rest for its next tick. That is how a tick stays bounded
+    /// and how the sink's clock, not the decoder's, paces playback.
     ///
     /// A sink may hold frames it has taken for a while before they are
     /// heard (a board's sink runs the decoder ahead of its DMA so that a
@@ -328,7 +324,7 @@ pub mod playback {
         fn start(&mut self, format: &Format);
         /// Offer frames; the return is how many frames were taken, from
         /// the front. Zero means full: ask again later.
-        fn write(&mut self, interleaved: &[i32]) -> usize;
+        fn write(&mut self, interleaved: &[i16]) -> usize;
         /// Drop what has been taken but has not left yet. After a seek,
         /// so the ear does not hear the old place first.
         fn flush(&mut self);

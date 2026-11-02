@@ -61,7 +61,7 @@ pub static REGISTER: [Entry; 5] = [
         boards: "Waveshare PCM5122 Audio Board (A), Raspberry Pi DAC+ (IQaudIO), HiFiBerry DAC+, DAC+ Pro and DAC2 Pro, Allo Boss, InnoMaker DAC Mini",
         chip: "TI PCM5122",
         how: How::Bus("0x4C or 0x4D"),
-        quirks: "PLL on BCK, 32-bit I2S; a board with its own oscillators (Boss class) has them switched off through the chip's GPIO3 and GPIO6; the Pi DAC+ needs 3.3 V on header pin 1 or 17 as well as 5 V",
+        quirks: "PLL on BCK, 16-bit I2S; a board with its own oscillators (Boss class) has them switched off through the chip's GPIO3 and GPIO6; the Pi DAC+ needs 3.3 V on header pin 1 or 17 as well as 5 V",
     },
     Entry {
         name: "es9018k2m",
@@ -82,7 +82,7 @@ pub static REGISTER: [Entry; 5] = [
         boards: "Waveshare WM8960 Audio HAT",
         chip: "Cirrus WM8960",
         how: How::Bus("0x1A, writes only; the reset is the probe"),
-        quirks: "PLL from its 24 MHz, 32-bit I2S; written with the clocks stopped; silent above 48 kHz; headphones and speakers at 0 dB",
+        quirks: "PLL from its 24 MHz, 16-bit I2S; written with the clocks stopped; silent above 48 kHz; headphones and speakers at 0 dB",
     },
 ];
 

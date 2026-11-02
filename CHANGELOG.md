@@ -73,17 +73,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decoder now stands level with the loop and the two share the core a
   millisecond at a time.
 
-- The volume costs no bits. Samples travelled as 16-bit and the level
-  was applied to them: turned down to 40%, about eleven of the sixteen
-  bits were left, and the noise floor rose with the attenuation. The
-  decoder and the receivers now hand the sink 32-bit samples with the
-  source's bits at the top — a 24-bit FLAC keeps all twenty-four, where
-  before it lost eight before anyone heard it — the sink applies its
-  level in 32-bit, and every DAC on the register takes 32-bit words in
-  the 32-bit slots it already clocked. The Snapcast receiver's volume,
-  which was floating-point per sample on a chip without a floating-point
-  unit, is integer too.
-
 ## [0.2.6] - 2026-10-31
 
 - PCM5122 boards with oscillators of their own play every rate. The

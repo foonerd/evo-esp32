@@ -190,7 +190,7 @@ impl Flac {
     pub fn decode_chunk(
         &mut self,
         chunk: &[u8],
-        out: &mut Vec<i32>,
+        out: &mut Vec<i16>,
     ) -> (usize, usize) {
         let (mut frames, mut bad) = (0, 0);
         for frame in split_frames(chunk) {
@@ -208,9 +208,9 @@ impl Flac {
     }
 }
 
-fn append_interleaved(buf: &GenericAudioBufferRef<'_>, out: &mut Vec<i32>) {
+fn append_interleaved(buf: &GenericAudioBufferRef<'_>, out: &mut Vec<i16>) {
     let mut part = Vec::new();
-    buf.copy_to_vec_interleaved::<i32>(&mut part);
+    buf.copy_to_vec_interleaved::<i16>(&mut part);
     out.extend_from_slice(&part);
 }
 

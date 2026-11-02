@@ -287,7 +287,7 @@ struct InHand {
     /// Frames the sink took.
     frames_out: u64,
     /// Samples of the frame in hand the sink has not taken yet.
-    pending: Vec<i32>,
+    pending: Vec<i16>,
     taken: usize,
 }
 
@@ -547,7 +547,7 @@ impl Warden for MultiroomReceiver {
             h.pending = f
                 .payload
                 .chunks_exact(2)
-                .map(|b| i32::from(i16::from_le_bytes([b[0], b[1]])) << 16)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]))
                 .collect();
             h.taken = 0;
         };
@@ -802,7 +802,7 @@ mod tests {
     /// A sink that records what it is given.
     #[derive(Default)]
     struct Tape {
-        frames: Vec<i32>,
+        frames: Vec<i16>,
         starts: Vec<Format>,
         stops: usize,
         held: usize,
@@ -815,7 +815,7 @@ mod tests {
         fn start(&mut self, format: &Format) {
             self.0.borrow_mut().starts.push(format.clone());
         }
-        fn write(&mut self, interleaved: &[i32]) -> usize {
+        fn write(&mut self, interleaved: &[i16]) -> usize {
             self.0.borrow_mut().frames.extend_from_slice(interleaved);
             interleaved.len() / 2
         }
@@ -1018,14 +1018,14 @@ mod tests {
             // holds nothing, so not yet.
             assert_eq!(t.frames.len(), 1920, "{} samples", t.frames.len());
             assert_eq!(t.frames[0], 0);
-            assert_eq!(t.frames[2], 1 << 16);
+            assert_eq!(t.frames[2], 1);
         }
         thread::sleep(Duration::from_millis(50));
         s.tick(Ticks(3000));
         assert_eq!(tape.0.borrow().frames.len(), 3 * 1920);
         assert_eq!(
             tape.0.borrow().frames[1920],
-            100 << 16,
+            100,
             "frame 1 follows frame 0"
         );
         assert_eq!(state(&s).position_ms, 60);
@@ -1077,7 +1077,7 @@ mod tests {
         receive(&mut s, &link);
         s.tick(Ticks(1000));
         assert_eq!(tape.0.borrow().frames.len(), 1920);
-        assert_eq!(tape.0.borrow().frames[0], 500 << 16);
+        assert_eq!(tape.0.borrow().frames[0], 500);
     }
 
     #[test]
