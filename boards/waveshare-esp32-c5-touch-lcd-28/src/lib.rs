@@ -60,7 +60,9 @@ const TOUCH_BOOT_MS: u32 = 500;
 /// The expander lines this board drives.
 const TOUCH_RST: Exio = Exio::P0;
 const PANEL_RST: Exio = Exio::P1;
-const AMP_EN: Exio = Exio::P3;
+/// The speaker amplifier's enable; high from the bring-up, a firmware
+/// may take it low to play through a HAT alone.
+pub const AMP_EN: Exio = Exio::P3;
 
 /// The I2C bus, shared by the expander and the touch controller for the
 /// life of the firmware, and handed out so a firmware can put the codec

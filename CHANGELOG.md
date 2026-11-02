@@ -54,6 +54,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   holds its messages under a mutex, which the kernel lends the writer
   the reader's priority for; the check refuses a standard channel.
 
+- The register of DAC boards. The five kinds proven on the bench —
+  PCM5102A modules, PCM5122 boards (Waveshare, Raspberry Pi DAC+,
+  HiFiBerry DAC+ and Pro, Allo Boss, InnoMaker DAC Mini), ES9018K2M,
+  the InnoMaker ES9038Q2M in hardware mode, the WM8960 Audio HAT — are
+  named in the firmware with how each is found and brought up. The
+  card's `dac` line names a board on the three lines alone (`pcm5102a`,
+  `es9038q2m`), and `output` now acts: `hat` switches the speaker's
+  amplifier off and mutes its codec, `speaker` mutes a HAT found on the
+  bus. `evostatus.txt` says what was found, what was named, and what a
+  named board cannot do (a PCM5102A has no mute). A name not in the
+  register is reported and set aside.
+
+- The face paints the new track without waiting for the decoder. With
+  the decoder on its own thread one priority above the loop, the loop
+  ran only when the decoder waited, and at a track start — 600 ms of
+  lead to fill — the paint of the new title took 268–1203 ms. The
+  decoder now stands level with the loop and the two share the core a
+  millisecond at a time.
+
 ## [0.2.6] - 2026-10-31
 
 - PCM5122 boards with oscillators of their own play every rate. The

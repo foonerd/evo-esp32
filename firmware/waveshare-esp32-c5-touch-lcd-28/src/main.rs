@@ -44,6 +44,7 @@
 mod alloc;
 mod art;
 mod config;
+mod hat;
 mod input;
 mod net;
 mod sink;
@@ -193,11 +194,15 @@ const SEARCH_AGAIN: Duration = Duration::from_secs(30);
 
 /// The codecs follow the sink's rate: the board's, and a HAT's when one
 /// is on the header. Both hear the same stream; a HAT that cannot play
-/// the rate stays muted for it, and says so through `hat_silent`.
+/// the rate stays muted for it, and says so through `hat_silent`. A
+/// side the card's `output` line has switched off is muted again after
+/// every change, since the drivers unmute as they finish one.
 struct Codec {
     board: Es8311<board::Device>,
     hat: Option<Wm8960<board::Device>>,
     hat_silent: Arc<AtomicBool>,
+    speaker_on: bool,
+    hat_on: bool,
 }
 
 impl RateFollower for Codec {
@@ -207,6 +212,9 @@ impl RateFollower for Codec {
                 .set_format_in_slots(rate, bits, sink::SLOT_BITS as u8)
         {
             warn!("es8311: no setting for {rate} Hz {bits}-bit: {e:?}; the speaker may be off-pitch");
+        }
+        if !self.speaker_on {
+            let _ = self.board.set_mute(true);
         }
         if let Some(hat) = self.hat.as_mut() {
             let silent = match hat.set_rate(rate, &mut FreeRtos) {
@@ -223,6 +231,9 @@ impl RateFollower for Codec {
                     false
                 }
             };
+            if !self.hat_on {
+                let _ = hat.set_mute(true);
+            }
             self.hat_silent.store(silent, Ordering::Relaxed);
         }
     }
@@ -383,6 +394,26 @@ fn main() -> anyhow::Result<()> {
 
     memory("after the panel and the codec");
     let hat_silent = Arc::new(AtomicBool::new(false));
+    // What the card asks of the speaker and the HAT; the boards on the
+    // bus are not yet surveyed, so the HAT side is settled below and
+    // the codecs here only carry the choice across rate changes.
+    let output = config.settings.output;
+    let speaker_on = output != Some(evo_esp32_config::Output::Hat);
+    let hat_on = output != Some(evo_esp32_config::Output::Speaker);
+    if !speaker_on {
+        codec
+            .set_mute(true)
+            .map_err(|e| anyhow::anyhow!("es8311 mute: {e:?}"))?;
+        expander.set(board::AMP_EN, false)?;
+        info!("output: the speaker is off (output = hat)");
+    }
+    let mut hat_codec = hat_codec;
+    if let (false, Some(hat)) = (hat_on, hat_codec.as_mut()) {
+        if let Err(e) = hat.set_mute(true) {
+            warn!("wm8960: mute: {e:?}");
+        }
+    }
+    let wm8960_found = hat_codec.is_some();
     let sink = I2sSink::new(
         i2s0,
         pins.gpio24,
@@ -393,6 +424,8 @@ fn main() -> anyhow::Result<()> {
             board: codec,
             hat: hat_codec,
             hat_silent: hat_silent.clone(),
+            speaker_on,
+            hat_on,
         },
     )?;
     info!("i2s0: master, Philips 16-bit stereo in 32-bit slots (64 fs), BCLK GPIO24, WS GPIO25, DOUT GPIO26");
@@ -502,6 +535,10 @@ fn main() -> anyhow::Result<()> {
         config.note(format!("i2c: {survey}"));
     }
 
+    let mut found = hat::Found {
+        wm8960: wm8960_found,
+        ..Default::default()
+    };
     let mut sabre = Es9018k2m::new(MutexDevice::new(bus));
     match sabre.detect() {
         Ok(Some(id)) => {
@@ -511,7 +548,8 @@ fn main() -> anyhow::Result<()> {
             );
             match sabre.init().and_then(|()| sabre.set_volume(100)) {
                 Ok(()) => {
-                    info!("es9018k2m: initialised, at its 100%; the level is the sink's")
+                    info!("es9018k2m: initialised, at its 100%; the level is the sink's");
+                    found.es9018k2m = Some(sabre);
                 }
                 Err(e) => warn!("es9018k2m: init failed: {e:?}"),
             }
@@ -565,6 +603,7 @@ fn main() -> anyhow::Result<()> {
                         config.note(format!(
                             "hat: PCM512x at {address:#04x}, PLL on BCK, 16-bit I2S; {sck}"
                         ));
+                        found.pcm512x = Some(dac);
                     }
                     Err(e) => warn!("pcm512x: init failed: {e:?}"),
                 }
@@ -578,6 +617,16 @@ fn main() -> anyhow::Result<()> {
     }
     if !pcm512x_found {
         info!("pcm512x: none on the bus");
+    }
+
+    // The card's dac and output lines against what the bus found.
+    let choice = hat::choose(&found, config.settings.dac.as_deref(), output);
+    if !choice.hat {
+        found.set_mute(true);
+    }
+    for note in &choice.notes {
+        info!("{note}");
+        config.note(note.clone());
     }
 
     let volume = sink.volume();
@@ -847,9 +896,6 @@ fn main() -> anyhow::Result<()> {
             heading,
             format!("{line}. Tap to go on."),
         )));
-    }
-    if config.settings.dac.is_some() || config.settings.output.is_some() {
-        config.note("dac, output: read; this firmware plays the speaker and a HAT both and has no register of boards yet");
     }
     memory("before the loop");
     let status_head = [
