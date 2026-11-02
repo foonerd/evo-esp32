@@ -297,6 +297,49 @@ pub mod playback {
         },
     }
 
+    /// Decoded samples on offer to a sink, interleaved by channel, in
+    /// the width the stream has: a decoder hands over what it decoded
+    /// without widening a 16-bit source or narrowing a 24-bit one.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Samples<'a> {
+        /// Signed 16-bit: a stream of 16 bits or fewer.
+        I16(&'a [i16]),
+        /// Signed 32-bit, the stream's bits at the top: a 24-bit source
+        /// fills the top 24 and leaves the low 8 zero.
+        I32(&'a [i32]),
+    }
+
+    impl Samples<'_> {
+        /// Samples on offer, all channels.
+        pub fn len(&self) -> usize {
+            match self {
+                Samples::I16(s) => s.len(),
+                Samples::I32(s) => s.len(),
+            }
+        }
+
+        /// No samples at all.
+        pub fn is_empty(&self) -> bool {
+            self.len() == 0
+        }
+
+        /// Bytes a sample takes in this width.
+        pub fn width(&self) -> usize {
+            match self {
+                Samples::I16(_) => 2,
+                Samples::I32(_) => 4,
+            }
+        }
+
+        /// The same offer from `from` samples on.
+        pub fn from(&self, from: usize) -> Self {
+            match self {
+                Samples::I16(s) => Samples::I16(&s[from..]),
+                Samples::I32(s) => Samples::I32(&s[from..]),
+            }
+        }
+    }
+
     /// Where decoded frames go.
     ///
     /// Frames do not travel through the fabric's values, as a picture does
@@ -306,11 +349,16 @@ pub mod playback {
     /// output plugin's business through its own route to the hardware, so
     /// the two plugins still never meet.
     ///
-    /// Samples are signed 16-bit, interleaved by channel, `channels` per
-    /// frame as the last [`start`](Self::start) said. A sink never blocks:
-    /// it takes what it has room for and says how much, and the decoder
-    /// keeps the rest for its next tick. That is how a tick stays bounded
-    /// and how the sink's clock, not the decoder's, paces playback.
+    /// Samples come as [`Samples`]: 16-bit for a stream of 16 bits or
+    /// fewer, 32-bit with the stream's bits at the top for a wider one,
+    /// interleaved by channel, `channels` per frame as the last
+    /// [`start`](Self::start) said. The width follows the stream so a
+    /// 16-bit source costs no more than its bytes and a 24-bit source
+    /// loses none; the sink applies its level in 32 bits whatever the
+    /// width it was given. A sink never blocks: it takes what it has
+    /// room for and says how much, and the decoder keeps the rest for
+    /// its next tick. That is how a tick stays bounded and how the
+    /// sink's clock, not the decoder's, paces playback.
     ///
     /// A sink may hold frames it has taken for a while before they are
     /// heard (a board's sink runs the decoder ahead of its DMA so that a
@@ -324,7 +372,7 @@ pub mod playback {
         fn start(&mut self, format: &Format);
         /// Offer frames; the return is how many frames were taken, from
         /// the front. Zero means full: ask again later.
-        fn write(&mut self, interleaved: &[i16]) -> usize;
+        fn write(&mut self, samples: Samples<'_>) -> usize;
         /// Drop what has been taken but has not left yet. After a seek,
         /// so the ear does not hear the old place first.
         fn flush(&mut self);

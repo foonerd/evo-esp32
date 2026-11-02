@@ -60,7 +60,7 @@ use std::time::{Duration, Instant};
 
 use evo_esp32_sdk::context::Context;
 use evo_esp32_sdk::contract::audio::playback::{
-    Correction, Format, FrameSink, Play, State, Status, KIND,
+    Correction, Format, FrameSink, Play, Samples, State, Status, KIND,
 };
 use evo_esp32_sdk::contract::audio::{from_value, shelf, to_value, Track};
 use evo_esp32_sdk::mailbox::{
@@ -76,6 +76,7 @@ use evo_esp32_sdk::subject::{
 use evo_esp32_sdk::warden::{
     Assignment, CourseCorrection, CustodyError, CustodyHandle, Progress, Warden,
 };
+use symphonia::core::audio::GenericAudioBufferRef;
 use symphonia::core::codecs::audio::well_known::{
     CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3,
 };
@@ -283,8 +284,12 @@ struct Decoder {
     state: State,
     shared: Arc<SharedState>,
     commands: Receiver<Command>,
-    /// Interleaved samples decoded but not yet taken by the sink.
-    pending: Vec<i16>,
+    /// Interleaved samples decoded but not yet taken by the sink, in the
+    /// stream's width: 16-bit for a stream of 16 bits or fewer (what the
+    /// codec would widen for nothing and the sink would store at twice
+    /// the bytes), 32-bit with the stream's bits at the top for a wider
+    /// one.
+    pending: Pending,
     /// How far into `pending` the sink has got, in samples.
     taken: usize,
     /// Frames the sink has accepted since `base_ms`.
@@ -795,7 +800,7 @@ fn begin(
         state: h.state.clone(),
         shared: Arc::clone(&shared),
         commands: command_rx,
-        pending: Vec::new(),
+        pending: Pending::for_bits(format.bits),
         taken: 0,
         frames_out: 0,
         base_ms,
@@ -944,7 +949,7 @@ impl Decoder {
             if self.taken < self.pending.len() {
                 let writing = Instant::now();
                 let frames =
-                    self.sink.lock().write(&self.pending[self.taken..]);
+                    self.sink.lock().write(self.pending.from(self.taken));
                 measure::add(&measure::SINK_WRITE_US, writing);
                 if frames == 0 {
                     return Step::Wait(SINK_FULL_IDLE_MS);
@@ -1396,7 +1401,54 @@ fn seek(
     Ok((ms, skip))
 }
 
-/// Decode the next packet of the track into `out` as interleaved i16.
+/// The decoder's output in the stream's own width, offered to the sink
+/// as [`Samples`]. The width is set at the open from the stream's bits
+/// and does not change within a track.
+enum Pending {
+    Narrow(Vec<i16>),
+    Wide(Vec<i32>),
+}
+
+impl Pending {
+    fn for_bits(bits: u8) -> Self {
+        if bits > 16 {
+            Pending::Wide(Vec::new())
+        } else {
+            Pending::Narrow(Vec::new())
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Pending::Narrow(v) => v.len(),
+            Pending::Wide(v) => v.len(),
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Pending::Narrow(v) => v.clear(),
+            Pending::Wide(v) => v.clear(),
+        }
+    }
+
+    fn from(&self, taken: usize) -> Samples<'_> {
+        match self {
+            Pending::Narrow(v) => Samples::I16(&v[taken..]),
+            Pending::Wide(v) => Samples::I32(&v[taken..]),
+        }
+    }
+
+    /// The decoded buffer's samples, interleaved, in this width.
+    fn take(&mut self, buf: &GenericAudioBufferRef<'_>) {
+        match self {
+            Pending::Narrow(v) => buf.copy_to_vec_interleaved::<i16>(v),
+            Pending::Wide(v) => buf.copy_to_vec_interleaved::<i32>(v),
+        }
+    }
+}
+
+/// Decode the next packet of the track into `out` in the stream's width.
 /// `Ok(Some(frames))` for frames appended, `Ok(None)` at the end of the
 /// stream; malformed packets are skipped, not errors.
 /// The next packet's frames into `out`: how many, and the rate and
@@ -1405,7 +1457,7 @@ fn seek(
 /// rate; an MP3's first frame may correct the probe).
 fn next_frames(
     stream: &mut Stream,
-    out: &mut Vec<i16>,
+    out: &mut Pending,
 ) -> Result<Option<(u64, u32, u8)>, SymphoniaError> {
     loop {
         let packet = match stream.reader.next_packet() {
@@ -1434,7 +1486,7 @@ fn next_frames(
                 let spec = buf.spec();
                 let rate = spec.rate();
                 let channels = spec.channels().count().clamp(1, 255) as u8;
-                buf.copy_to_vec_interleaved::<i16>(out);
+                out.take(&buf);
                 return Ok(Some((frames, rate, channels)));
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
@@ -1522,7 +1574,12 @@ mod tests {
         fn start(&mut self, format: &Format) {
             self.tape().format = Some(format.clone());
         }
-        fn write(&mut self, interleaved: &[i16]) -> usize {
+        fn write(&mut self, samples: Samples<'_>) -> usize {
+            let interleaved: Vec<i16> = match samples {
+                Samples::I16(s) => s.to_vec(),
+                Samples::I32(s) => s.iter().map(|v| (v >> 16) as i16).collect(),
+            };
+            let interleaved = &interleaved[..];
             let mut t = self.tape();
             let ch = t.format.as_ref().map_or(1, |f| usize::from(f.channels));
             let room = t.cap.saturating_sub(t.held);

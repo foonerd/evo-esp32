@@ -17,7 +17,7 @@ use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use evo_esp32_sdk::contract::audio::playback::{Format, FrameSink};
+use evo_esp32_sdk::contract::audio::playback::{Format, FrameSink, Samples};
 
 /// How much audio the sink holds ahead of the clock.
 pub const LEAD: Duration = Duration::from_millis(200);
@@ -109,11 +109,17 @@ impl FrameSink for PacedWav {
         }
     }
 
-    fn write(&mut self, interleaved: &[i16]) -> usize {
+    fn write(&mut self, samples: Samples<'_>) -> usize {
         self.drain();
         let ch = self.channels();
-        let frames = (interleaved.len() / ch).min(self.room());
-        self.held.extend(&interleaved[..frames * ch]);
+        let frames = (samples.len() / ch).min(self.room());
+        // A 16-bit file for the desk's ear: a wide stream's top 16 bits.
+        match samples {
+            Samples::I16(s) => self.held.extend(&s[..frames * ch]),
+            Samples::I32(s) => self
+                .held
+                .extend(s[..frames * ch].iter().map(|v| (v >> 16) as i16)),
+        }
         self.taken += frames as u64;
         frames
     }
@@ -232,11 +238,11 @@ mod tests {
         let mut s = PacedWav::new(None);
         s.start(&fmt());
         // 1000 frames/s and a 200 ms lead: 200 frames of room at t=0.
-        let took = s.write(&[0i16; 2 * 1000]);
+        let took = s.write(Samples::I16(&[0i16; 2 * 1000]));
         assert!(took <= 200 && took > 150, "took {took}");
-        assert_eq!(s.write(&[0i16; 2 * 100]), 0, "full");
+        assert_eq!(s.write(Samples::I16(&[0i16; 2 * 100])), 0, "full");
         std::thread::sleep(Duration::from_millis(60));
-        let more = s.write(&[0i16; 2 * 1000]);
+        let more = s.write(Samples::I16(&[0i16; 2 * 1000]));
         assert!(more >= 40, "the clock released {more}");
     }
 
@@ -248,10 +254,10 @@ mod tests {
         let path = dir.join("out.wav");
         let mut s = PacedWav::new(Some(path.clone()));
         s.start(&fmt());
-        s.write(&[1i16; 2 * 50]);
+        s.write(Samples::I16(&[1i16; 2 * 50]));
         s.flush();
         assert!(s.held.is_empty());
-        s.write(&[2i16; 2 * 30]);
+        s.write(Samples::I16(&[2i16; 2 * 30]));
         s.stop();
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[0..4], b"RIFF");

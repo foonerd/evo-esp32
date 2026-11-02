@@ -328,6 +328,24 @@ pub fn dma_buffer(len: usize) -> Option<&'static mut [u8]> {
     Some(buffer)
 }
 
+/// `len` bytes of internal SRAM for the life of the firmware, zeroed:
+/// for a buffer a task reads and writes at the audio's rate (the
+/// feeder's chunks), where the PSRAM-first heap would put it a bus
+/// away. `None` when internal SRAM has none.
+pub fn internal_buffer(len: usize) -> Option<&'static mut [u8]> {
+    let caps = sys::MALLOC_CAP_INTERNAL | sys::MALLOC_CAP_8BIT;
+    // SAFETY: an allocation call with a plain size and capability set.
+    let p = unsafe { sys::heap_caps_aligned_alloc(4, len, caps) };
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: `p` is `len` bytes of live, aligned allocation that nothing
+    // else holds and that is never freed.
+    let buffer = unsafe { core::slice::from_raw_parts_mut(p.cast(), len) };
+    buffer.fill(0);
+    Some(buffer)
+}
+
 /// Set `len` bytes of internal DMA memory aside for the card's ring.
 /// Called once, early, before the network and the page's server take
 /// their share of internal memory; without it every track's chunk is

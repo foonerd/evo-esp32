@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use evo_esp32_sdk::context::Context;
 use evo_esp32_sdk::contract::audio::playback::{
-    Correction, Format, FrameSink, Receive, State, Status, KIND,
+    Correction, Format, FrameSink, Receive, Samples, State, Status, KIND,
 };
 use evo_esp32_sdk::contract::audio::{from_value, shelf, to_value, Track};
 use evo_esp32_sdk::plugin::{
@@ -663,7 +663,8 @@ impl Warden for SnapcastReceiver {
         };
         let progress = loop {
             if h.taken < h.pending.len() {
-                let frames = self.sink.write(&h.pending[h.taken..]);
+                let frames =
+                    self.sink.write(Samples::I16(&h.pending[h.taken..]));
                 if frames == 0 {
                     break Progress::Idle(TICK_IDLE_MS);
                 }
@@ -1193,7 +1194,10 @@ mod tests {
         fn start(&mut self, format: &Format) {
             self.0.borrow_mut().starts.push(format.clone());
         }
-        fn write(&mut self, interleaved: &[i16]) -> usize {
+        fn write(&mut self, samples: Samples<'_>) -> usize {
+            let Samples::I16(interleaved) = samples else {
+                panic!("the receiver offers 16-bit samples")
+            };
             self.0.borrow_mut().frames.extend_from_slice(interleaved);
             interleaved.len() / 2
         }

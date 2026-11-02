@@ -4,13 +4,19 @@
 //! The board's frame sink: a reservoir of decoded audio in PSRAM, fed to
 //! I2S0's DMA by a task above everything else on the chip.
 //!
-//! The decoder offers interleaved 16-bit frames; the sink takes what the
-//! reservoir has room for, with no waiting, and says how many frames
-//! that was, so the decoder runs ahead of the ear by up to [`LEAD_MS`]
-//! and a tick never waits. A feeder task takes the reservoir's bytes a
-//! chunk at a time, scales each sample by the shared [`Volume`] (the
-//! DACs sit at their 100%; the speaker and a HAT share the stream, so
-//! one level serves both), and blocks on the DMA, which is short: a
+//! The decoder offers interleaved frames in the stream's own width,
+//! 16-bit or 32-bit; the reservoir keeps them in that width, so a
+//! 16-bit source costs its bytes and no more and a 24-bit one loses
+//! none. The sink takes what the reservoir has room for, with no
+//! waiting, and says how many frames that was, so the decoder runs
+//! ahead of the ear by up to [`LEAD_MS`] and a tick never waits. A
+//! feeder task takes the reservoir's bytes a chunk at a time and, in
+//! one pass into an internal buffer, widens each sample to 32 bits and
+//! scales it by the shared [`Volume`] (the DACs sit at their 100%; the
+//! speaker and a HAT share the stream, so one level serves both) — the
+//! level is applied in 32 bits, so turning it down costs the source no
+//! bits, and the DMA clocks 32-bit words in 32-bit slots. The feeder
+//! blocks on the DMA, which is short: a
 //! stall of the whole chip for the length of a flash erase is what it
 //! must cover, not a decode. The reservoir covers the rest: a packet
 //! that decodes slowly, a full repaint of the face, the Wi-Fi driver's
@@ -42,7 +48,7 @@ use esp_idf_svc::hal::gpio::{InputPin, OutputPin};
 use esp_idf_svc::hal::i2s::I2S0;
 use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
 use esp_idf_svc::sys;
-use evo_esp32_sdk::contract::audio::playback::{Format, FrameSink};
+use evo_esp32_sdk::contract::audio::playback::{Format, FrameSink, Samples};
 use log::{info, warn};
 
 /// How far ahead of the ear the decoder may run: what the reservoir
@@ -62,14 +68,24 @@ const CEILING_HZ: u32 = 96_000;
 /// after a starvation (21 ms at 48 kHz); shorter buffers would tighten
 /// that but cost the core at 96 kHz, where the decoder has none to
 /// spare (measured: 480-frame buffers starve a 96 kHz FLAC every few
-/// hundred milliseconds).
-const FRAMES_PER_BUFFER: u32 = 1023;
-const DMA_MS: u32 = 80;
+/// hundred milliseconds). A DMA descriptor carries at most 4092 bytes
+/// and the driver cuts a larger ask down (`i2s_common.c`): 511 stereo
+/// frames of 32 bits. 40 ms of them is the same 32 KB of internal SRAM
+/// the 16-bit ring took at 80, and the feeder at the top priority is
+/// never away a tenth of that.
+const FRAMES_PER_BUFFER: u32 = 511;
+const DMA_MS: u32 = 40;
 const BUFFERS: u32 = (CEILING_HZ * DMA_MS / 1000).div_ceil(FRAMES_PER_BUFFER);
-/// Bytes per stereo 16-bit frame on the wire.
-const FRAME_BYTES: usize = 4;
-/// What the feeder takes from the reservoir at a time: 4 KB, a few DMA
-/// buffers' worth, in internal SRAM by the allocator's rule.
+/// Bytes per stereo frame on the wire: two 32-bit words.
+const WIRE_FRAME_BYTES: usize = 8;
+/// Bytes per stereo frame in the reservoir for a 16-bit stream, and for
+/// a wider one.
+const NARROW_FRAME_BYTES: usize = 4;
+const WIDE_FRAME_BYTES: usize = 8;
+/// What the feeder takes from the reservoir at a time: 4 KB of the
+/// stream's width, which widened is up to 8 KB on the wire. Both
+/// buffers are asked for in internal SRAM by name: the heap is
+/// PSRAM-first, and a chunk there would be read from PSRAM twice.
 const CHUNK: usize = 4096;
 /// The feeder's stack, internal: small, and it never touches flash.
 /// (6 KB was tried for the codec drivers and took the last of the
@@ -103,6 +119,8 @@ static SCALE_US: AtomicU32 = AtomicU32::new(0);
 static WRITE_US: AtomicU32 = AtomicU32::new(0);
 static POPS: AtomicU32 = AtomicU32::new(0);
 static LEAD_LOW: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// The reservoir's frame size at the last pop, for `take_lead_low`.
+static LEAD_FRAME: AtomicUsize = AtomicUsize::new(NARROW_FRAME_BYTES);
 
 /// The feeder's account since boot, for differencing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -143,8 +161,10 @@ impl FeederAccount {
 /// milliseconds at the rate in hand; `None` if the feeder did not pop.
 pub fn take_lead_low(rate: u32) -> Option<u32> {
     let low = LEAD_LOW.swap(usize::MAX, Ordering::Relaxed);
-    (low != usize::MAX)
-        .then(|| (low / FRAME_BYTES * 1000 / rate.max(1) as usize) as u32)
+    (low != usize::MAX).then(|| {
+        (low / LEAD_FRAME.load(Ordering::Relaxed).max(1) * 1000
+            / rate.max(1) as usize) as u32
+    })
 }
 
 fn add_us(to: &AtomicU32, since: Instant) {
@@ -163,9 +183,11 @@ fn lead_ms(rate: u32, buffers: u32) -> u32 {
 const UNITY: u16 = 32767;
 
 /// The width of each I2S slot on the wire: 32 bits, so the bit clock is
-/// 64 times the sample rate. The samples are 16-bit; the codec and a HAT
-/// are told both.
+/// 64 times the sample rate. The samples are 32-bit too, the stream's
+/// bits at the top; the codec and a HAT are told both.
 pub const SLOT_BITS: u32 = 32;
+/// The width of each sample on the wire.
+pub const SAMPLE_BITS: u32 = 32;
 
 /// The volume the sink applies to every frame, shared with whoever owns
 /// the `output` subject: the one level both the speaker and a HAT hear,
@@ -250,6 +272,8 @@ struct Reservoir {
     prime: AtomicUsize,
     /// The stream's rate, to say the lead in time.
     rate: AtomicU32,
+    /// Bytes a stereo frame takes in the reservoir: the stream's width.
+    frame_bytes: AtomicUsize,
     /// A stream has started since boot.
     started: AtomicBool,
     /// What the DMA ring holds, by account.
@@ -321,6 +345,7 @@ impl Reservoir {
             dma_lead_ms: AtomicU32::new(0),
             prime: AtomicUsize::new(0),
             rate: AtomicU32::new(0),
+            frame_bytes: AtomicUsize::new(NARROW_FRAME_BYTES),
             started: AtomicBool::new(false),
             dma: Mutex::new(DmaModel::new()),
             gate: AtomicU8::new(GATE_CLOSED),
@@ -420,7 +445,8 @@ impl Lead {
             return None;
         }
         let rate = self.0.rate.load(Ordering::Relaxed).max(1) as usize;
-        Some((self.0.readable() / FRAME_BYTES * 1000 / rate) as u32)
+        let frame = self.0.frame_bytes.load(Ordering::Relaxed).max(1);
+        Some((self.0.readable() / frame * 1000 / rate) as u32)
     }
 }
 
@@ -440,6 +466,8 @@ pub struct I2sSink<F> {
     opened: Arc<AtomicU32>,
     rate: u32,
     channels: usize,
+    /// Bytes a stereo frame takes in the reservoir for the stream in hand.
+    frame_bytes: usize,
     /// Bytes of a frame the reservoir took in part; go out first next time.
     carry: Vec<u8>,
     scratch: Vec<u8>,
@@ -452,7 +480,7 @@ pub struct I2sSink<F> {
 }
 
 impl<F: RateFollower> I2sSink<F> {
-    /// The channel at `rate`, master, Philips, 16-bit stereo, on the
+    /// The channel at `rate`, master, Philips, 32-bit stereo, on the
     /// board's codec pins, and the feeder behind it; `follower` is told
     /// each rate the stream takes, while the clocks are stopped for the
     /// change.
@@ -473,11 +501,12 @@ impl<F: RateFollower> I2sSink<F> {
             i32::from(ws.pin()),
             rate,
         )?;
-        let bytes = reservoir_bytes(CEILING_HZ);
+        let bytes = reservoir_bytes(CEILING_HZ, WIDE_FRAME_BYTES);
         let reservoir = Arc::new(Reservoir::new(bytes));
-        reservoir
-            .len
-            .store(reservoir_bytes(rate).min(bytes), Ordering::Relaxed);
+        reservoir.len.store(
+            reservoir_bytes(rate, NARROW_FRAME_BYTES).min(bytes),
+            Ordering::Relaxed,
+        );
         reservoir.dma_lead_ms.store(dma_lead, Ordering::Relaxed);
         reservoir.rate.store(rate, Ordering::Relaxed);
         info!(
@@ -519,7 +548,8 @@ impl<F: RateFollower> I2sSink<F> {
             opened,
             rate,
             channels: 2,
-            carry: Vec::with_capacity(FRAME_BYTES),
+            frame_bytes: NARROW_FRAME_BYTES,
+            carry: Vec::with_capacity(WIDE_FRAME_BYTES),
             scratch: Vec::new(),
             follower,
             taken: 0,
@@ -540,7 +570,7 @@ impl<F: RateFollower> I2sSink<F> {
 
     /// Reservoir bytes of `ms` at the current rate.
     fn prime_bytes(&self, ms: u32) -> usize {
-        (self.rate as usize * ms as usize / 1000) * FRAME_BYTES
+        (self.rate as usize * ms as usize / 1000) * self.frame_bytes
     }
 
     /// Wait until the reservoir and the DMA have played out; bounded.
@@ -554,12 +584,13 @@ impl<F: RateFollower> I2sSink<F> {
     }
 }
 
-/// The reservoir's size in bytes for [`LEAD_MS`] at `rate`, whole frames.
-fn reservoir_bytes(rate: u32) -> usize {
-    (rate as usize * LEAD_MS as usize / 1000) * FRAME_BYTES
+/// The reservoir's size in bytes for [`LEAD_MS`] at `rate` with frames
+/// of `frame_bytes`, whole frames.
+fn reservoir_bytes(rate: u32, frame_bytes: usize) -> usize {
+    (rate as usize * LEAD_MS as usize / 1000) * frame_bytes
 }
 
-/// I2S0's transmit channel: master, Philips, 16-bit stereo, over the
+/// I2S0's transmit channel: master, Philips, 32-bit stereo, over the
 /// raw driver, so that a change of rate is a change of clock and the
 /// DMA ring allocated at the open is the one for the life of the player.
 struct Channel(sys::i2s_chan_handle_t);
@@ -580,7 +611,7 @@ impl Channel {
         rate: u32,
     ) -> Result<(Self, u32), sys::EspError> {
         let lead = lead_ms(rate, BUFFERS);
-        info!("i2s: {rate} Hz, 16-bit samples in {SLOT_BITS}-bit slots (bit clock {} fs), {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead", 2 * SLOT_BITS);
+        info!("i2s: {rate} Hz, {SAMPLE_BITS}-bit samples in {SLOT_BITS}-bit slots (bit clock {} fs), {BUFFERS} DMA buffers of {FRAMES_PER_BUFFER} frames, {lead} ms of lead", 2 * SLOT_BITS);
         let chan = sys::i2s_chan_config_t {
             id: sys::i2s_port_t_I2S_NUM_0,
             role: sys::i2s_role_t_I2S_ROLE_MASTER,
@@ -604,13 +635,14 @@ impl Channel {
             ))?;
             let std = sys::i2s_std_config_t {
                 clk_cfg: Self::clock(rate),
-                // 16-bit samples in 32-bit slots: the bit clock is 64 fs,
+                // 32-bit samples in 32-bit slots: the bit clock is 64 fs,
                 // the frame every Pi-HAT DAC takes (a Sabre in hardware
                 // mode reads 32 fs as a wrong word and plays it loud);
-                // the samples sit at the top of the slot, Philips-shifted.
+                // the stream's bits sit at the top, Philips-shifted, and
+                // a DAC of fewer bits takes the top ones.
                 slot_cfg: sys::i2s_std_slot_config_t {
                     data_bit_width:
-                        sys::i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT,
+                        sys::i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_32BIT,
                     slot_bit_width:
                         sys::i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_32BIT,
                     slot_mode: sys::i2s_slot_mode_t_I2S_SLOT_MODE_STEREO,
@@ -712,7 +744,12 @@ fn feed(
     commands: &Receiver<Command>,
     opened: &AtomicU32,
 ) {
-    let mut chunk = vec![0u8; CHUNK];
+    // Both in internal SRAM by name: the heap is PSRAM-first, and a
+    // chunk there would be read from PSRAM twice over.
+    let chunk = crate::alloc::internal_buffer(CHUNK)
+        .expect("feeder: 4 KB of internal SRAM for the chunk");
+    let wire = crate::alloc::internal_buffer(2 * CHUNK)
+        .expect("feeder: 8 KB of internal SRAM for the wire buffer");
     let mut dry_since: Option<Instant> = None;
     // The task watchdog watches the feeder too: no feeder, no sound.
     // SAFETY: a null handle names the calling task.
@@ -768,8 +805,10 @@ fn feed(
             reservoir.prime.store(0, Ordering::Relaxed);
         }
         LEAD_LOW.fetch_min(reservoir.readable(), Ordering::Relaxed);
+        let frame_bytes = reservoir.frame_bytes.load(Ordering::Relaxed);
+        LEAD_FRAME.store(frame_bytes, Ordering::Relaxed);
         let popping = Instant::now();
-        let n = reservoir.pop(&mut chunk);
+        let n = reservoir.pop(chunk);
         add_us(&POP_US, popping);
         if n == 0 {
             if reservoir.armed.load(Ordering::Relaxed) && dry_since.is_none() {
@@ -792,17 +831,17 @@ fn feed(
         }
         POPS.fetch_add(1, Ordering::Relaxed);
         let scaling = Instant::now();
-        scale(&mut chunk[..n], volume.gain());
+        let n = widen_and_scale(&chunk[..n], frame_bytes, wire, volume.gain());
         add_us(&SCALE_US, scaling);
         let writing = Instant::now();
         let mut offset = 0;
         while offset < n {
-            match i2s.write(&chunk[offset..n], 200) {
+            match i2s.write(&wire[offset..n], 200) {
                 Ok(written) => {
                     offset += written;
                     if let Ok(mut m) = reservoir.dma.lock() {
                         let rate = reservoir.rate.load(Ordering::Relaxed);
-                        m.fed(written / FRAME_BYTES, rate);
+                        m.fed(written / WIRE_FRAME_BYTES, rate);
                     }
                 }
                 Err(e) if e.code() == sys::ESP_ERR_TIMEOUT => {}
@@ -816,17 +855,44 @@ fn feed(
     }
 }
 
-/// Scale 16-bit little-endian samples in place by a Q15 gain.
-fn scale(bytes: &mut [u8], gain: u16) {
-    if gain == UNITY {
-        return;
+/// The reservoir's samples, in `frame_bytes`-byte frames of the
+/// stream's width, into `wire` as 32-bit words scaled by a Q15 gain,
+/// in one pass: a 16-bit sample is placed at the top of the word and
+/// scaled there, so the level costs it no bits; a 32-bit sample is
+/// scaled in 64 bits and rounded. The bytes written to `wire`.
+fn widen_and_scale(
+    bytes: &[u8],
+    frame_bytes: usize,
+    wire: &mut [u8],
+    gain: u16,
+) -> usize {
+    let gain = i64::from(gain);
+    let unity = gain == i64::from(UNITY);
+    let mut out = 0;
+    if frame_bytes == NARROW_FRAME_BYTES {
+        for s in bytes.as_chunks::<2>().0 {
+            let v = i32::from(i16::from_le_bytes(*s)) << 16;
+            let v = if unity {
+                v
+            } else {
+                (((i64::from(v) * gain) + (1 << 14)) >> 15) as i32
+            };
+            wire[out..out + 4].copy_from_slice(&v.to_le_bytes());
+            out += 4;
+        }
+    } else {
+        for s in bytes.as_chunks::<4>().0 {
+            let v = i32::from_le_bytes(*s);
+            let v = if unity {
+                v
+            } else {
+                (((i64::from(v) * gain) + (1 << 14)) >> 15) as i32
+            };
+            wire[out..out + 4].copy_from_slice(&v.to_le_bytes());
+            out += 4;
+        }
     }
-    let gain = i32::from(gain);
-    for s in bytes.as_chunks_mut::<2>().0 {
-        let v = i16::from_le_bytes(*s);
-        let scaled = ((i32::from(v) * gain) + (1 << 14)) >> 15;
-        *s = (scaled as i16).to_le_bytes();
-    }
+    out
 }
 
 impl<F: RateFollower> FrameSink for I2sSink<F> {
@@ -836,6 +902,28 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         self.taken = 0;
         self.reservoir.armed.store(false, Ordering::Relaxed);
         self.reservoir.paused.store(false, Ordering::Relaxed);
+        // The reservoir keeps the stream's width: a change of width
+        // alone drains it and resizes it, the clocks untouched.
+        let frame_bytes = if format.bits > 16 {
+            WIDE_FRAME_BYTES
+        } else {
+            NARROW_FRAME_BYTES
+        };
+        if frame_bytes != self.frame_bytes {
+            info!(
+                "sink: {}-bit -> {}-bit frames in the reservoir",
+                self.frame_bytes * 4,
+                frame_bytes * 4
+            );
+            self.drain();
+            self.frame_bytes = frame_bytes;
+            self.reservoir
+                .frame_bytes
+                .store(frame_bytes, Ordering::Relaxed);
+            let bytes = reservoir_bytes(self.rate, frame_bytes)
+                .min(self.reservoir.capacity);
+            self.reservoir.len.store(bytes, Ordering::Relaxed);
+        }
         if format.sample_rate != self.rate && format.sample_rate > 0 {
             info!("i2s: {} Hz -> {} Hz", self.rate, format.sample_rate);
             // The previous stream's tail plays out first, then the feeder
@@ -859,7 +947,8 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
                 if gate.load(Ordering::Acquire) != GATE_OPEN {
                     warn!("i2s: the feeder did not stop the clocks for the codecs; writing anyway");
                 }
-                self.follower.rate_changed(format.sample_rate, 16);
+                self.follower
+                    .rate_changed(format.sample_rate, SAMPLE_BITS as u8);
                 gate.store(GATE_DONE, Ordering::Release);
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while self.opened.load(Ordering::Acquire) == before
@@ -874,7 +963,8 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
             self.reservoir
                 .dma_lead_ms
                 .store(self.dma_lead_ms, Ordering::Relaxed);
-            let bytes = reservoir_bytes(self.rate).min(self.reservoir.capacity);
+            let bytes = reservoir_bytes(self.rate, self.frame_bytes)
+                .min(self.reservoir.capacity);
             self.reservoir.len.store(bytes, Ordering::Relaxed);
         }
         let prime_ms = if self.reservoir.started.swap(true, Ordering::Relaxed) {
@@ -891,7 +981,7 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         );
     }
 
-    fn write(&mut self, interleaved: &[i16]) -> usize {
+    fn write(&mut self, samples: Samples<'_>) -> usize {
         if !self.carry.is_empty() {
             let carry = std::mem::take(&mut self.carry);
             let n = self.reservoir.push(&carry);
@@ -901,49 +991,86 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
             }
         }
         let ch = self.channels;
-        let frames = interleaved.len() / ch;
+        let frames = samples.len() / ch;
         if frames == 0 {
             return 0;
         }
         // Only what fits is converted: the reservoir is the pace.
-        let room = self.reservoir.writable() / FRAME_BYTES;
+        let frame_bytes = self.frame_bytes;
+        let room = self.reservoir.writable() / frame_bytes;
         let frames = frames.min(room);
         if frames == 0 {
             return 0;
         }
-        // Stereo 16-bit little-endian is the wire's own layout: the
-        // samples go to the reservoir as they are. Through the scratch
-        // (a PSRAM buffer written and read again) the write cost 11% of
-        // the core at 96 kHz, measured 2026-11-02; PSRAM moves at
-        // ~10 MB/s here. Mono is doubled and more than two channels are
-        // cut to the first two through the scratch.
-        let bytes: &[u8] = if ch == 2 {
-            let samples = &interleaved[..frames * 2];
-            // SAFETY: i16 has no padding and the chip is little-endian;
-            // the view covers exactly the samples' bytes.
-            unsafe {
-                core::slice::from_raw_parts(
-                    samples.as_ptr().cast::<u8>(),
-                    samples.len() * 2,
-                )
+        // Stereo in the reservoir's own width is the layout as it lies:
+        // the samples go in as they are, one pass over PSRAM. Through a
+        // scratch (written and read again) the write cost 11% of the
+        // core at 96 kHz, measured 2026-11-02; PSRAM moves at ~12 MB/s
+        // here. Anything else — mono, more than two channels, a width
+        // the stream was not started with — goes through the scratch,
+        // doubled, cut to two, widened or narrowed.
+        let bytes: &[u8] = match (samples, ch, frame_bytes) {
+            (Samples::I16(s), 2, NARROW_FRAME_BYTES) => {
+                let s = &s[..frames * 2];
+                // SAFETY: i16 has no padding and the chip is
+                // little-endian; the view covers exactly the samples.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        s.as_ptr().cast::<u8>(),
+                        s.len() * 2,
+                    )
+                }
             }
-        } else {
-            self.scratch.clear();
-            self.scratch.reserve(frames * FRAME_BYTES);
-            for f in interleaved[..frames * ch].chunks_exact(ch) {
-                let l = f[0].to_le_bytes();
-                let r = if ch >= 2 { f[1].to_le_bytes() } else { l };
-                self.scratch.extend_from_slice(&l);
-                self.scratch.extend_from_slice(&r);
+            (Samples::I32(s), 2, WIDE_FRAME_BYTES) => {
+                let s = &s[..frames * 2];
+                // SAFETY: as above, for i32.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        s.as_ptr().cast::<u8>(),
+                        s.len() * 4,
+                    )
+                }
             }
-            &self.scratch
+            _ => {
+                self.scratch.clear();
+                self.scratch.reserve(frames * frame_bytes);
+                let mut put = |v: i32| {
+                    if frame_bytes == WIDE_FRAME_BYTES {
+                        self.scratch.extend_from_slice(&v.to_le_bytes());
+                    } else {
+                        self.scratch.extend_from_slice(
+                            &((v >> 16) as i16).to_le_bytes(),
+                        );
+                    }
+                };
+                match samples {
+                    Samples::I16(s) => {
+                        for f in s[..frames * ch].chunks_exact(ch) {
+                            let l = i32::from(f[0]) << 16;
+                            let r =
+                                if ch >= 2 { i32::from(f[1]) << 16 } else { l };
+                            put(l);
+                            put(r);
+                        }
+                    }
+                    Samples::I32(s) => {
+                        for f in s[..frames * ch].chunks_exact(ch) {
+                            let l = f[0];
+                            let r = if ch >= 2 { f[1] } else { l };
+                            put(l);
+                            put(r);
+                        }
+                    }
+                }
+                &self.scratch
+            }
         };
         let n = self.reservoir.push(bytes);
-        let whole = n / FRAME_BYTES;
-        let part = n % FRAME_BYTES;
+        let whole = n / frame_bytes;
+        let part = n % frame_bytes;
         if part != 0 {
             self.carry.extend_from_slice(
-                &bytes[whole * FRAME_BYTES + part..(whole + 1) * FRAME_BYTES],
+                &bytes[whole * frame_bytes + part..(whole + 1) * frame_bytes],
             );
         }
         let took = whole + usize::from(part != 0);
@@ -983,7 +1110,7 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
     }
 
     fn held(&self) -> usize {
-        self.reservoir.readable() / FRAME_BYTES + self.reservoir.in_dma()
+        self.reservoir.readable() / self.frame_bytes + self.reservoir.in_dma()
     }
 }
 
@@ -1013,11 +1140,11 @@ impl<F: RateFollower> FrameSink for Shared<F> {
             .unwrap_or_else(|e| e.into_inner())
             .start(format);
     }
-    fn write(&mut self, interleaved: &[i16]) -> usize {
+    fn write(&mut self, samples: Samples<'_>) -> usize {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .write(interleaved)
+            .write(samples)
     }
     fn flush(&mut self) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).flush();
