@@ -101,9 +101,15 @@ const EAGER: usize = 4 * CHUNK;
 /// The pause between chunks once [`EAGER`] is in hand.
 const PACE: Duration = Duration::from_millis(6);
 /// The longest a chunk waits for [`Tuning::hold`] to clear: a paint
-/// stage on a shared bus is a few tens of milliseconds; the ring has
-/// seconds in hand.
+/// stage on a shared bus is a few tens of milliseconds.
 const HOLD_MAX: Duration = Duration::from_millis(60);
+/// With less than this ahead of the decoder the reader does not wait
+/// for the hold: the hold is a courtesy the ring extends from its
+/// surplus, never from the audio. A 96 kHz 24-bit FLAC takes ~400 KB/s;
+/// this is a quarter of a second of it, and a chunk held for `HOLD_MAX`
+/// and read in 6 ms still moves 110 KB/s, so a ring that honours every
+/// hold through a browse drains to here in a second and reads on.
+const HOLD_SURPLUS: usize = 96 * 1024;
 /// The reader's stack: the file system and the card's driver, or a
 /// network transport's read.
 const STACK: usize = 12 * 1024;
@@ -157,11 +163,11 @@ pub struct Tuning {
     /// What the ring holds at most, `BEHIND` of it behind the decoder.
     pub capacity: usize,
     /// Raised while the source's bus is wanted elsewhere (a panel on
-    /// the card's SPI, painting): every chunk waits for it to clear, up
-    /// to `HOLD_MAX`. An eager refill waits too: at a track's start the
-    /// probe's reads are what the face's first paint of the new track
-    /// would otherwise queue behind, and a paint stage is shorter than
-    /// the sink's lead.
+    /// the card's SPI, painting): a chunk waits for it to clear, up to
+    /// `HOLD_MAX`, while the ring has `HOLD_SURPLUS` ahead of the
+    /// decoder. Short of that the reader reads: the hold was measured
+    /// to break the sound up when a browse painted for seconds on end
+    /// (2026-11-02), and the face is not what the player is for.
     pub hold: Option<&'static AtomicBool>,
 }
 
@@ -396,7 +402,7 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
     let skew = raw.as_ptr().align_offset(4);
     let buf = &mut raw[skew..skew + chunk];
     loop {
-        let (generation, want, paced) = {
+        let (generation, want, ahead) = {
             let mut s = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if s.stop {
@@ -426,14 +432,15 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
                 break (
                     s.generation,
                     room.min(chunk) / BLOCK * BLOCK,
-                    s.available() >= tuning.eager,
+                    s.available(),
                 );
             }
         };
+        let paced = ahead >= tuning.eager;
         if paced && !tuning.pace.is_zero() {
             thread::sleep(tuning.pace);
         }
-        if let Some(hold) = tuning.hold {
+        if let (Some(hold), true) = (tuning.hold, ahead >= HOLD_SURPLUS) {
             let until = Instant::now() + HOLD_MAX;
             while hold.load(Relaxed) && Instant::now() < until {
                 thread::sleep(Duration::from_millis(1));

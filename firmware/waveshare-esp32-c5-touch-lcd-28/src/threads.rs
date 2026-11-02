@@ -4,9 +4,9 @@
 //! Where each thread stands on the one core.
 //!
 //! Three tiers under the drivers (the feeder at 24, the Wi-Fi driver
-//! at 23, lwIP at 18): the threads that feed the decoder and the sink,
-//! the main loop with the decoder level with it, and everything else.
-//! The main loop is touch, face and the decoder's hand-over on the main
+//! at 23, lwIP at 18): the threads that feed the decoder and the sink
+//! and the decoder itself, the main loop, and everything else. The
+//! main loop is touch, face and the decoder's hand-over on the main
 //! task. Above it, a read-ahead reader,
 //! a station's fetcher or a room's receiver takes the core the moment
 //! its bytes arrive and gives it back once they are in the ring: the
@@ -39,17 +39,18 @@ use evo_esp32_sdk::thread::{Placement, Role};
 /// The sink's feeder, which moves frames from the reservoir into the
 /// I2S DMA ring: above the Wi-Fi driver's 23, the top the kernel allows.
 pub const FEEDER_PRIORITY: u8 = 24;
-/// The main task: touch, face and the decoder's tick. ESP-IDF starts
-/// it at 1; it is raised once the art worker exists.
+/// The main task: touch, face and the decoder's hand-over. ESP-IDF
+/// starts it at 1; it is raised once the art worker exists.
 pub const MAIN_PRIORITY: u8 = 5;
-/// The decoder: level with the loop, so the kernel slices the core
-/// between them a millisecond at a time while both want it. Above the
-/// loop (measured 2026-11-01/02 overnight) it took the whole core while
-/// it filled the sink's 600 ms of lead at every track start, and the
-/// face's paint of the new track waited 268–1203 ms behind it; level,
-/// a paint stage takes twice its own time and the prime a little
-/// longer, and neither waits for the other to finish.
-pub const DECODE_PRIORITY: u8 = MAIN_PRIORITY;
+/// The decoder: above the loop, with the readers. Audio is the
+/// product; the face takes what the audio leaves. Level with the loop
+/// (tried 2026-11-02) a 96 kHz FLAC at 55% of the core was starved
+/// whenever the loop was busy — a list painted, a listing read — and
+/// the sound broke up. What the decoder owes the face is not its
+/// priority but a breath: once the sink holds a comfortable lead it
+/// sleeps between blocks (the plugin's `COMFORT_MS`), so a paint goes
+/// out while the rest of the lead fills.
+pub const DECODE_PRIORITY: u8 = FEED_PRIORITY;
 /// Threads that feed the decoder or the sink: one above the loop.
 pub const FEED_PRIORITY: u8 = 6;
 /// The touch reader: above the feeders. It wakes on the controller's

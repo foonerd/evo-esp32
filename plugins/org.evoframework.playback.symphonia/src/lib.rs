@@ -110,6 +110,16 @@ const PAUSED_IDLE_MS: u32 = 250;
 const SINK_FULL_IDLE_MS: u32 = 20;
 /// How long to wait for a network stream's buffer to fill.
 const BUFFERING_IDLE_MS: u32 = 50;
+/// The lead past which the decoder breathes: with this much decoded
+/// audio in the sink it sleeps [`BREATH_MS`] after each block, so a
+/// distribution's face — below it in priority, as the face should be —
+/// gets the core while the rest of the lead fills. Below it the
+/// decoder runs flat out: a track's start, a seek, a slow passage.
+const COMFORT_MS: u64 = 250;
+/// The breath between blocks once the lead is comfortable. A 50 ms
+/// block of 96 kHz FLAC decodes in ~27 ms on the ESP32-C5; ten more
+/// give the face a quarter of the core and the lead still grows.
+const BREATH_MS: u64 = 10;
 /// How long between looks at a stream still being reached.
 const OPENING_IDLE_MS: u32 = 50;
 /// The stack of the thread that reaches a network stream: the TLS
@@ -857,7 +867,12 @@ impl Decoder {
                 continue;
             }
             match self.block() {
-                Step::Working => self.publish(),
+                Step::Working => {
+                    self.publish();
+                    if self.comfortable() {
+                        std::thread::sleep(Duration::from_millis(BREATH_MS));
+                    }
+                }
                 Step::Wait(ms) => {
                     // The sink may have taken part of a block before it
                     // filled: the position moved.
@@ -870,6 +885,18 @@ impl Decoder {
                 }
             }
         }
+    }
+
+    /// Whether the sink holds [`COMFORT_MS`] of decoded audio: the
+    /// decoder can breathe.
+    fn comfortable(&self) -> bool {
+        let rate =
+            u64::from(self.state.format.as_ref().map_or(0, |f| f.sample_rate));
+        if rate == 0 {
+            return false;
+        }
+        let held = self.sink.lock().held() as u64;
+        held * 1000 / rate >= COMFORT_MS
     }
 
     /// Act on a command; `Some` when it ends the run.

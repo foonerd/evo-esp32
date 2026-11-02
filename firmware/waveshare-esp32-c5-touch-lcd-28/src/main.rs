@@ -167,9 +167,6 @@ const HOLD_TO_RETURN: Duration = Duration::from_secs(5);
 const HOLD_WINDOW: Duration = Duration::from_secs(15);
 /// How long the loop sleeps between ticks when the fabric is idle.
 const TICK: Duration = Duration::from_millis(5);
-/// How often the loop sleeps a millisecond for the idle task while the
-/// decoder is behind and would otherwise never let go of the core.
-const IDLE_EVERY: Duration = Duration::from_millis(250);
 /// The face's cadence while a finger is about.
 const FACE_TICK: Duration = Duration::from_millis(40);
 /// The face's cadence at rest: no frame in progress and no finger on
@@ -949,7 +946,6 @@ fn main() -> anyhow::Result<()> {
 
     let mut seen = Seq(0);
     let mut last_beat = Instant::now();
-    let mut last_idle = Instant::now();
     let mut shares = CoreShares::new();
     let mut census = alloc::Census::new();
     #[cfg(feature = "heap-trace")]
@@ -2157,13 +2153,11 @@ fn main() -> anyhow::Result<()> {
                 info!("wifi: {}", net::link_line());
             }
         }
-        // The idle task must run or its watchdog bites (5 s): a short
-        // sleep when the fabric wants ticking now or a frame is
-        // mid-paint, the tick length otherwise. While the decoder is
-        // short of lead every millisecond is its, so the sleep then
-        // comes once in [`IDLE_EVERY`]: a 96 kHz FLAC at the edge of the
-        // core lost 7% to these sleeps (measured by the kernel's run-time
-        // counters) and ran dry for it.
+        // A short sleep when the fabric wants ticking now or a frame is
+        // mid-paint, the tick length otherwise. The decoder runs on its
+        // own thread above this one, so a sleep here costs it nothing;
+        // a yield here (from the days it decoded on this task) was a
+        // spin that took a quarter of the core from it at 96 kHz.
         let turn = turn_started.elapsed();
         if turn >= LONG_TURN {
             info!(
@@ -2176,18 +2170,11 @@ fn main() -> anyhow::Result<()> {
             );
         }
         let due_now = painting || due.is_some_and(|d| d.0 <= t.0);
-        if due_now && audio_short && last_idle.elapsed() < IDLE_EVERY {
-            std::thread::yield_now();
+        std::thread::sleep(if due_now {
+            Duration::from_millis(1)
         } else {
-            if due_now {
-                last_idle = Instant::now();
-            }
-            std::thread::sleep(if due_now {
-                Duration::from_millis(1)
-            } else {
-                TICK
-            });
-        }
+            TICK
+        });
     }
 }
 
