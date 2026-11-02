@@ -903,6 +903,10 @@ fn main() -> anyhow::Result<()> {
     // A finger on the seek slider: where it would land, 0 to 1, shown as
     // the position until the lift seeks there.
     let mut scrub: Option<f32> = None;
+    // The lift's seek, until the decoder reports from near it: the bar
+    // keeps showing the target rather than the old position for the
+    // quarter second the seek takes (and the ticks until it is reported).
+    let mut seeking: Option<(f32, u64, Instant)> = None;
 
     // The library page: the folder in view, the way back to the root, and
     // the folder's tracks in the source's order, which a tap plays from.
@@ -976,6 +980,7 @@ fn main() -> anyhow::Result<()> {
     // longest a report can wait to be read.
     let mut touch_waiting: Option<Instant> = None;
     let mut gesture = Gesture::default();
+    let mut said_ms = 0u32;
     let mut touch_wait_max = Duration::ZERO;
     let mut touch_waits = 0u32;
     let mut turn_started = Instant::now();
@@ -1243,14 +1248,17 @@ fn main() -> anyhow::Result<()> {
                             .and_then(|pb| pb.track)
                             .and_then(|tr| tr.duration_ms);
                         match (current, duration) {
-                            (Some(h), Some(d)) => correct(
-                                &mut steward,
-                                h,
-                                Correction::Seek {
-                                    position_ms: (f as f64 * d as f64) as u64,
-                                },
-                                t,
-                            ),
+                            (Some(h), Some(d)) => {
+                                let position_ms = (f as f64 * d as f64) as u64;
+                                seeking =
+                                    Some((f, position_ms, Instant::now()));
+                                correct(
+                                    &mut steward,
+                                    h,
+                                    Correction::Seek { position_ms },
+                                    t,
+                                );
+                            }
                             _ => info!("seek: nothing to seek in"),
                         }
                     }
@@ -1791,7 +1799,16 @@ fn main() -> anyhow::Result<()> {
             let pb = playback_state(&steward).unwrap_or_default();
             let source = rooms.source().map_or("Card", Source::label);
             let mut state = View::new(&pb, output.as_ref(), source);
-            if let (Some(f), Some(d)) = (scrub, state.duration_ms) {
+            if let Some((_, target, since)) = seeking {
+                if pb.position_ms.abs_diff(target) <= SEEK_LANDED_MS
+                    || since.elapsed() >= SEEK_HOLD
+                    || current.is_none()
+                {
+                    seeking = None;
+                }
+            }
+            let shown = scrub.or(seeking.map(|s| s.0));
+            if let (Some(f), Some(d)) = (shown, state.duration_ms) {
                 state.position_ms = (f as f64 * d as f64) as u64;
             }
             state.caution = if hat_silent.load(Ordering::Relaxed) {
@@ -2094,6 +2111,9 @@ fn main() -> anyhow::Result<()> {
             busy = Duration::ZERO;
             drawing = Duration::ZERO;
             last_beat = Instant::now();
+            // What the console costs the loop in play, not at boot: this
+            // block's own lines, timed, said next time.
+            let saying = Instant::now();
             // SAFETY: plain getters; a null handle means the calling task.
             let (free, min, internal, stack) = unsafe {
                 (
@@ -2104,11 +2124,12 @@ fn main() -> anyhow::Result<()> {
                 )
             };
             info!(
-                "heartbeat: free heap {free} B (internal {internal} B), low-water {min} B, main stack low-water {stack} B, ticking {:.0}% and drawing {:.0}% of the time, {full_frames} full frames, the longest turn {} ms, {touch_waits} touches waited up to {} ms",
+                "heartbeat: free heap {free} B (internal {internal} B), low-water {min} B, main stack low-water {stack} B, ticking {:.0}% and drawing {:.0}% of the time, {full_frames} full frames, the longest turn {} ms, {touch_waits} touches waited up to {} ms; the last heartbeat's lines took {} ms to say",
                 busy_share * 100.0,
                 drawing_share * 100.0,
                 turn_max.as_millis(),
-                touch_wait_max.as_millis()
+                touch_wait_max.as_millis(),
+                said_ms
             );
             full_frames = 0;
             turn_max = Duration::ZERO;
@@ -2178,6 +2199,7 @@ fn main() -> anyhow::Result<()> {
                 alloc::Account::now().line()
             );
             info!("{}", census.take());
+            said_ms = saying.elapsed().as_millis() as u32;
             #[cfg(feature = "heap-trace")]
             alloc::trace::beat();
             if largest_dma < DMA_TRIPWIRE {
@@ -3237,6 +3259,12 @@ fn skip(
         }
     }
 }
+
+/// How long a seek's target stays on the bar after the lift, at most.
+const SEEK_HOLD: Duration = Duration::from_secs(3);
+/// A reported position this close to the seek's target is the seek
+/// landed: the bar shows the decoder's position again.
+const SEEK_LANDED_MS: u64 = 1_500;
 
 /// How one gesture on a slider was followed: the reports the reader
 /// took (and how far apart, as read), how late the loop handled them,
