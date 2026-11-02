@@ -66,18 +66,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   named board cannot do (a PCM5102A has no mute). A name not in the
   register is reported and set aside.
 
-- The face paints the new track without waiting for the decoder, and
-  the sound never waits for the face. With the decoder on its own
-  thread above the loop, the loop ran only when the decoder waited, and
-  at a track start — 600 ms of lead to fill — the paint of the new
-  title took 268–1203 ms. The decoder stays above the face, as the
-  audio should, and once the sink holds a quarter of a second it
-  breathes between blocks so the face gets the core while the rest of
-  the lead fills. (Putting the two level, tried first, broke the sound
-  up whenever a list was browsed during a 96 kHz track.) The card's
-  reads hold off while the panel is painted, from the ring's surplus
-  only; and the loop no longer spins when the lead is short, which
-  took a quarter of the core from the decoder.
+- The face paints the new track without waiting for the decoder. With
+  the decoder on its own thread one priority above the loop, the loop
+  ran only when the decoder waited, and at a track start — 600 ms of
+  lead to fill — the paint of the new title took 268–1203 ms. The
+  decoder now stands level with the loop and the two share the core a
+  millisecond at a time.
 
 - The volume costs no bits. Samples travelled as 16-bit and the level
   was applied to them: turned down to 40%, about eleven of the sixteen

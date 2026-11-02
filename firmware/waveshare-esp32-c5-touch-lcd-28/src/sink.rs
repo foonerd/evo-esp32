@@ -62,12 +62,10 @@ const CEILING_HZ: u32 = 96_000;
 /// after a starvation (21 ms at 48 kHz); shorter buffers would tighten
 /// that but cost the core at 96 kHz, where the decoder has none to
 /// spare (measured: 480-frame buffers starve a 96 kHz FLAC every few
-/// hundred milliseconds). A DMA descriptor carries at most 4092 bytes
-/// (the driver cuts a larger ask down and says so): 511 stereo frames
-/// of 32 bits. 40 ms since the samples went to 32 bits: the ring's
-/// bytes are what internal SRAM had for it at 16, and the feeder at the
-/// top priority is never away a tenth of that.
-const FRAMES_PER_BUFFER: u32 = 511;
+/// hundred milliseconds). 40 ms since the samples went to 32 bits: the
+/// ring's bytes are what internal SRAM had for it at 16, and the
+/// feeder at the top priority is never away a tenth of that.
+const FRAMES_PER_BUFFER: u32 = 1023;
 const DMA_MS: u32 = 40;
 const BUFFERS: u32 = (CEILING_HZ * DMA_MS / 1000).div_ceil(FRAMES_PER_BUFFER);
 /// Bytes per stereo 32-bit frame on the wire.
@@ -854,37 +852,21 @@ impl<F: RateFollower> FrameSink for I2sSink<F> {
         if frames == 0 {
             return 0;
         }
-        // Stereo 32-bit little-endian is the wire's own layout: the
-        // samples go to the reservoir as they are, one pass less over
-        // PSRAM. Mono is doubled and more than two channels are cut to
-        // the first two through the scratch.
-        let bytes: &[u8] = if ch == 2 {
-            let samples = &interleaved[..frames * 2];
-            // SAFETY: i32 has no padding and the chip is little-endian;
-            // the view covers exactly the samples' bytes.
-            unsafe {
-                core::slice::from_raw_parts(
-                    samples.as_ptr().cast::<u8>(),
-                    samples.len() * 4,
-                )
-            }
-        } else {
-            self.scratch.clear();
-            self.scratch.reserve(frames * FRAME_BYTES);
-            for f in interleaved[..frames * ch].chunks_exact(ch) {
-                let l = f[0].to_le_bytes();
-                let r = if ch >= 2 { f[1].to_le_bytes() } else { l };
-                self.scratch.extend_from_slice(&l);
-                self.scratch.extend_from_slice(&r);
-            }
-            &self.scratch
-        };
-        let n = self.reservoir.push(bytes);
+        self.scratch.clear();
+        self.scratch.reserve(frames * FRAME_BYTES);
+        for f in interleaved[..frames * ch].chunks_exact(ch) {
+            let l = f[0].to_le_bytes();
+            let r = if ch >= 2 { f[1].to_le_bytes() } else { l };
+            self.scratch.extend_from_slice(&l);
+            self.scratch.extend_from_slice(&r);
+        }
+        let n = self.reservoir.push(&self.scratch);
         let whole = n / FRAME_BYTES;
         let part = n % FRAME_BYTES;
         if part != 0 {
             self.carry.extend_from_slice(
-                &bytes[whole * FRAME_BYTES + part..(whole + 1) * FRAME_BYTES],
+                &self.scratch
+                    [whole * FRAME_BYTES + part..(whole + 1) * FRAME_BYTES],
             );
         }
         let took = whole + usize::from(part != 0);
