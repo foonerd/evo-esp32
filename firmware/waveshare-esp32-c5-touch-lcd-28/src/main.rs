@@ -1823,7 +1823,11 @@ fn main() -> anyhow::Result<()> {
                 presence.set_art(found.bytes.and_then(VolumioArt::sniff));
             }
             let before_paint = last_face.elapsed();
+            // The panel and the card share SPI2: the card's readers hold
+            // off while the paint's transfers go out.
+            threads::PAINTING.store(true, Ordering::Release);
             let painted = face.refresh(&mut panel, &state);
+            threads::PAINTING.store(false, Ordering::Release);
             if update_ack.is_some() || show_now {
                 show_now = false;
                 // The whole face with the message, then the page may write
@@ -2320,6 +2324,7 @@ fn bring_up(
                     codecs(),
                 )
                 .with_card_memory(alloc::card_chunk)
+                .yielding_card_to(&threads::PAINTING)
                 .with_opener(Box::new(HttpOpener))
                 .with_file_opener(Box::new(SmbOpener::new(shares.clone())))
                 .with_file_opener(Box::new(SmbOpener::smb1(shares)))

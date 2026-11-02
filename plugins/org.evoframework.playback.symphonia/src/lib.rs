@@ -347,6 +347,9 @@ pub struct PlaybackSymphonia {
     /// Where the card ring's chunk buffer comes from; the heap unless
     /// the distribution says ([`with_card_memory`](Self::with_card_memory)).
     card_memory: ahead::ChunkMemory,
+    /// A flag the distribution raises while the card's bus is wanted
+    /// elsewhere; the ring's paced reads wait for it to clear.
+    card_hold: Option<&'static std::sync::atomic::AtomicBool>,
     subject: Option<SubjectId>,
     in_hand: Option<InHand>,
 }
@@ -370,6 +373,7 @@ impl PlaybackSymphonia {
             opener: None,
             files: Arc::new(Vec::new()),
             card_memory: ahead::heap_chunk,
+            card_hold: None,
             subject: None,
             in_hand: None,
         }
@@ -380,6 +384,17 @@ impl PlaybackSymphonia {
     /// [`ahead::ChunkMemory`]).
     pub fn with_card_memory(mut self, memory: ahead::ChunkMemory) -> Self {
         self.card_memory = memory;
+        self
+    }
+
+    /// With a flag the card ring yields the bus to: raised by the
+    /// distribution while something else on the card's bus (a panel)
+    /// must not wait behind a read. See [`ahead::Tuning::hold`].
+    pub fn yielding_card_to(
+        mut self,
+        hold: &'static std::sync::atomic::AtomicBool,
+    ) -> Self {
+        self.card_hold = Some(hold);
         self
     }
 
@@ -479,6 +494,7 @@ impl Warden for PlaybackSymphonia {
         let (tx, rx) = mailbox();
         let (uri, codecs) = (track.uri.clone(), Arc::clone(&self.codecs));
         let card_memory = self.card_memory;
+        let card_hold = self.card_hold;
         evo_esp32_sdk::thread::spawn(
             evo_esp32_sdk::thread::Role::Background,
             "open",
@@ -491,6 +507,7 @@ impl Warden for PlaybackSymphonia {
                     opener.as_ref(),
                     &files,
                     card_memory,
+                    card_hold,
                 ));
             },
         )
@@ -1069,6 +1086,7 @@ fn open(
     opener: Option<&Arc<dyn StreamOpener>>,
     files: &[Box<dyn FileOpener>],
     card_memory: ahead::ChunkMemory,
+    card_hold: Option<&'static std::sync::atomic::AtomicBool>,
 ) -> Result<(Stream, Format), CustodyError> {
     let mut hint = Hint::new();
     let mut live = None;
@@ -1177,7 +1195,12 @@ fn open(
             ahead::ReadAhead::with_tuning(
                 flac::Patched::new(file, patches),
                 len,
-                ahead::Tuning::card().in_memory(card_memory),
+                match card_hold {
+                    Some(h) => ahead::Tuning::card()
+                        .in_memory(card_memory)
+                        .yielding_to(h),
+                    None => ahead::Tuning::card().in_memory(card_memory),
+                },
             )
             .map_err(|e| CustodyError(format!("reader: {e}")))?,
         )

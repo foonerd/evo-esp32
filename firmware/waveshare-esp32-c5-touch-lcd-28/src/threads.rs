@@ -30,6 +30,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 use esp_idf_svc::hal::task::thread::{MallocCap, ThreadSpawnConfiguration};
@@ -62,6 +63,27 @@ pub const BACKGROUND_PRIORITY: u8 = 4;
 /// derivation is a few hundred milliseconds of arithmetic the decoder
 /// is not to wait for.
 pub const JOIN_PRIORITY: u8 = 1;
+
+/// Raised by the loop while the panel is painted. The panel and the
+/// card share SPI2, and the card's driver holds the bus for a whole
+/// command: a paint stage of twenty milliseconds queued behind a
+/// refill's chunks took 300 ms at a track start (2026-11-02). The card's
+/// readers — the ring once its eager zone is in hand, the art — wait
+/// for this to clear before each read, for a bounded time.
+pub static PAINTING: AtomicBool = AtomicBool::new(false);
+/// The longest a card reader here waits on [`PAINTING`].
+pub const PAINTING_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(60);
+
+/// Wait for the paint to finish, up to [`PAINTING_WAIT`].
+pub fn let_the_panel_paint() {
+    let until = std::time::Instant::now() + PAINTING_WAIT;
+    while PAINTING.load(std::sync::atomic::Ordering::Acquire)
+        && std::time::Instant::now() < until
+    {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
 
 /// The threads' placement on this board.
 pub struct Placing;

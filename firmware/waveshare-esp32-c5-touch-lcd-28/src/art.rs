@@ -397,12 +397,13 @@ fn fetch_folder(dir: &Path, size: u32) -> Fetched {
 }
 
 /// The whole file, a piece at a time with a breath between, so the
-/// music's reads get the bus.
+/// music's reads get the bus, and never while the panel is painted.
 fn read_in_pieces(mut file: std::fs::File) -> std::io::Result<Vec<u8>> {
     let len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
     let mut bytes = Vec::with_capacity(len);
     let mut piece = vec![0u8; PIECE];
     loop {
+        crate::threads::let_the_panel_paint();
         let n = file.read(&mut piece)?;
         if n == 0 {
             return Ok(bytes);

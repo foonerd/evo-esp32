@@ -19,7 +19,7 @@
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -100,6 +100,10 @@ const BLOCK: usize = 512;
 const EAGER: usize = 4 * CHUNK;
 /// The pause between chunks once [`EAGER`] is in hand.
 const PACE: Duration = Duration::from_millis(6);
+/// The longest a paced chunk waits for [`Tuning::hold`] to clear: a
+/// paint stage on a shared bus is a few tens of milliseconds; the ring
+/// has seconds in hand.
+const HOLD_MAX: Duration = Duration::from_millis(60);
 /// The reader's stack: the file system and the card's driver, or a
 /// network transport's read.
 const STACK: usize = 12 * 1024;
@@ -152,6 +156,10 @@ pub struct Tuning {
     pub pace: Duration,
     /// What the ring holds at most, `BEHIND` of it behind the decoder.
     pub capacity: usize,
+    /// Raised while the source's bus is wanted elsewhere (a panel on
+    /// the card's SPI, painting): a paced chunk waits for it to clear,
+    /// up to `HOLD_MAX`. An eager refill does not wait.
+    pub hold: Option<&'static AtomicBool>,
 }
 
 impl Tuning {
@@ -166,12 +174,19 @@ impl Tuning {
             eager: EAGER,
             pace: PACE,
             capacity: CAPACITY,
+            hold: None,
         }
     }
 
     /// The same tuning with its chunks from `memory`.
     pub const fn in_memory(mut self, memory: ChunkMemory) -> Self {
         self.memory = memory;
+        self
+    }
+
+    /// The same tuning, yielding the bus while `hold` is raised.
+    pub const fn yielding_to(mut self, hold: &'static AtomicBool) -> Self {
+        self.hold = Some(hold);
         self
     }
 
@@ -194,6 +209,7 @@ impl Tuning {
             eager: 8 * CHUNK,
             pace: PACE,
             capacity: CAPACITY,
+            hold: None,
         }
     }
 }
@@ -413,6 +429,12 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
         };
         if paced && !tuning.pace.is_zero() {
             thread::sleep(tuning.pace);
+        }
+        if let (true, Some(hold)) = (paced, tuning.hold) {
+            let until = Instant::now() + HOLD_MAX;
+            while hold.load(Relaxed) && Instant::now() < until {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
         // The card is waited on with the lock released: the decoder
         // keeps taking from the ring meanwhile.
