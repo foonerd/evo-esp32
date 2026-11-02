@@ -54,6 +54,7 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -230,20 +231,48 @@ impl SinkCell {
     }
 }
 
-/// The decode thread's state as the plugin reads it on each tick.
-struct SharedState(Mutex<State>);
+/// The decode thread's state as the plugin reads it on each tick, and
+/// a seek the plugin has asked for that the thread has not yet obeyed:
+/// until it has, the position published is the seek's target, so a
+/// block decoded in between cannot put the old position back.
+struct SharedState(Mutex<Shared>);
+
+struct Shared {
+    state: State,
+    /// The target, milliseconds, while a seek is in flight.
+    seeking: Option<u64>,
+}
 
 impl SharedState {
     fn new(state: State) -> Self {
-        Self(Mutex::new(state))
+        Self(Mutex::new(Shared {
+            state,
+            seeking: None,
+        }))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Shared> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn get(&self) -> State {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.lock().state.clone()
     }
 
     fn set(&self, state: &State) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = state.clone();
+        self.lock().state = state.clone();
+    }
+
+    fn seek_to(&self, target_ms: u64) {
+        self.lock().seeking = Some(target_ms);
+    }
+
+    fn seeking(&self) -> Option<u64> {
+        self.lock().seeking
+    }
+
+    fn seek_done(&self) {
+        self.lock().seeking = None;
     }
 }
 
@@ -580,6 +609,7 @@ impl Warden for PlaybackSymphonia {
                 let cap = h.state.track.as_ref().and_then(|t| t.duration_ms);
                 let target = cap.map_or(position_ms, |d| position_ms.min(d));
                 h.state.position_ms = target;
+                decoding.shared.seek_to(target);
                 Command::Seek(target)
             }
         };
@@ -908,6 +938,11 @@ impl Decoder {
                     // falls back to the published position.
                     Err(e) => log::warn!("seek: {}", e.0),
                 }
+                // A newer seek may be queued behind this one; its target
+                // stays the position until it is obeyed.
+                if self.shared.seeking() == Some(target) {
+                    self.shared.seek_done();
+                }
             }
             Command::Stop => return Some(Ending::Stopped),
         }
@@ -978,7 +1013,7 @@ impl Decoder {
             let decoding = Instant::now();
             let next = next_frames(&mut self.stream, &mut self.pending);
             measure::add(&measure::DECODE_US, decoding);
-            measure::PACKETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            measure::PACKETS.fetch_add(1, Ordering::Relaxed);
             match next {
                 Ok(Some((frames, rate, channels_now))) => {
                     // The decoder has the last word on the format: when
@@ -1031,10 +1066,13 @@ impl Decoder {
     }
 
     /// The position being heard: what the sink took, less what it still
-    /// holds; then the state as the plugin publishes it.
+    /// holds; then the state as the plugin publishes it. While a seek
+    /// is in flight the position is its target.
     fn publish(&mut self) {
         let rate = self.state.format.as_ref().map_or(0, |f| f.sample_rate);
-        self.state.position_ms = if rate == 0 {
+        self.state.position_ms = if let Some(target) = self.shared.seeking() {
+            target
+        } else if rate == 0 {
             self.base_ms
         } else {
             let held = self.sink.lock().held() as u64;
@@ -1619,7 +1657,7 @@ mod tests {
     fn wav_with(frames: usize, tags: &[(&[u8; 4], &str)]) -> PathBuf {
         static N: std::sync::atomic::AtomicUsize =
             std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let n = N.fetch_add(1, Ordering::Relaxed);
         let mut data = Vec::with_capacity(frames * 4);
         for i in 0..frames {
             let s = (i as i16).wrapping_mul(7);
