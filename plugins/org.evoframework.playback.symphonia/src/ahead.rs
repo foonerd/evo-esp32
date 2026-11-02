@@ -100,9 +100,9 @@ const BLOCK: usize = 512;
 const EAGER: usize = 4 * CHUNK;
 /// The pause between chunks once [`EAGER`] is in hand.
 const PACE: Duration = Duration::from_millis(6);
-/// The longest a paced chunk waits for [`Tuning::hold`] to clear: a
-/// paint stage on a shared bus is a few tens of milliseconds; the ring
-/// has seconds in hand.
+/// The longest a chunk waits for [`Tuning::hold`] to clear: a paint
+/// stage on a shared bus is a few tens of milliseconds; the ring has
+/// seconds in hand.
 const HOLD_MAX: Duration = Duration::from_millis(60);
 /// The reader's stack: the file system and the card's driver, or a
 /// network transport's read.
@@ -157,8 +157,11 @@ pub struct Tuning {
     /// What the ring holds at most, `BEHIND` of it behind the decoder.
     pub capacity: usize,
     /// Raised while the source's bus is wanted elsewhere (a panel on
-    /// the card's SPI, painting): a paced chunk waits for it to clear,
-    /// up to `HOLD_MAX`. An eager refill does not wait.
+    /// the card's SPI, painting): every chunk waits for it to clear, up
+    /// to `HOLD_MAX`. An eager refill waits too: at a track's start the
+    /// probe's reads are what the face's first paint of the new track
+    /// would otherwise queue behind, and a paint stage is shorter than
+    /// the sink's lead.
     pub hold: Option<&'static AtomicBool>,
 }
 
@@ -430,7 +433,7 @@ fn read_ahead<S: Read + Seek>(file: &mut S, shared: &Shared, tuning: Tuning) {
         if paced && !tuning.pace.is_zero() {
             thread::sleep(tuning.pace);
         }
-        if let (true, Some(hold)) = (paced, tuning.hold) {
+        if let Some(hold) = tuning.hold {
             let until = Instant::now() + HOLD_MAX;
             while hold.load(Relaxed) && Instant::now() < until {
                 thread::sleep(Duration::from_millis(1));
