@@ -4,7 +4,7 @@ All notable changes to evo-esp32 are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.7] - 2026-11-02
 
 - The volume is applied in 32 bits. The decoder hands the sink its
   samples in the stream's own width (16-bit for 16-bit material, as
