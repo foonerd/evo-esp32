@@ -250,17 +250,6 @@ fn main() -> anyhow::Result<()> {
     );
     let (running_slot, standing) = update::standing();
     info!("update: running from {running_slot}, {standing:?}");
-    // What a log line costs the thread that writes it, with whatever is
-    // on the console now: the figure the loop's logging is judged by.
-    let lines = 8;
-    let writing = Instant::now();
-    for i in 0..lines {
-        info!("console: line {i} of {lines}, seventy characters long or so, timed");
-    }
-    info!(
-        "console: {} us a line with the host as it is",
-        writing.elapsed().as_micros() / lines
-    );
 
     let Peripherals {
         i2c0,
