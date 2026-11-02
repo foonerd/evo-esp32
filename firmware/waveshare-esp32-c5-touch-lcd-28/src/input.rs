@@ -61,6 +61,10 @@ struct Queue {
     samples: Mutex<VecDeque<Touch>>,
     /// Reports that replaced an earlier one because the queue was full.
     coalesced: AtomicU32,
+    /// The longest a read of the controller took, microseconds.
+    read_us_max: AtomicU32,
+    /// Reads the controller failed.
+    read_errors: AtomicU32,
 }
 
 /// The reader thread's end the loop holds.
@@ -110,6 +114,15 @@ impl Input {
     /// loop was away longer than the queue holds.
     pub fn coalesced(&self) -> u32 {
         self.queue.coalesced.swap(0, Ordering::Relaxed)
+    }
+
+    /// The longest read of the controller since the last call,
+    /// microseconds, and the reads that failed.
+    pub fn reads(&self) -> (u32, u32) {
+        (
+            self.queue.read_us_max.swap(0, Ordering::Relaxed),
+            self.queue.read_errors.swap(0, Ordering::Relaxed),
+        )
     }
 }
 
@@ -163,7 +176,12 @@ fn run(
         if woke.is_none() && !down {
             continue;
         }
-        match controller.report() {
+        let reading = Instant::now();
+        let report = controller.report();
+        queue
+            .read_us_max
+            .fetch_max(reading.elapsed().as_micros() as u32, Ordering::Relaxed);
+        match report {
             Ok(r) => {
                 down = r.touching();
                 queue.push(Touch {
@@ -175,6 +193,7 @@ fn run(
                 errors = 0;
             }
             Err(e) => {
+                queue.read_errors.fetch_add(1, Ordering::Relaxed);
                 // A bus error mid-press: the finger is read again on the
                 // next edge or poll; a run of them is said once.
                 errors += 1;

@@ -2118,6 +2118,13 @@ fn main() -> anyhow::Result<()> {
             if coalesced > 0 {
                 warn!("touch: {coalesced} reports replaced an earlier one: the loop was away longer than the queue holds");
             }
+            let (read_us, read_errors) = input.reads();
+            if read_us > 5_000 || read_errors > 0 {
+                info!(
+                    "touch: the longest read of the controller {} ms, {read_errors} reads failed",
+                    read_us / 1000
+                );
+            }
             report_playback(&steward, track_started.elapsed());
             info!("core: {}", shares.line());
             {
