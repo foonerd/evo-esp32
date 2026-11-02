@@ -6,6 +6,39 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The volume is applied in 32 bits. The decoder hands the sink its
+  samples in the stream's own width (16-bit for 16-bit material, as
+  before; 32-bit for wider), the sink's reservoir keeps that width, and
+  the feeder widens each sample to 32 bits and scales it there in one
+  pass, so turning the volume down costs the source no bits: at 40%
+  (−30 dB) a 16-bit track keeps its 16 bits where it kept 11. The I2S
+  clocks 32-bit words in 32-bit slots and the ES8311, the PCM512x
+  boards and the WM8960 are told so. Measured against the 16-bit path
+  on a 96 kHz FLAC: the feeder 7% → 6% of the core, the decoder and
+  the face unchanged, no dropouts — the first attempt at this doubled
+  the audio's memory traffic and took a fifth of the core, which is
+  why this one was measured at every step.
+
+- The sink's write to its reservoir makes one copy, not two: stereo
+  16-bit samples go straight from the decoder's buffer, halving the
+  write's cost (11% → 5% of the core at 96 kHz).
+
+- A slide on the volume slider is acted on once a loop turn, where the
+  finger is now, instead of once a report. Under a 96 kHz track a paint
+  stage queues a dozen reports and each was a request and a console
+  line, and the console costs the loop milliseconds a line in play, so
+  the knob trailed the finger by a stage and a dozen lines; it follows
+  now. The level is logged once a gesture, on the lift, with how the
+  finger was followed; the heartbeat says if a touch read ran long or
+  failed, and what its own lines cost to say.
+
+- The seek bar stays where the finger let go. The decoder reported the
+  target as the seek was asked, then the position it was at before
+  taking the command, then the target — the bar stepped back and
+  forward on every seek. The decoder now reports the target until it
+  has obeyed the seek, and the face keeps the target on the bar until
+  the reported position has landed near it.
+
 - The HTTP client's send buffer holds a redirect's whole request line.
   GitHub answers a release-asset request with a redirect to a signed
   URL of about 990 characters; with a 1 KB send buffer, 64 bytes were
