@@ -250,6 +250,17 @@ fn main() -> anyhow::Result<()> {
     );
     let (running_slot, standing) = update::standing();
     info!("update: running from {running_slot}, {standing:?}");
+    // What a log line costs the thread that writes it, with whatever is
+    // on the console now: the figure the loop's logging is judged by.
+    let lines = 8;
+    let writing = Instant::now();
+    for i in 0..lines {
+        info!("console: line {i} of {lines}, seventy characters long or so, timed");
+    }
+    info!(
+        "console: {} us a line with the host as it is",
+        writing.elapsed().as_micros() / lines
+    );
 
     let Peripherals {
         i2c0,
@@ -964,6 +975,7 @@ fn main() -> anyhow::Result<()> {
     // face next looks; and the longest turn of the loop, which is the
     // longest a report can wait to be read.
     let mut touch_waiting: Option<Instant> = None;
+    let mut gesture = Gesture::default();
     let mut touch_wait_max = Duration::ZERO;
     let mut touch_waits = 0u32;
     let mut turn_started = Instant::now();
@@ -1105,11 +1117,18 @@ fn main() -> anyhow::Result<()> {
         }
         // Every report the reader took since the last turn, oldest first,
         // each at the time it was read: a tap that came and went during a
-        // paint stage is still a tap.
+        // paint stage is still a tap. A slide's steps are read in order
+        // too, but only where the finger is now is acted on: one request
+        // a turn, however many reports queued while the face painted.
+        let mut slid_to: Option<u8> = None;
         input.drain(&mut touches);
+        if !touches.is_empty() {
+            gesture.turns += 1;
+        }
         for s in touches.drain(..) {
             last_touch = started + Duration::from_millis(s.at_ms);
             touch_waiting.get_or_insert(last_touch);
+            gesture.report(s.at_ms, started.elapsed().as_millis() as u64);
             let p = face.layout().map_touch(s.x, s.y);
             if let Some(intent) = tracker.sample(
                 |p| face.hit(p),
@@ -1203,15 +1222,14 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     Intent::Slide(Hotspot::Volume(f)) => {
+                        slid_to = Some((f * 100.0).round() as u8);
+                    }
+                    Intent::Commit(Hotspot::Volume(f)) => {
                         let want = (f * 100.0).round() as u8;
-                        if want != wanted {
-                            wanted = want;
-                            set_volume(&mut steward, wanted, t);
-                            // The output has the level as the
-                            // request returns: the sink takes it
-                            // here, not at the next paint.
-                            apply_level(&steward, &volume, &mut level);
-                        }
+                        slid_to = Some(want);
+                        // One line a gesture, with how the finger was
+                        // followed.
+                        info!("volume: {want}%; {}", gesture.take());
                     }
                     Intent::Slide(Hotspot::Seek(f)) => {
                         if current.is_some() {
@@ -1220,6 +1238,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     Intent::Commit(Hotspot::Seek(f)) => {
                         scrub = None;
+                        info!("seek: {}", gesture.take());
                         let duration = playback_state(&steward)
                             .and_then(|pb| pb.track)
                             .and_then(|tr| tr.duration_ms);
@@ -1451,6 +1470,15 @@ fn main() -> anyhow::Result<()> {
                     Intent::Scroll(dy) => face.scroll(dy),
                     Intent::Tap(_) | Intent::Slide(_) | Intent::Commit(_) => {}
                 }
+            }
+        }
+        if let Some(want) = slid_to {
+            if want != wanted {
+                wanted = want;
+                set_volume(&mut steward, wanted, t);
+                // The output has the level as the request returns: the
+                // sink takes it here, not at the next paint.
+                apply_level(&steward, &volume, &mut level, false);
             }
         }
         // The network and the hand-over of the sink keep their cadence
@@ -1937,7 +1965,7 @@ fn main() -> anyhow::Result<()> {
                 HappeningKind::Updated | HappeningKind::Announced
             ) && h.subject.as_ref().is_some_and(is_output)
             {
-                apply_level(&steward, &volume, &mut level);
+                apply_level(&steward, &volume, &mut level, true);
             }
             let kind = serde_json::to_string(&h.kind).unwrap_or_default();
             // Position updates come every tick; the heartbeat reports them.
@@ -2532,11 +2560,13 @@ fn is_output(id: &SubjectId) -> bool {
 /// sink last took it; `level` is what the sink has. The output's state
 /// is current as soon as a request to it returns, and a change from
 /// anywhere else arrives as an update to its subject, so the sink is
-/// never waiting on a paint.
+/// never waiting on a paint. `say` logs the level: a change from
+/// elsewhere is said here, a slide once, on the lift.
 fn apply_level(
     steward: &Steward,
     volume: &sink::Volume,
     level: &mut Option<(u8, bool)>,
+    say: bool,
 ) {
     let Some(out) = output_state(steward) else {
         return;
@@ -2544,11 +2574,13 @@ fn apply_level(
     let now = (out.volume, out.muted);
     if *level != Some(now) {
         volume.set(out.volume, out.muted);
-        info!(
-            "volume: {}%{}",
-            out.volume,
-            if out.muted { ", muted" } else { "" }
-        );
+        if say {
+            info!(
+                "volume: {}%{}",
+                out.volume,
+                if out.muted { ", muted" } else { "" }
+            );
+        }
         *level = Some(now);
     }
 }
@@ -3196,6 +3228,48 @@ fn skip(
         if let Err(e) = steward.release(h, now) {
             warn!("release {}: {e:?}", h.0);
         }
+    }
+}
+
+/// How one gesture on a slider was followed: the reports the reader
+/// took (and how far apart, as read), how late the loop handled them,
+/// and in how many turns. Said once, on the lift.
+#[derive(Default)]
+struct Gesture {
+    reports: u32,
+    turns: u32,
+    first_ms: Option<u64>,
+    last_ms: u64,
+    /// The longest interval between two reports, as the reader read them.
+    read_gap_ms: u64,
+    /// The oldest a report was when the loop handled it.
+    late_ms: u64,
+}
+
+impl Gesture {
+    /// A report read at `at_ms`, handled now at `now_ms` (both the loop's
+    /// clock).
+    fn report(&mut self, at_ms: u64, now_ms: u64) {
+        if let Some(_first) = self.first_ms {
+            self.read_gap_ms =
+                self.read_gap_ms.max(at_ms.saturating_sub(self.last_ms));
+        } else {
+            self.first_ms = Some(at_ms);
+        }
+        self.last_ms = at_ms;
+        self.reports += 1;
+        self.late_ms = self.late_ms.max(now_ms.saturating_sub(at_ms));
+    }
+
+    /// The gesture's line; the account starts again.
+    fn take(&mut self) -> String {
+        let span = self.last_ms.saturating_sub(self.first_ms.unwrap_or(0));
+        let line = format!(
+            "{} reports in {span} ms handled in {} turns; the reader's longest gap {} ms; the loop handled a report up to {} ms late",
+            self.reports, self.turns, self.read_gap_ms, self.late_ms
+        );
+        *self = Self::default();
+        line
     }
 }
 
